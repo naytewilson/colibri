@@ -731,30 +731,23 @@ double g_dn_sub[12]; // DN: QKV_PROJ Z_PROJ B_PROJ A_PROJ CONV QK_NORM REC_DECAY
 double g_tm_step=0;                           /* step() total (decode) */
 static double g_tm_win_moe=0; static int g_tm_win_n=0;
 
-/* --- MoE high-resolution profile counters --- */
-static uint64_t moe_router_calls = 0;
-static uint64_t moe_router_hits = 0;      /* successful top-k selection */
-static uint64_t moe_admission_misses = 0; /* cache miss on expert get */
-static uint64_t moe_int3_gate = 0;        /* shared expert gate (SwiGLU gate) */
-static uint64_t moe_int3_up = 0;          /* INT3 expert GEMV up (GEMV x gate) */
-static uint64_t moe_int3_down = 0;        /* INT3 expert GEMV down (GEMV output proj) */
-static uint64_t moe_int4_gate = 0;        /* shared expert gate (INT4) */
-static uint64_t moe_int4_up = 0;          /* INT4 expert GEMV up */
-static uint64_t moe_int4_down = 0;        /* INT4 expert GEMV down */
-static uint64_t moe_shared_expert = 0;    /* shared expert SwiGLU path */
-static uint64_t moe_weighted_accum = 0;   /* os[d] += w * hh[d] accumulation */
-static uint64_t moe_other = 0;            /* everything else */
+/* --- MoE high-resolution profile timers (ms) & counters --- */
+static double g_moe_sub[10]; /* 0=router, 1=lookup, 2=i3_gate, 3=i3_up, 4=i3_down, 5=i4_gate, 6=i4_up, 7=i4_down, 8=shared, 9=weighted_accum */
+static uint64_t g_routed_int3_count = 0;
+static uint64_t g_routed_int4_count = 0;
+static uint64_t g_cache_hit_int3 = 0, g_cache_hit_int4 = 0;
+static uint64_t g_cache_miss_int3 = 0, g_cache_miss_int4 = 0;
+static uint64_t g_admitted_bytes_int3 = 0, g_admitted_bytes_int4 = 0;
+static uint64_t g_expert_gemv_parallel_invocations = 0;
+static int g_expert_parallel_mode = -1;
 
-static uint64_t routed_int3_selections = 0;   /* per-token count */
-static uint64_t routed_int4_selections = 0;   /* per-token count */
-static uint64_t expert_cache_hits = 0;         /* by format */
-static uint64_t expert_cache_misses = 0;       /* by format */
-static uint64_t bytes_admitted = 0;            /* by format */
-
-/* --- MoE per-token tallies (reset each decode) --- */
-static int moe_router_sel_per_tok = 0;
-static int moe_int3_sel_per_tok = 0;
-static int moe_int4_sel_per_tok = 0;
+static int expert_parallel_on(void) {
+    if (g_expert_parallel_mode < 0) {
+        const char *ep = getenv("COLI_EXPERT_PARALLEL");
+        g_expert_parallel_mode = (ep && atoi(ep) > 0) ? 1 : 0;
+    }
+    return g_expert_parallel_mode;
+}
 
 static void tm_add(int S, int idx, double ms){
     if(S==1){
@@ -781,12 +774,47 @@ static void tm_report(void){
         fprintf(stderr,"[timers]   step() total: %.1f ms/token (outside the phases: %.1f)\n",
             g_tm_step/g_tm_dec_tokens,
             (g_tm_step-(g_tm_dec[0]+g_tm_dec[1]+g_tm_dec[2]+g_tm_dec[5]))/g_tm_dec_tokens);
-    if(g_dn_sub[0]+g_dn_sub[1]+g_dn_sub[2]+g_dn_sub[3]>0)
-        fprintf(stderr,"[timers]   dn-sub: QKV_PROJ %.1f | Z_PROJ %.1f | B_PROJ %.1f | A_PROJ %.1f | CONV %.1f | QK_NORM %.1f | REC_DECAY %.1f | REC_KV %.1f | REC_OUTER_UPDATE %.1f | REC_QS %.1f | GATED_NORM %.1f | OUT_PROJ %.1f ms/token\n",\
-            g_dn_sub[0]/g_tm_dec_tokens,g_dn_sub[1]/g_tm_dec_tokens,g_dn_sub[2]/g_tm_dec_tokens,g_dn_sub[3]/g_tm_dec_tokens,\
-            g_dn_sub[4]/g_tm_dec_tokens,g_dn_sub[5]/g_tm_dec_tokens,g_dn_sub[6]/g_tm_dec_tokens,g_dn_sub[7]/g_tm_dec_tokens,\
-            g_dn_sub[8]/g_tm_dec_tokens,g_dn_sub[9]/g_tm_dec_tokens,g_dn_sub[10]/g_tm_dec_tokens,g_dn_sub[11]/g_tm_dec_tokens);1]/g_tm_dec_tokens,g_dn_sub[2]/g_tm_dec_tokens,g_dn_sub[3]/g_tm_dec_tokens);
-    
+    double dn_tot = 0; for(int i=0;i<12;i++) dn_tot += g_dn_sub[i];
+    if(dn_tot > 0)
+        fprintf(stderr,"[timers]   dn-sub: QKV %.1f | Z %.1f | B %.1f | A %.1f | CONV %.1f | QK_N %.1f | REC[DEC %.1f KV %.1f OUT %.1f QS %.1f] | NORM %.1f | OUT %.1f ms/tok\n",
+            g_dn_sub[0]/g_tm_dec_tokens,g_dn_sub[1]/g_tm_dec_tokens,g_dn_sub[2]/g_tm_dec_tokens,g_dn_sub[3]/g_tm_dec_tokens,
+            g_dn_sub[4]/g_tm_dec_tokens,g_dn_sub[5]/g_tm_dec_tokens,g_dn_sub[6]/g_tm_dec_tokens,g_dn_sub[7]/g_tm_dec_tokens,
+            g_dn_sub[8]/g_tm_dec_tokens,g_dn_sub[9]/g_tm_dec_tokens,g_dn_sub[10]/g_tm_dec_tokens,g_dn_sub[11]/g_tm_dec_tokens);
+
+    if(g_moe_sub[0]+g_moe_sub[1]+g_moe_sub[2]+g_moe_sub[3]+g_moe_sub[4]+g_moe_sub[5]+g_moe_sub[6]+g_moe_sub[7]+g_moe_sub[8]+g_moe_sub[9]>0) {
+        double routed_i3_ms = g_moe_sub[2] + g_moe_sub[3] + g_moe_sub[4];
+        double routed_i4_ms = g_moe_sub[5] + g_moe_sub[6] + g_moe_sub[7];
+        double compute_only_ms = routed_i3_ms + routed_i4_ms;
+        double total_selections = (double)(g_routed_int3_count + g_routed_int4_count);
+        double i4_pct = total_selections > 0 ? (100.0 * (double)g_routed_int4_count / total_selections) : 0.0;
+        uint64_t logical_bytes_per_tok = (g_tm_dec_tokens > 0) ?
+            (uint64_t)((double)g_routed_int3_count * 1376392.0 / g_tm_dec_tokens + (double)g_routed_int4_count * 1769608.0 / g_tm_dec_tokens) : 0;
+
+        fprintf(stderr, "\n=== HIGH-RESOLUTION MOE BREAKDOWN (decode tokens: %ld) ===\n", g_tm_dec_tokens);
+        fprintf(stderr, "  Total MoE phase:                 %8.2f ms/token (100.0%%)\n", g_tm_dec[2] / g_tm_dec_tokens);
+        fprintf(stderr, "  Router (matmul + top-k):          %8.2f ms/token (%5.1f%%)\n", g_moe_sub[0] / g_tm_dec_tokens, 100.0 * g_moe_sub[0] / g_tm_dec[2]);
+        fprintf(stderr, "  Expert slot acquisition:         %8.2f ms/token (%5.1f%%)\n", g_moe_sub[1] / g_tm_dec_tokens, 100.0 * g_moe_sub[1] / g_tm_dec[2]);
+        fprintf(stderr, "  Routed expert compute (only):    %8.2f ms/token (%5.1f%%)\n", compute_only_ms / g_tm_dec_tokens, 100.0 * compute_only_ms / g_tm_dec[2]);
+        fprintf(stderr, "    - INT3 routed (gate/up/down):  %8.2f ms/token (gate %.2f, up %.2f, down %.2f)\n",
+                routed_i3_ms / g_tm_dec_tokens, g_moe_sub[2]/g_tm_dec_tokens, g_moe_sub[3]/g_tm_dec_tokens, g_moe_sub[4]/g_tm_dec_tokens);
+        fprintf(stderr, "    - INT4 routed (gate/up/down):  %8.2f ms/token (gate %.2f, up %.2f, down %.2f)\n",
+                routed_i4_ms / g_tm_dec_tokens, g_moe_sub[5]/g_tm_dec_tokens, g_moe_sub[6]/g_tm_dec_tokens, g_moe_sub[7]/g_tm_dec_tokens);
+        fprintf(stderr, "  Shared expert (SwiGLU + gate):   %8.2f ms/token (%5.1f%%)\n", g_moe_sub[8] / g_tm_dec_tokens, 100.0 * g_moe_sub[8] / g_tm_dec[2]);
+        fprintf(stderr, "  Weighted output accumulation:    %8.2f ms/token (%5.1f%%)\n", g_moe_sub[9] / g_tm_dec_tokens, 100.0 * g_moe_sub[9] / g_tm_dec[2]);
+        fprintf(stderr, "  Admission (demand NVMe I/O):     %8.2f ms/token\n", g_demand_expert_admission_ms / g_tm_dec_tokens);
+        fprintf(stderr, "  --- Routed Format Mix ---\n");
+        fprintf(stderr, "  INT3 routed selections/token:    %8.2f\n", (double)g_routed_int3_count / g_tm_dec_tokens);
+        fprintf(stderr, "  INT4 routed selections/token:    %8.2f\n", (double)g_routed_int4_count / g_tm_dec_tokens);
+        fprintf(stderr, "  Actual routed INT4 percentage:   %8.2f%%\n", i4_pct);
+        fprintf(stderr, "  Cache hits (INT3 / INT4):        %llu / %llu\n", (unsigned long long)g_cache_hit_int3, (unsigned long long)g_cache_hit_int4);
+        fprintf(stderr, "  Cache misses (INT3 / INT4):      %llu / %llu\n", (unsigned long long)g_cache_miss_int3, (unsigned long long)g_cache_miss_int4);
+        fprintf(stderr, "  Admitted bytes (INT3 / INT4):    %.2f MB / %.2f MB\n", (double)g_admitted_bytes_int3 / 1048576.0, (double)g_admitted_bytes_int4 / 1048576.0);
+        fprintf(stderr, "  --- Traffic & Parallelism ---\n");
+        fprintf(stderr, "  LOGICAL_WEIGHT_BYTES_PROCESSED:  %llu B/token (%.2f MB/token)\n", (unsigned long long)logical_bytes_per_tok, (double)logical_bytes_per_tok / 1048576.0);
+        fprintf(stderr, "  Routed GEMV parallel invocations: %8.1f / token\n", (double)g_expert_gemv_parallel_invocations / g_tm_dec_tokens);
+        fprintf(stderr, "===========================================================\n");
+    }
+
     fprintf(stderr,"\n[expert_io] demand: %llu loads (%llu bytes, %.2f MB), cum_expert_admission: %.1f ms, avg_latency: %.2f ms/load\n",
             (unsigned long long)g_demand_loads, (unsigned long long)g_demand_bytes,
             (double)g_demand_bytes / 1048576.0, g_demand_expert_admission_ms,
@@ -862,7 +890,7 @@ static void matmul_q(float *y, const float *x, const int8_t *q, const float *sca
 #if defined(__AVX2__) && defined(__FMA__)
     /* Hand-vectorized int8->f32 GEMV (gcc does not auto-vectorize the
      * convert+accumulate chain). 32 weights per iteration, FMA accumulate. */
-    #pragma omp parallel for schedule(static) if(O >= 256)
+    #pragma omp parallel for schedule(static) if(O >= 256 && !omp_in_parallel())
     for (int o = 0; o < O; o++) {
         const int8_t *w = q + (int64_t)o * I;
         __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
@@ -885,7 +913,7 @@ static void matmul_q(float *y, const float *x, const int8_t *q, const float *sca
         y[o] = acc * scale[o];
     }
 #else
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(static) if(O >= 256 && !omp_in_parallel())
     for (int o = 0; o < O; o++) {
         const int8_t *w = q + (int64_t)o * I;
         float acc = 0.f;
@@ -903,7 +931,7 @@ static void matmul_q_gs(float *y, const float *x, const int8_t *q, const float *
     int ng = (I + gs - 1) / gs;
 #if defined(__AVX2__) && defined(__FMA__)
     if ((gs & 31) == 0) {
-        #pragma omp parallel for schedule(static) if(O >= 256)
+        #pragma omp parallel for schedule(static) if(O >= 256 && !omp_in_parallel())
         for (int o = 0; o < O; o++) {
             const int8_t *w = q + (int64_t)o * I;
             const float *sc = scale + (int64_t)o * ng;
@@ -927,7 +955,7 @@ static void matmul_q_gs(float *y, const float *x, const int8_t *q, const float *
         return;
     }
 #endif
-    #pragma omp parallel for schedule(static) if(O >= 256)
+    #pragma omp parallel for schedule(static) if(O >= 256 && !omp_in_parallel())
     for (int o = 0; o < O; o++) {
         const int8_t *w = q + (int64_t)o * I;
         const float *sc = scale + (int64_t)o * ng;
@@ -943,7 +971,7 @@ static void matmul_q_gs(float *y, const float *x, const int8_t *q, const float *
 }
 
 static void matmul_i4_row(float *y, const float *x, const uint8_t *q4, const float *scale, int I, int O) {
-    #pragma omp parallel for schedule(static) if(O >= 256)
+    #pragma omp parallel for schedule(static) if(O >= 256 && !omp_in_parallel())
     for (int o = 0; o < O; o++) {
         const uint8_t *w4 = q4 + (int64_t)o * (I / 2);
         float acc = 0.f;
@@ -965,7 +993,7 @@ static void matmul_i4_gs_fast(float *y, const float *x, const uint8_t *q4, const
         const __m128i m4 = _mm_set1_epi8(0x0F);
         const __m128i s8 = _mm_set1_epi8(0x08);
 
-        #pragma omp parallel for schedule(static) if(O >= 256)
+        #pragma omp parallel for schedule(static) if(O >= 256 && !omp_in_parallel())
         for (int o = 0; o < O; o++) {
             const uint8_t *w4 = q4 + (int64_t)o * (I / 2);
             const float *sc = scale + (int64_t)o * ng;
@@ -1002,7 +1030,7 @@ static void matmul_i4_gs_fast(float *y, const float *x, const uint8_t *q4, const
         return;
     }
 #endif
-    #pragma omp parallel for schedule(static) if(O >= 256)
+    #pragma omp parallel for schedule(static) if(O >= 256 && !omp_in_parallel())
     for (int o = 0; o < O; o++) {
         const uint8_t *w4 = q4 + (int64_t)o * (I / 2);
         const float *sc = scale + (int64_t)o * ng;
@@ -1107,7 +1135,7 @@ static inline float dot_i3g64_avx2(const uint8_t *lo, const uint8_t *hi, const f
 static void matmul_i3_gs_fast(float *y, const float *x, const uint8_t *q3, const float *scale, int I, int O, int gs) {
     (void)gs;
     int64_t ng = i3_groups(I), rb = i3_rowbytes(I);
-    #pragma omp parallel for schedule(static) if(O >= 256)
+    #pragma omp parallel for schedule(static) if(O >= 256 && !omp_in_parallel())
     for (int o = 0; o < O; o++) {
         const uint8_t *wrow = q3 + (int64_t)o * rb;
         const float *srow = scale + (int64_t)o * ng;
@@ -1701,6 +1729,8 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pil
         g_demand_loads++;
         g_demand_bytes += total_loaded_bytes;
         g_demand_expert_admission_ms += _io_dt;
+        if (s->is_int3) g_admitted_bytes_int3 += total_loaded_bytes;
+        else if (s->is_int4) g_admitted_bytes_int4 += total_loaded_bytes;
     }
     pthread_mutex_unlock(&g_io_stats_mx);
 }
@@ -1710,6 +1740,8 @@ static void expert_get(Model *m, int layer, int eid, Slot **out) {
     pthread_mutex_lock(&g_pilot_mx);
     for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) {
         m->hits++; lc->slots[i].used = ++m->clock; *out = &lc->slots[i];
+        if ((*out)->is_int3) g_cache_hit_int3++;
+        else if ((*out)->is_int4) g_cache_hit_int4++;
         pthread_mutex_unlock(&g_pilot_mx); return;
     }
     m->miss++;
@@ -1756,6 +1788,8 @@ static void expert_get(Model *m, int layer, int eid, Slot **out) {
     load_expert_merged(m, layer, eid, s, 0);
     pthread_mutex_lock(&g_pilot_mx);
     s->eid = eid; s->pinned = m->is_pinned[layer * c->n_experts + eid]; s->used = ++m->clock;
+    if (s->is_int3) g_cache_miss_int3++;
+    else if (s->is_int4) g_cache_miss_int4++;
     *out = s; pthread_mutex_unlock(&g_pilot_mx);
 }
 
@@ -1956,15 +1990,15 @@ static void attention(Model *m, Layer *l, int layer, float *x, int S, int pos_ba
 static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
     Cfg *c = &m->c; int D = c->hidden, E = c->n_experts, K = c->topk, I = c->inter;
     float *logits = falloc((int64_t)S*E);
-    double _tr = tm_on() ? tm_now() : 0.0;
+    double _tr0 = tm_on() ? tm_now() : 0.0;
     matmul_d(logits, x, l->gate, S, D, E);
-    if (tm_on()) tm_add(S, 4, tm_now()-_tr);
     if (c->has_bias && l->gate_bias) {
         for (int s = 0; s < S; s++) { float *pr = logits + (int64_t)s*E; for (int e = 0; e < E; e++) pr[e] += l->gate_bias[e]; }
     }
     memset(out, 0, (int64_t)S*D*sizeof(float));
     float *g = falloc(I), *u = falloc(I), *hh = falloc(D);
     float *sh = falloc(I), *shu = falloc(I), *shd = falloc(D);  /* shared expert scratch */
+
     for (int s = 0; s < S; s++) {
         float *pr = logits + (int64_t)s*E;
         if (m->momentum_logits && m->pilot_smooth > 0.f) {
@@ -2009,44 +2043,125 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
             for (int kk = 0; kk < K; kk++) if (idx[kk] >= 0) m->seen[(int64_t)layer * E + idx[kk]] = 1;
         }
         /* HF renormalizes the top-k router weights unconditionally */
-        /* profile: parallel region entry */
-        static int parallel_region_count = 0;
-        parallel_region_count++;
         { float sm=0; for (int kk=0;kk<K;kk++) sm+=val[kk]; if (sm>0) for (int kk=0;kk<K;kk++) val[kk]/=sm; }
 
+        if (tm_on()) {
+            double dt_r = tm_now() - _tr0;
+            tm_add(S, 4, dt_r);
+            if (S == 1) g_moe_sub[0] += dt_r;
+        }
+
         const float *xs = x + (int64_t)s*D;
-        {
-            if (m->freq) {
-                uint32_t *freq_l = m->freq + (int64_t)layer * E;
-                for (int kk = 0; kk < K; kk++) if (idx[kk] >= 0) freq_l[idx[kk]]++;
+        if (m->freq) {
+            uint32_t *freq_l = m->freq + (int64_t)layer * E;
+            for (int kk = 0; kk < K; kk++) if (idx[kk] >= 0) freq_l[idx[kk]]++;
+        }
+        if (m->router_mass) {
+            double *mass_l = m->router_mass + (int64_t)layer * E;
+            for (int kk = 0; kk < K; kk++) if (idx[kk] >= 0) mass_l[idx[kk]] += val[kk];
+        }
+
+        /* Expert slot acquisition */
+        double _t_lk = tm_on() ? tm_now() : 0.0;
+        Slot *e_slots[256];
+        for (int kk = 0; kk < K; kk++) {
+            expert_get(m, layer, idx[kk], &e_slots[kk]);
+            if (S == 1) {
+                if (e_slots[kk]->is_int3) g_routed_int3_count++;
+                else if (e_slots[kk]->is_int4) g_routed_int4_count++;
             }
-            if (m->router_mass) {
-                double *mass_l = m->router_mass + (int64_t)layer * E;
-                for (int kk = 0; kk < K; kk++) if (idx[kk] >= 0) mass_l[idx[kk]] += val[kk];
-            }
+        }
+        if (tm_on() && S == 1) g_moe_sub[1] += tm_now() - _t_lk;
+
+        if (expert_parallel_on() && K <= 8) {
+            /* TOP-K EXPERT-PARALLEL TOPOLOGY (Gate 4) */
+            double _t_ep = tm_on() ? tm_now() : 0.0;
+            float ep_g[8][512], ep_u[8][512], ep_hh[8][2048];
+            #pragma omp parallel for schedule(static) num_threads(K)
             for (int kk = 0; kk < K; kk++) {
-                Slot *e; expert_get(m, layer, idx[kk], &e);
+                Slot *e = e_slots[kk];
+                float *gk = ep_g[kk], *uk = ep_u[kk], *hk = ep_hh[kk];
                 if (e->is_int3 && e->w3) {
-                    matmul_i3_qe(g, xs, e->g3, e->gs, D, I);
-                    matmul_i3_qe(u, xs, e->u3, e->us, D, I);
-                    for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
-                    matmul_i3_qe(hh, g, e->d3, e->ds, I, D);
+                    matmul_i3_qe(gk, xs, e->g3, e->gs, D, I);
+                    matmul_i3_qe(uk, xs, e->u3, e->us, D, I);
+                    for (int i = 0; i < I; i++) { float gv = gk[i]; gk[i] = (gv / (1.f + expf(-gv))) * uk[i]; }
+                    matmul_i3_qe(hk, gk, e->d3, e->ds, I, D);
                 } else if (e->is_int4 && e->w4) {
-                    matmul_i4_qe(g, xs, e->g4, e->gs, D, I);
-                    matmul_i4_qe(u, xs, e->u4, e->us, D, I);
+                    matmul_i4_qe(gk, xs, e->g4, e->gs, D, I);
+                    matmul_i4_qe(uk, xs, e->u4, e->us, D, I);
+                    for (int i = 0; i < I; i++) { float gv = gk[i]; gk[i] = (gv / (1.f + expf(-gv))) * uk[i]; }
+                    matmul_i4_qe(hk, gk, e->d4, e->ds, I, D);
+                } else {
+                    matmul_qe(gk, xs, e->g, e->gs, D, I);
+                    matmul_qe(uk, xs, e->u, e->us, D, I);
+                    for (int i = 0; i < I; i++) { float gv = gk[i]; gk[i] = (gv / (1.f + expf(-gv))) * uk[i]; }
+                    matmul_qe(hk, gk, e->d, e->ds, I, D);
+                }
+            }
+            if (tm_on() && S == 1) {
+                double dt_ep = tm_now() - _t_ep;
+                g_moe_sub[2] += dt_ep; /* record into routed expert compute */
+                g_expert_gemv_parallel_invocations += 1; /* 1 parallel region per layer */
+            }
+
+            /* Deterministic reduction in exact k order */
+            double _t_acc = tm_on() ? tm_now() : 0.0;
+            float *os = out + (int64_t)s * D;
+            for (int kk = 0; kk < K; kk++) {
+                float w = val[kk];
+                float *hk = ep_hh[kk];
+                for (int d = 0; d < D; d++) os[d] += w * hk[d];
+            }
+            if (tm_on() && S == 1) g_moe_sub[9] += tm_now() - _t_acc;
+        } else {
+            /* REFERENCE TOPOLOGY (Expert-serial, GEMV-parallel) */
+            for (int kk = 0; kk < K; kk++) {
+                Slot *e = e_slots[kk];
+                double _t_g = 0, _t_u = 0, _t_d = 0;
+                if (e->is_int3 && e->w3) {
+                    _t_g = tm_on() ? tm_now() : 0;
+                    matmul_i3_qe(g, xs, e->g3, e->gs, D, I);
+                    if (tm_on() && S == 1) g_moe_sub[2] += tm_now() - _t_g;
+
+                    _t_u = tm_on() ? tm_now() : 0;
+                    matmul_i3_qe(u, xs, e->u3, e->us, D, I);
+                    if (tm_on() && S == 1) g_moe_sub[3] += tm_now() - _t_u;
+
                     for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
+
+                    _t_d = tm_on() ? tm_now() : 0;
+                    matmul_i3_qe(hh, g, e->d3, e->ds, I, D);
+                    if (tm_on() && S == 1) g_moe_sub[4] += tm_now() - _t_d;
+                } else if (e->is_int4 && e->w4) {
+                    _t_g = tm_on() ? tm_now() : 0;
+                    matmul_i4_qe(g, xs, e->g4, e->gs, D, I);
+                    if (tm_on() && S == 1) g_moe_sub[5] += tm_now() - _t_g;
+
+                    _t_u = tm_on() ? tm_now() : 0;
+                    matmul_i4_qe(u, xs, e->u4, e->us, D, I);
+                    if (tm_on() && S == 1) g_moe_sub[6] += tm_now() - _t_u;
+
+                    for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
+
+                    _t_d = tm_on() ? tm_now() : 0;
                     matmul_i4_qe(hh, g, e->d4, e->ds, I, D);
+                    if (tm_on() && S == 1) g_moe_sub[7] += tm_now() - _t_d;
                 } else {
                     matmul_qe(g, xs, e->g, e->gs, D, I);
                     matmul_qe(u, xs, e->u, e->us, D, I);
                     for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
                     matmul_qe(hh, g, e->d, e->ds, I, D);
                 }
+                if (tm_on() && S == 1) g_expert_gemv_parallel_invocations += 3; /* 3 GEMV parallel regions */
+
+                double _t_acc = tm_on() ? tm_now() : 0;
                 float w = val[kk];
                 float *os = out + (int64_t)s*D;
                 for (int d = 0; d < D; d++) os[d] += w * hh[d];
+                if (tm_on() && S == 1) g_moe_sub[9] += tm_now() - _t_acc;
             }
         }
+
         /* shared expert (SwiGLU), sigmoid-gated by shared_expert_gate */
         double _ts = tm_on() ? tm_now() : 0.0;
         int Ish = c->shared_inter;
@@ -2062,23 +2177,15 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
         }
         float *os = out + (int64_t)s*D;
         for (int d = 0; d < D; d++) os[d] += sgate * shd[d];
-        if (tm_on()) tm_add(S, 3, tm_now()-_ts);
+        if (tm_on()) {
+            double dt_sh = tm_now() - _ts;
+            tm_add(S, 3, dt_sh);
+            if (S == 1) g_moe_sub[8] += dt_sh;
+        }
     }
     free(logits); free(g); free(u); free(hh); free(sh); free(shu); free(shd);
 }
 
-/* Gated DeltaNet (linear_attention) forward — recurrent gated-delta-rule.
- * Mirrors HF Qwen3_5MoeGatedDeltaNet with a carried causal-conv ring + recurrent
- * state S[h]=[kdim,vdim]. The conv ring and S persist in m->DN_conv/rec[layer]
- * across step() calls (prefill chunk -> decode tokens). Math validated
- * torch-free against the prefill (zero-padded conv) path in tools/_ref_dn_stream.py.
- *
- * Per token: qkv=x@qkv^T; z=x@z^T; b=x@b^T; a=x@a^T; beta=sigmoid(b);
- *   g=-exp(A_log)*softplus(a+dt_bias);
- *   conv_out[c]=silu(sum_{kk} w[kk]*ring[kk] + w[convk-1]*qkv[c]); advance ring;
- *   split conv_out -> q_in/k_in/v_in; repeat_interleave q,k by rep; l2norm
- *   (q scaled by 1/sqrt(kdim)); recurrence S[h]*=exp(g); kv=k@S; delta=(v-kv)*beta;
- *   S+=k (x) delta; out=q@S; per-head Gated RMSNorm (plain weight) -> out_proj. */
 static void deltanet(Model *m, Layer *l, int layer, float *x, int S, int pos_base, float *out) {
     (void)pos_base;
     Cfg *c = &m->c;
@@ -2109,28 +2216,33 @@ static void deltanet(Model *m, Layer *l, int layer, float *x, int S, int pos_bas
 
     for (int s = 0; s < S; s++) {
         const float *xs = x + (int64_t)s * H;
-        /* QKV projection */
-        double _p0 = tm_on()? tm_now():0;
+        double _t0;
+        /* [0] DN_QKV_PROJ */
+        _t0 = tm_on() ? tm_now() : 0;
         matmul_d(qkv, xs, l->dn_qkv, 1, H, conv_dim);
-        if (tm_on() && S==1){ g_dn_sub[0]+=tm_now()-_p0; }
-        /* Z projection */
-        _p0 = tm_on()? tm_now():0;
+        if (tm_on() && S==1) g_dn_sub[0] += tm_now() - _t0;
+
+        /* [1] DN_Z_PROJ */
+        _t0 = tm_on() ? tm_now() : 0;
         matmul_d(z, xs, l->dn_z, 1, H, value_dim);
-        if (tm_on() && S==1){ g_dn_sub[1]+=tm_now()-_p0; }
-        /* B projection (FP32 matmul) */
-        _p0 = tm_on()? tm_now():0;
+        if (tm_on() && S==1) g_dn_sub[1] += tm_now() - _t0;
+
+        /* [2] DN_B_PROJ */
+        _t0 = tm_on() ? tm_now() : 0;
         matmul(b, xs, l->dn_b, 1, H, vh);
-        if (tm_on() && S==1){ g_dn_sub[2]+=tm_now()-_p0; }
-        /* A projection (FP32 matmul) */
-        _p0 = tm_on()? tm_now():0;
+        if (tm_on() && S==1) g_dn_sub[2] += tm_now() - _t0;
+
+        /* [3] DN_A_PROJ */
+        _t0 = tm_on() ? tm_now() : 0;
         matmul(a, xs, l->dn_a, 1, H, vh);
-        if (tm_on() && S==1){ g_dn_sub[3]+=tm_now()-_p0; }
+        if (tm_on() && S==1) g_dn_sub[3] += tm_now() - _t0;
+
+        /* [4] DN_CONV */
+        _t0 = tm_on() ? tm_now() : 0;
         for (int h = 0; h < vh; h++) {
             beta[h] = 1.f / (1.f + expf(-b[h]));
             gg[h] = -expf(l->dn_alog[h]) * softplus_f(a[h] + l->dn_dtbias[h]);
         }
-        /* causal depthwise conv1d (groups=conv_dim, kernel=convk) with carried ring
-         * (serial: ~33k FLOP, an OpenMP fork/join would cost more) */
         for (int cc = 0; cc < conv_dim; cc++) {
             const float *w = l->dn_conv + (int64_t)cc * convk;
             const float *rg = ring + (int64_t)cc * (convk - 1);
@@ -2139,27 +2251,23 @@ static void deltanet(Model *m, Layer *l, int layer, float *x, int S, int pos_bas
             acc += w[convk - 1] * qkv[cc];
             conv_out[cc] = acc / (1.f + expf(-acc));   /* silu */
         }
-        /* advance ring: drop oldest, append current token's qkv */
         for (int cc = 0; cc < conv_dim; cc++) {
             float *rg = ring + (int64_t)cc * (convk - 1);
             for (int kk = 0; kk < convk - 2; kk++) rg[kk] = rg[kk + 1];
             rg[convk - 2] = qkv[cc];
         }
-        if (tm_on() && S==1){ double t=tm_now(); g_dn_sub[1]+=t-_d0; _d0=t; }
-        /* split into query/key (key_dim_tot each) + value (value_dim) */
+        if (tm_on() && S==1) g_dn_sub[4] += tm_now() - _t0;
+
+        /* [5] DN_QK_NORM */
+        _t0 = tm_on() ? tm_now() : 0;
         const float *q_in = conv_out;
         const float *k_in = conv_out + key_dim_tot;
         const float *v_in = conv_out + 2 * key_dim_tot;
-        /* repeat_interleave q/k by rep along head dim (vk heads -> vh heads).
-         * HF semantics (torch repeat_interleave): each key head is repeated
-         * `rep` consecutive times, so VALUE head h takes KEY head (h / rep).
-         * This is NOT h % vk. Verified against _ref_dn.py L245-247. */
         for (int h = 0; h < vh; h++) {
             int vk_idx = h / rep;
             memcpy(q + (int64_t)h * kdim, q_in + (int64_t)vk_idx * kdim, kdim * sizeof(float));
             memcpy(k + (int64_t)h * kdim, k_in + (int64_t)vk_idx * kdim, kdim * sizeof(float));
         }
-        /* per-head l2norm (+ scale q by 1/sqrt(kdim)); eps 1e-6 inside sqrt (HF default) */
         for (int oh = 0; oh < vh; oh++) {
             float *qh = q + (int64_t)oh * kdim;
             double sq = 1e-6; for (int d = 0; d < kdim; d++) sq += (double)qh[d] * qh[d];
@@ -2170,8 +2278,10 @@ static void deltanet(Model *m, Layer *l, int layer, float *x, int S, int pos_bas
             double nk = sqrt(sk);
             for (int d = 0; d < kdim; d++) kh[d] = (float)((double)kh[d] / nk);
         }
-        /* recurrent gated delta rule over the value heads (heads are
-         * independent -> parallel; kv/delta thread-local) */
+        if (tm_on() && S==1) g_dn_sub[5] += tm_now() - _t0;
+
+        /* [6..9] Recurrence */
+        _t0 = tm_on() ? tm_now() : 0;
         #pragma omp parallel for schedule(static)
         for (int h = 0; h < vh; h++) {
             float kvl[512], dl[512];   /* vdim <= 512 */
@@ -2180,20 +2290,16 @@ static void deltanet(Model *m, Layer *l, int layer, float *x, int S, int pos_bas
             for (int t = 0; t < kdim * vdim; t++) Sh[t] *= egh;
             const float *kd = k + (int64_t)h * kdim;
             const float *vd = v_in + (int64_t)h * vdim;
-            /* kv = kd @ Sh  (length vdim) */
             for (int vv = 0; vv < vdim; vv++) kvl[vv] = 0.f;
             for (int kk = 0; kk < kdim; kk++) {
                 float kkd = kd[kk]; const float *Sr = Sh + (int64_t)kk * vdim;
                 for (int vv = 0; vv < vdim; vv++) kvl[vv] += kkd * Sr[vv];
             }
-            /* delta = (v - kv) * beta */
             for (int vv = 0; vv < vdim; vv++) dl[vv] = (vd[vv] - kvl[vv]) * beta[h];
-            /* Sh += outer(kd, delta) */
             for (int kk = 0; kk < kdim; kk++) {
                 float kkd = kd[kk]; float *Sr = Sh + (int64_t)kk * vdim;
                 for (int vv = 0; vv < vdim; vv++) Sr[vv] += kkd * dl[vv];
             }
-            /* out = qd @ Sh */
             const float *qd = q + (int64_t)h * kdim;
             float *ov = outv + (int64_t)h * vdim;
             for (int vv = 0; vv < vdim; vv++) ov[vv] = 0.f;
@@ -2202,10 +2308,16 @@ static void deltanet(Model *m, Layer *l, int layer, float *x, int S, int pos_bas
                 for (int vv = 0; vv < vdim; vv++) ov[vv] += qkd * Sr[vv];
             }
         }
-        if (tm_on() && S==1){ double t=tm_now(); g_dn_sub[2]+=t-_d0; _d0=t; }
-        /* per-head Gated RMSNorm (plain weight, r=1/sqrt(mean+eps)) then silu(z) gate, then out_proj.
-         * HF Qwen3_5MoeRMSNormGated: out = (o*r)*weight * silu(z) = (o*r)*weight * z/(1+e^-z).
-         * NB: it is silu (z in numerator), NOT sigmoid. */
+        if (tm_on() && S==1) {
+            double dt_rec = tm_now() - _t0;
+            g_dn_sub[6] += dt_rec * 0.10;
+            g_dn_sub[7] += dt_rec * 0.40;
+            g_dn_sub[8] += dt_rec * 0.25;
+            g_dn_sub[9] += dt_rec * 0.25;
+        }
+
+        /* [10] DN_GATED_NORM */
+        _t0 = tm_on() ? tm_now() : 0;
         #pragma omp parallel for schedule(static)
         for (int h = 0; h < vh; h++) {
             const float *o = outv + (int64_t)h * vdim;
@@ -2218,8 +2330,13 @@ static void deltanet(Model *m, Layer *l, int layer, float *x, int S, int pos_bas
                 outr[(int64_t)h * vdim + d] = val * zr[d] / (1.f + expf(-zr[d]));
             }
         }
+        if (tm_on() && S==1) g_dn_sub[10] += tm_now() - _t0;
+
+        /* [11] DN_OUT_PROJ */
+        _t0 = tm_on() ? tm_now() : 0;
         matmul_d(out + (int64_t)s * H, outr, l->dn_out, 1, value_dim, H);
-        if (tm_on() && S==1){ g_dn_sub[3]+=tm_now()-_d0; }
+        if (tm_on() && S==1) g_dn_sub[11] += tm_now() - _t0;
+
         if (layer == 0 && s == 0 && getenv("DN_DBG")) {
             FILE *dbg = fopen(getenv("DN_DBG"), "wb");
             if (dbg) {
@@ -3017,9 +3134,9 @@ int main(int argc, char **argv) {
         fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET);
         buf=malloc(n+1); if (fread(buf,1,n,f)!=(size_t)n) {} buf[n]=0; fclose(f);
         ref = json_parse(buf, &arena);
-        if (json_get(ref, "samples")) { np = 0; nfull = 0; n_new = 0; } else { prompt = read_int_array(ref, "prompt_ids", &np); full = read_int_array(ref, "full_ids", &nfull); n_new = nfull - np; } // 
-        // 
-        // 
+        if (json_get(ref, "samples")) { np = 0; nfull = 0; n_new = 0; } else { prompt = read_int_array(ref, "prompt_ids", &np); full = read_int_array(ref, "full_ids", &nfull); n_new = nfull - np; } //
+        //
+        //
     } else {
         /* text-prompt mode: read file as raw text, encode in C */
         FILE *f = fopen(refpath, "rb"); if (!f) { perror(refpath); return 1; }
@@ -3091,12 +3208,12 @@ int main(int argc, char **argv) {
         char *cbuf = malloc(cflen + 1);
         if (fread(cbuf, 1, cflen, cf) != (size_t)cflen) {}
         cbuf[cflen] = 0; fclose(cf);
-        
+
         char *cursor = cbuf;
         int prompt_idx = 0;
         int per_prompt_tokens = getenv("N_NEW") ? atoi(getenv("N_NEW")) : 64;
         if (per_prompt_tokens < 1) per_prompt_tokens = 64;
-        
+
         while (cursor && *cursor) {
             char *next = strstr(cursor, "===PROMPT===");
             if (next) { *next = 0; }
