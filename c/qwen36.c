@@ -582,14 +582,27 @@ typedef struct {
     float *dn_out;                         /* out_proj [hidden, value_dim] */
 } Layer;
 
-/* ---------- LRU expert cache (int8 weights + per-row float scales) ---------- */
-typedef struct { int eid; int pinned; int is_int4; uint8_t *w4; int8_t *g, *u, *d; uint8_t *g4, *u4, *d4; float *gs, *us, *ds; uint64_t used; } Slot;
+/* ---------- LRU expert cache (int8 / packed int4 / fmt=5 int3 weights + scales) ---------- */
+typedef struct {
+    int eid;
+    int pinned;
+    int is_int4;
+    int is_int3;
+    uint8_t *w4;
+    uint8_t *w3;
+    int8_t *g, *u, *d;
+    uint8_t *g4, *u4, *d4;
+    uint8_t *g3, *u3, *d3;
+    float *gs, *us, *ds;
+    uint64_t used;
+} Slot;
 typedef struct { Slot *slots; int n, cap; } LCache;
 
 typedef struct {
     Cfg c;
     shards S;
     int quant_bits;
+    uint16_t *embed_f16;
     float *embed, *lm_head, *final_norm;
     Layer *L;
     LCache *cache;          /* [n_layers] */
@@ -980,6 +993,127 @@ static void matmul_i4_gs_fast(float *y, const float *x, const uint8_t *q4, const
     }
 }
 
+/* ---- fmt=5: int3-g64 (3-bit weights with ONE f32 scale per 64-input group) ----
+ * Per group: 16B low plane + 8B high plane, values in [-4,3] stored v+4. 3.5 bits/weight. */
+#define I3_GROUP 64
+#define I3_GBYTES 24
+static inline int64_t i3_groups(int I){ return ((int64_t)I + I3_GROUP - 1) / I3_GROUP; }
+static inline int64_t i3_rowbytes(int I){ return i3_groups(I) * I3_GBYTES; }
+
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+static int g_i3_avx512 = 1;
+static inline float dot_i3g64_avx512(const uint8_t *lo, const uint8_t *hi, const float *x) {
+    const __m128i m2 = _mm_set1_epi8(0x03);
+    const __m512i c4 = _mm512_set1_epi8(4);
+    __m128i b0 = _mm_loadu_si128((const __m128i*)lo);
+    __m128i p0 = _mm_and_si128(b0, m2), p1 = _mm_and_si128(_mm_srli_epi16(b0, 2), m2);
+    __m128i p2 = _mm_and_si128(_mm_srli_epi16(b0, 4), m2), p3 = _mm_and_si128(_mm_srli_epi16(b0, 6), m2);
+    __m128i l01 = _mm_unpacklo_epi8(p0, p1), h01 = _mm_unpackhi_epi8(p0, p1);
+    __m128i l23 = _mm_unpacklo_epi8(p2, p3), h23 = _mm_unpackhi_epi8(p2, p3);
+    __m512i lov = _mm512_inserti32x4(_mm512_inserti32x4(_mm512_inserti32x4(
+        _mm512_castsi128_si512(_mm_unpacklo_epi16(l01, l23)),
+        _mm_unpackhi_epi16(l01, l23), 1),
+        _mm_unpacklo_epi16(h01, h23), 2),
+        _mm_unpackhi_epi16(h01, h23), 3);
+    uint64_t hb; memcpy(&hb, hi, 8);
+    __m512i wq = _mm512_sub_epi8(_mm512_mask_add_epi8(lov, (__mmask64)hb, lov, c4), c4);
+    __m512 ac0 = _mm512_setzero_ps(), ac1 = _mm512_setzero_ps();
+    ac0 = _mm512_fmadd_ps(_mm512_loadu_ps(x),    _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(_mm512_castsi512_si128(wq))),      ac0);
+    ac1 = _mm512_fmadd_ps(_mm512_loadu_ps(x+16), _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(_mm512_extracti32x4_epi32(wq, 1))), ac1);
+    ac0 = _mm512_fmadd_ps(_mm512_loadu_ps(x+32), _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(_mm512_extracti32x4_epi32(wq, 2))), ac0);
+    ac1 = _mm512_fmadd_ps(_mm512_loadu_ps(x+48), _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(_mm512_extracti32x4_epi32(wq, 3))), ac1);
+    return _mm512_reduce_add_ps(_mm512_add_ps(ac0, ac1));
+}
+
+static int i3_avx512_selftest(void) {
+    uint8_t lo[16] = {0}, hi[8] = {0}; float x[I3_GROUP]; double ref = 0;
+    uint64_t r = 0x9E3779B97F4A7C15ull;
+    for (int k = 0; k < I3_GROUP; k++) {
+        r ^= r << 13; r ^= r >> 7; r ^= r << 17;
+        unsigned u = (unsigned)(r & 7);
+        lo[k >> 2] |= (uint8_t)((u & 3) << ((k & 3) * 2));
+        hi[k >> 3] |= (uint8_t)((u >> 2) << (k & 7));
+        x[k] = (k & 1) ? -(float)(k + 1) : (float)(k + 1);
+        ref += (double)x[k] * ((int)u - 4);
+    }
+    float got = dot_i3g64_avx512(lo, hi, x);
+    if (got != (float)ref) {
+        fprintf(stderr, "AVX512 i3 selftest: %.9g != %.9g\n", got, ref);
+        return 0;
+    }
+    return 1;
+}
+#endif
+
+#if defined(__AVX2__)
+static inline float dot_i3g64_avx2(const uint8_t *lo, const uint8_t *hi, const float *x) {
+    const __m128i m2 = _mm_set1_epi8(0x03);
+    const __m128i bsel = _mm_set_epi8(1,1,1,1,1,1,1,1, 0,0,0,0,0,0,0,0);
+    const __m128i bitm = _mm_set_epi8((char)128,64,32,16,8,4,2,1,(char)128,64,32,16,8,4,2,1);
+    const __m128i four8 = _mm_set1_epi8(4);
+    const __m256i b4 = _mm256_set1_epi32(4);
+    __m256 ac0 = _mm256_setzero_ps(), ac1 = _mm256_setzero_ps();
+    for (int k = 0; k < I3_GROUP; k += 16) {
+        __m128i by = _mm_cvtsi32_si128(*(const int*)(lo + (k >> 2)));
+        __m128i p0 = _mm_and_si128(by, m2), p1 = _mm_and_si128(_mm_srli_epi16(by, 2), m2);
+        __m128i p2 = _mm_and_si128(_mm_srli_epi16(by, 4), m2), p3 = _mm_and_si128(_mm_srli_epi16(by, 6), m2);
+        __m128i l01 = _mm_unpacklo_epi8(p0, p1), h23 = _mm_unpacklo_epi8(p2, p3);
+        __m128i lov = _mm_unpacklo_epi16(l01, h23);
+        __m128i hv = _mm_shuffle_epi8(_mm_cvtsi32_si128(hi[k >> 3] | (hi[(k >> 3) + 1] << 8)), bsel);
+        __m128i hb = _mm_and_si128(_mm_cmpeq_epi8(_mm_and_si128(hv, bitm), bitm), four8);
+        __m128i u = _mm_add_epi8(lov, hb);
+        __m256 w0 = _mm256_cvtepi32_ps(_mm256_sub_epi32(_mm256_cvtepu8_epi32(u), b4));
+        __m256 w1 = _mm256_cvtepi32_ps(_mm256_sub_epi32(_mm256_cvtepu8_epi32(_mm_srli_si128(u, 8)), b4));
+        ac0 = _mm256_fmadd_ps(_mm256_loadu_ps(x + k), w0, ac0);
+        ac1 = _mm256_fmadd_ps(_mm256_loadu_ps(x + k + 8), w1, ac1);
+    }
+    __m256 a_sum = _mm256_add_ps(ac0, ac1);
+    __m128 s = _mm_add_ps(_mm256_castps256_ps128(a_sum), _mm256_extractf128_ps(a_sum, 1));
+    s = _mm_add_ps(s, _mm_movehl_ps(s, s));
+    s = _mm_add_ss(s, _mm_shuffle_ps(s, s, 1));
+    return _mm_cvtss_f32(s);
+}
+#endif
+
+static void matmul_i3_gs_fast(float *y, const float *x, const uint8_t *q3, const float *scale, int I, int O, int gs) {
+    (void)gs;
+    int64_t ng = i3_groups(I), rb = i3_rowbytes(I);
+    #pragma omp parallel for schedule(static) if(O >= 256)
+    for (int o = 0; o < O; o++) {
+        const uint8_t *wrow = q3 + (int64_t)o * rb;
+        const float *srow = scale + (int64_t)o * ng;
+        float acc = 0.f;
+        for (int64_t g = 0; g < ng; g++) {
+            const uint8_t *lo = wrow + g * I3_GBYTES, *hi = lo + 16;
+            int base = (int)(g * I3_GROUP);
+            float a = 0.f;
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+            if (g_i3_avx512) {
+                a = dot_i3g64_avx512(lo, hi, x + base);
+            } else
+#endif
+#if defined(__AVX2__)
+            {
+                a = dot_i3g64_avx2(lo, hi, x + base);
+            }
+#else
+            {
+                for (int k = 0; k < I3_GROUP; k++) {
+                    unsigned u = ((lo[k >> 2] >> ((k & 3) * 2)) & 3) | (((hi[k >> 3] >> (k & 7)) & 1) << 2);
+                    a += x[base + k] * (float)((int)u - 4);
+                }
+            }
+#endif
+            acc += a * srow[g];
+        }
+        y[o] = acc;
+    }
+}
+
+static void matmul_i3_qe(float *y, const float *x, const uint8_t *q3, const float *scale, int I, int O) {
+    matmul_i3_gs_fast(y, x, q3, scale, I, O, 64);
+}
+
 static void matmul_i4_qe(float *y, const float *x, const uint8_t *q4, const float *scale, int I, int O) {
     if (g_expert_gs) matmul_i4_gs_fast(y, x, q4, scale, I, O, g_expert_gs);
     else matmul_i4_row(y, x, q4, scale, I, O);
@@ -1234,7 +1368,23 @@ static void model_init(Model *m, const char *snap, int cap, int bits) {
     st_init(&m->S, snap);
     Cfg *c = &m->c;
     double t0 = now_s();
-    m->embed      = load_t_n(m, "model.embed_tokens.weight", (int64_t)c->vocab * c->hidden);
+    int embed_f32_fallback = getenv("COLI_EMBED_F32") && atoi(getenv("COLI_EMBED_F32")) == 1;
+    int64_t embed_numel = (int64_t)c->vocab * c->hidden;
+    st_tensor *et = st_find(&m->S, "model.embed_tokens.weight");
+    if (et && et->dtype == 1 && !embed_f32_fallback) {
+        /* Native FP16 resident embedding: 1.017 GB instead of 2.034 GB */
+        m->embed_f16 = malloc((size_t)embed_numel * sizeof(uint16_t));
+        if (!m->embed_f16) { fprintf(stderr, "OOM allocating FP16 embedding\n"); exit(1); }
+        st_read_raw(&m->S, "model.embed_tokens.weight", m->embed_f16, 0);
+        m->embed = NULL;
+        fprintf(stderr, "[embed] native FP16 embedding resident (%lld elements, %.2f MiB / %.2f GiB)\n",
+                (long long)embed_numel, (double)embed_numel*2.0/1048576.0, (double)embed_numel*2.0/1073741824.0);
+    } else {
+        m->embed = load_t_n(m, "model.embed_tokens.weight", embed_numel);
+        m->embed_f16 = NULL;
+        fprintf(stderr, "[embed] FP32 embedding resident (%lld elements, %.2f MiB / %.2f GiB)\n",
+                (long long)embed_numel, (double)embed_numel*4.0/1048576.0, (double)embed_numel*4.0/1073741824.0);
+    }
     m->lm_head    = load_t_n(m, "lm_head.weight", (int64_t)c->vocab * c->hidden);
     m->final_norm = load_t_n(m, "model.norm.weight", c->hidden);
     m->L = calloc(c->n_layers, sizeof(Layer));
@@ -1340,7 +1490,21 @@ static void model_init(Model *m, const char *snap, int cap, int bits) {
 static int64_t scale_count_gu(const Cfg *c){ return c->expert_gs ? (int64_t)c->inter * ((c->hidden + c->expert_gs - 1) / c->expert_gs) : c->inter; }
 static int64_t scale_count_d (const Cfg *c){ return c->expert_gs ? (int64_t)c->hidden * ((c->inter  + c->expert_gs - 1) / c->expert_gs) : c->hidden; }
 
-static int container_is_int4(Model *m);
+static int container_fmt(Model *m) {
+    Cfg *cc = &m->c;
+    int64_t ng = (int64_t)cc->inter * cc->hidden, nd = (int64_t)cc->hidden * cc->inter;
+    int64_t want_w = ng + ng + nd;
+    char nm[256];
+    snprintf(nm, sizeof(nm), "model.layers.0.mlp.experts.0.merged_weight");
+    st_tensor *tw = st_find(&m->S, nm);
+    if (!tw) return 1;
+    if (tw->nbytes == (want_w / 64) * 24) return 5; /* fmt=5 INT3-g64 (1,179,648 B) */
+    if (tw->nbytes == want_w / 2) return 4;         /* fmt=4 INT4-g64 (1,572,864 B) */
+    return 1;                                       /* fmt=1 INT8 (3,145,728 B) */
+}
+
+static int container_is_int3(Model *m) { return container_fmt(m) == 5; }
+static int container_is_int4(Model *m) { return container_fmt(m) == 4; }
 
 static int unpack_int8_mode(void) {
     static int v = -1;
@@ -1349,30 +1513,47 @@ static int unpack_int8_mode(void) {
 }
 
 static void slot_ensure_allocated(Model *m, Slot *s) {
-    if (s->w4 || s->g) return;
+    if (s->w3 || s->w4 || s->g) return;
     Cfg *c = &m->c;
     int64_t ng = (int64_t)c->inter * c->hidden;
     int64_t nd = (int64_t)c->hidden * c->inter;
     int64_t want_w = ng + ng + nd;
-    int is_packed = container_is_int4(m) && !unpack_int8_mode();
+    int fmt = container_fmt(m);
 
-    if (is_packed) {
+    if (fmt == 5) {
+        /* INT3-g64: 24 bytes per 64 weights */
+        int64_t want_w3 = (want_w / 64) * 24;
+        int64_t g_sz = (ng / 64) * 24;
+        uint8_t *w3_block = malloc((size_t)want_w3);
+        if (!w3_block) { fprintf(stderr, "Error: OOM allocating INT3 slot weights\n"); exit(1); }
+        s->w3 = w3_block;
+        s->g3 = w3_block;
+        s->u3 = w3_block + g_sz;
+        s->d3 = w3_block + g_sz + g_sz;
+        s->w4 = NULL; s->g4 = NULL; s->u4 = NULL; s->d4 = NULL;
+        s->g = NULL; s->u = NULL; s->d = NULL;
+        s->is_int3 = 1; s->is_int4 = 0;
+    } else if (fmt == 4 && !unpack_int8_mode()) {
+        /* Packed INT4 */
         uint8_t *w4_block = malloc((size_t)(want_w / 2));
         if (!w4_block) { fprintf(stderr, "Error: OOM allocating packed slot weights\n"); exit(1); }
         s->w4 = w4_block;
         s->g4 = w4_block;
         s->u4 = w4_block + ng / 2;
         s->d4 = w4_block + (ng + ng) / 2;
+        s->w3 = NULL; s->g3 = NULL; s->u3 = NULL; s->d3 = NULL;
         s->g = NULL; s->u = NULL; s->d = NULL;
-        s->is_int4 = 1;
+        s->is_int4 = 1; s->is_int3 = 0;
     } else {
+        /* Unpacked INT8 */
         int8_t *w_block = malloc(want_w);
         if (!w_block) { fprintf(stderr, "Error: OOM allocating slot weights\n"); exit(1); }
         s->g = w_block;
         s->u = w_block + ng;
         s->d = w_block + ng + ng;
+        s->w3 = NULL; s->g3 = NULL; s->u3 = NULL; s->d3 = NULL;
         s->w4 = NULL; s->g4 = NULL; s->u4 = NULL; s->d4 = NULL;
-        s->is_int4 = 0;
+        s->is_int4 = 0; s->is_int3 = 0;
     }
     float *s_block = falloc(2 * scale_count_gu(c) + scale_count_d(c));
     s->gs = s_block;
@@ -1389,16 +1570,23 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pil
     Cfg *cc = &m->c;
     int64_t ng = (int64_t)cc->inter * cc->hidden, nd = (int64_t)cc->hidden * cc->inter;
     int64_t want_w = ng + ng + nd;
+    int64_t want_w3 = (want_w / 64) * 24;
     int64_t want_s = 2 * scale_count_gu(cc) + scale_count_d(cc);
     st_tensor *tw = st_find(&m->S, nm), *ts = st_find(&m->S, qsnm);
-    if (!tw || (tw->nbytes != want_w && tw->nbytes != want_w / 2)) {
-        fprintf(stderr, "%s: expert weight is %lld bytes — expected %lld (int8) or %lld (int4)\n",
-                nm, (long long)(tw ? tw->nbytes : -1), (long long)want_w, (long long)(want_w / 2)); exit(1); }
+    if (!tw || (tw->nbytes != want_w && tw->nbytes != want_w / 2 && tw->nbytes != want_w3)) {
+        fprintf(stderr, "%s: expert weight is %lld bytes — expected %lld (int8), %lld (int4) or %lld (int3)\n",
+                nm, (long long)(tw ? tw->nbytes : -1), (long long)want_w, (long long)(want_w / 2), (long long)want_w3); exit(1); }
     if (!ts || ts->numel != want_s) {
         fprintf(stderr, "%s: scale array is %lld elems — expected %lld (refusing)\n",
                 qsnm, (long long)(ts ? ts->numel : -1), (long long)want_s); exit(1); }
     double _t_io0 = tm_now();
-    if (tw->nbytes == want_w / 2) {
+    if (tw->nbytes == want_w3) {
+        static int noted_3 = 0;
+        if (!noted_3) { fprintf(stderr, "[qwen36] packed INT3-g64 expert CPU residency active (1.38 MB/slot)\n"); noted_3 = 1; }
+        st_read_raw(&m->S, nm, s->w3, 1);
+        s->is_int3 = 1; s->is_int4 = 0;
+    } else if (tw->nbytes == want_w / 2) {
+        s->is_int3 = 0;
         if (s->w4) {
             static int noted_p = 0;
             if (!noted_p) { fprintf(stderr, "[qwen36] packed INT4 expert CPU residency active (1.77 MB/slot)\n"); noted_p = 1; }
@@ -1420,6 +1608,7 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pil
             free(raw);
         }
     } else {
+        s->is_int3 = 0;
         s->is_int4 = 0;
         st_read_raw(&m->S, nm, s->g, 1);
     }
@@ -1438,21 +1627,6 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pil
         g_demand_expert_admission_ms += _io_dt;
     }
     pthread_mutex_unlock(&g_io_stats_mx);
-}
-
-/* Robust int4 detection by on-disk size of one expert tensor (ignores a possibly
- * mislabeled meta.ebits — cf. load_expert_merged).  Returns 1 if the container
- * stores true int4 packed weights, 0 otherwise.  Used to pick the Vulkan
- * pipeline at init time. */
-static int container_is_int4(Model *m) {
-    Cfg *cc = &m->c;
-    int64_t ng = (int64_t)cc->inter * cc->hidden, nd = (int64_t)cc->hidden * cc->inter;
-    int64_t want_w = ng + ng + nd;
-    char nm[256];
-    snprintf(nm, sizeof(nm), "model.layers.0.mlp.experts.0.merged_weight");
-    st_tensor *tw = st_find(&m->S, nm);
-    if (!tw) return 0;
-    return (tw->nbytes == want_w / 2) ? 1 : 0;
 }
 
 static void expert_get(Model *m, int layer, int eid, Slot **out) {
@@ -1773,7 +1947,12 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
             }
             for (int kk = 0; kk < K; kk++) {
                 Slot *e; expert_get(m, layer, idx[kk], &e);
-                if (e->is_int4 && e->w4) {
+                if (e->is_int3 && e->w3) {
+                    matmul_i3_qe(g, xs, e->g3, e->gs, D, I);
+                    matmul_i3_qe(u, xs, e->u3, e->us, D, I);
+                    for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
+                    matmul_i3_qe(hh, g, e->d3, e->ds, I, D);
+                } else if (e->is_int4 && e->w4) {
                     matmul_i4_qe(g, xs, e->g4, e->gs, D, I);
                     matmul_i4_qe(u, xs, e->u4, e->us, D, I);
                     for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
@@ -1998,7 +2177,13 @@ static float *step(Model *m, const int *ids, int S, int pos_base) {
                     ids[s], c->vocab - 1);
             exit(1);
         }
-        memcpy(x + (int64_t)s*D, m->embed + (int64_t)ids[s]*D, D*sizeof(float));
+        if (m->embed_f16) {
+            const uint16_t *row_f16 = m->embed_f16 + (int64_t)ids[s] * D;
+            float *row_f32 = x + (int64_t)s * D;
+            for (int d = 0; d < D; d++) row_f32[d] = f16_to_f32(row_f16[d]);
+        } else {
+            memcpy(x + (int64_t)s*D, m->embed + (int64_t)ids[s]*D, D*sizeof(float));
+        }
     }
     float *nrm = falloc((int64_t)S*D), *tmp = falloc((int64_t)S*D);
     for (int i = 0; i < c->n_layers; i++) {
@@ -2563,9 +2748,12 @@ static void dump_routing_census(Model *m, const char *out_path) {
 
 static void print_exact_memory_accounting(Model *m) {
     Cfg *c = &m->c;
-    int is_packed = container_is_int4(m) && !unpack_int8_mode();
+    int fmt = container_fmt(m);
+    const char *fmt_str = (fmt == 5) ? "PACKED INT3-g64" : (fmt == 4 && !unpack_int8_mode()) ? "PACKED INT4" : "UNPACKED INT8";
 
-    uint64_t embed_bytes = (uint64_t)c->vocab * c->hidden * sizeof(float);
+    uint64_t embed_bytes = m->embed_f16 ?
+                           (uint64_t)c->vocab * c->hidden * sizeof(uint16_t) :
+                           (uint64_t)c->vocab * c->hidden * sizeof(float);
     uint64_t final_norm_bytes = (uint64_t)c->hidden * sizeof(float);
     uint64_t in_ln_bytes = (uint64_t)c->n_layers * c->hidden * sizeof(float);
     uint64_t post_ln_bytes = (uint64_t)c->n_layers * c->hidden * sizeof(float);
@@ -2601,7 +2789,9 @@ static void print_exact_memory_accounting(Model *m) {
     int64_t ng = (int64_t)c->inter * c->hidden, nd = (int64_t)c->hidden * c->inter;
     int64_t want_w = ng + ng + nd;
     int64_t want_s = 2 * scale_count_gu(c) + scale_count_d(c);
-    uint64_t slot_w_bytes = is_packed ? (uint64_t)(want_w / 2) : (uint64_t)want_w;
+    uint64_t slot_w_bytes = (fmt == 5) ? (uint64_t)((want_w / 64) * 24) :
+                            (fmt == 4 && !unpack_int8_mode()) ? (uint64_t)(want_w / 2) :
+                            (uint64_t)want_w;
     uint64_t slot_s_bytes = (uint64_t)want_s * sizeof(float);
     uint64_t slot_struct_bytes = sizeof(Slot);
     uint64_t bytes_per_slot = slot_w_bytes + slot_s_bytes + slot_struct_bytes;
@@ -2613,8 +2803,8 @@ static void print_exact_memory_accounting(Model *m) {
     fprintf(stderr, "\n=======================================================\n");
     fprintf(stderr, "=== EXACT LIVE MEMORY ACCOUNTING (QWEN3.6-35B-A3B) ===\n");
     fprintf(stderr, "=======================================================\n");
-    fprintf(stderr, "1. Embedding (FP32, unregistered):         %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
-            (unsigned long long)embed_bytes, (double)embed_bytes/1048576.0, (double)embed_bytes/1073741824.0);
+    fprintf(stderr, "1. Embedding (%s, unregistered):    %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
+            m->embed_f16 ? "FP16" : "FP32", (unsigned long long)embed_bytes, (double)embed_bytes/1048576.0, (double)embed_bytes/1073741824.0);
     fprintf(stderr, "2. Registered Dense INT8 Matrices (%d mat):%12llu bytes (%7.3f MiB / %6.3f GiB)\n",
             g_qdw_n, (unsigned long long)qdw_int8_bytes, (double)qdw_int8_bytes/1048576.0, (double)qdw_int8_bytes/1073741824.0);
     fprintf(stderr, "3. Registered Dense Scales (FP32):         %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
@@ -2630,7 +2820,7 @@ static void print_exact_memory_accounting(Model *m) {
     fprintf(stderr, "POST-QUANT FIXED RESIDENT FLOOR:           %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
             (unsigned long long)fixed_post_quant_bytes, (double)fixed_post_quant_bytes/1048576.0, (double)fixed_post_quant_bytes/1073741824.0);
     fprintf(stderr, "BYTES PER EXPERT SLOT (%s):          %12llu bytes (%7.4f MiB)\n",
-            is_packed ? "PACKED INT4" : "UNPACKED INT8", (unsigned long long)bytes_per_slot, (double)bytes_per_slot/1048576.0);
+            fmt_str, (unsigned long long)bytes_per_slot, (double)bytes_per_slot/1048576.0);
     fprintf(stderr, "ALLOCATED EXPERT SLOTS (%llu slots):        %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
             (unsigned long long)total_allocated_slots, (unsigned long long)allocated_expert_bytes,
             (double)allocated_expert_bytes/1048576.0, (double)allocated_expert_bytes/1073741824.0);
@@ -2647,18 +2837,19 @@ static void print_exact_memory_accounting(Model *m) {
 
 static void probe_touch_all_cache_slots(Model *m) {
     Cfg *c = &m->c;
+    int fmt = container_fmt(m);
     int64_t ng = (int64_t)c->inter * c->hidden, nd = (int64_t)c->hidden * c->inter;
     int64_t want_w = ng + ng + nd;
     int64_t want_s = 2 * scale_count_gu(c) + scale_count_d(c);
-    int is_packed = container_is_int4(m) && !unpack_int8_mode();
 
-    fprintf(stderr, "[PROBE] Pre-allocating and touching all %d slots (%d layers x %d cap)...\n",
-            c->n_layers * m->cache[0].cap, c->n_layers, m->cache[0].cap);
+    fprintf(stderr, "[PROBE] Pre-allocating and touching all %d slots (%d layers x %d cap, fmt=%d)...\n",
+            c->n_layers * m->cache[0].cap, c->n_layers, m->cache[0].cap, fmt);
     for (int l = 0; l < c->n_layers; l++) {
         for (int s = 0; s < m->cache[l].cap; s++) {
             Slot *slot = &m->cache[l].slots[s];
             slot_ensure_allocated(m, slot);
-            if (is_packed && slot->w4) memset(slot->w4, 0x55, (size_t)(want_w / 2));
+            if (fmt == 5 && slot->w3) memset(slot->w3, 0x55, (size_t)((want_w / 64) * 24));
+            else if (fmt == 4 && slot->w4) memset(slot->w4, 0x55, (size_t)(want_w / 2));
             else if (slot->g) memset(slot->g, 1, (size_t)want_w);
             if (slot->gs) memset(slot->gs, 0, (size_t)want_s * sizeof(float));
         }
@@ -2690,6 +2881,13 @@ int main(int argc, char **argv) {
 
     fprintf(stderr, "== qwen36 Phase-2 engine | cache=%d/layer bits=%d pilot=%d wide=%d hot=%d smooth=%.2f conf=%.2f ==\n",
            cap, bits, g_pilot, g_wide, hot_n, smooth, conf);
+
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+    if (!i3_avx512_selftest()) {
+        fprintf(stderr, "FATAL: AVX-512 INT3 selftest failed\n");
+        return 1;
+    }
+#endif
 
 
     int is_ref = 0;
