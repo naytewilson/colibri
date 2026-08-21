@@ -18,6 +18,12 @@ c/olmoe
 c/inkling
 c/kimi_k3
 c/kimi_k3.exe
+c/qwen36
+c/qwen36.exe
+c/test_qwen36_ctx
+c/tools/convert_qwen36_direct_c
+c/tools/verify_int3_converter
+c/tools/repack_qwen36_int3
 c/olmoe.exe
 # deepseek_v4 and the per-unit objects its amalgamated Makefile leaves behind.
 # The same omission as #858, one file over: every engine is listed here except
