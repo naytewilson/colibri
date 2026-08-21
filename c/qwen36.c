@@ -583,7 +583,7 @@ typedef struct {
 } Layer;
 
 /* ---------- LRU expert cache (int8 weights + per-row float scales) ---------- */
-typedef struct { int eid; int pinned; int is_int4; int8_t *g, *u, *d; float *gs, *us, *ds; uint64_t used; } Slot;
+typedef struct { int eid; int pinned; int is_int4; uint8_t *w4; int8_t *g, *u, *d; uint8_t *g4, *u4, *d4; float *gs, *us, *ds; uint64_t used; } Slot;
 typedef struct { Slot *slots; int n, cap; } LCache;
 
 typedef struct {
@@ -602,6 +602,7 @@ typedef struct {
     int attn_sc_thr;
     double dense_load_s;
     uint32_t *freq;
+    double *router_mass;
     int freq_token_count, hot_pinned, hot_n, warmup_tokens, token_count;
     float *momentum_logits;
     float pilot_smooth, pilot_conf_limit;
@@ -645,6 +646,15 @@ static double rss_gb(void) { struct rusage r; getrusage(RUSAGE_SELF, &r); return
 static double rss_gb(void) { struct rusage r; getrusage(RUSAGE_SELF, &r); return r.ru_maxrss / (1024.0*1024.0); }
 #endif
 
+
+static uint64_t g_demand_loads = 0;
+static uint64_t g_demand_bytes = 0;
+static double g_demand_pread_ms = 0.0;
+static uint64_t g_pilot_loads = 0;
+static uint64_t g_pilot_bytes = 0;
+static double g_pilot_pread_ms = 0.0;
+static pthread_mutex_t g_io_stats_mx = PTHREAD_MUTEX_INITIALIZER;
+
 /* ---- M-PROF (R2): per-phase wall-clock accumulators, COLI_TIMERS=1 ---- */
 static int g_timers = -1;
 static double g_tm_dec[6], g_tm_pre[6];   /* 0=deltanet 1=attention 2=moe_total 3=shared 4=router 5=lm_head */
@@ -682,6 +692,15 @@ static void tm_report(void){
     if(g_dn_sub[0]+g_dn_sub[1]+g_dn_sub[2]+g_dn_sub[3]>0)
         fprintf(stderr,"[timers]   dn-sub: proj %.1f | conv %.1f | l2n+rec %.1f | norm+out %.1f ms/token\n",
             g_dn_sub[0]/g_tm_dec_tokens,g_dn_sub[1]/g_tm_dec_tokens,g_dn_sub[2]/g_tm_dec_tokens,g_dn_sub[3]/g_tm_dec_tokens);
+    
+    fprintf(stderr,"\n[expert_io] demand: %llu loads (%llu bytes, %.2f MB), cum_pread: %.1f ms, avg_latency: %.2f ms/load\n",
+            (unsigned long long)g_demand_loads, (unsigned long long)g_demand_bytes,
+            (double)g_demand_bytes / 1048576.0, g_demand_pread_ms,
+            g_demand_loads ? g_demand_pread_ms / g_demand_loads : 0.0);
+    fprintf(stderr,"[expert_io] pilot : %llu loads (%llu bytes, %.2f MB), cum_pread: %.1f ms, avg_latency: %.2f ms/load\n",
+            (unsigned long long)g_pilot_loads, (unsigned long long)g_pilot_bytes,
+            (double)g_pilot_bytes / 1048576.0, g_pilot_pread_ms,
+            g_pilot_loads ? g_pilot_pread_ms / g_pilot_loads : 0.0);
     fprintf(stderr,"[timers] prefill: %ld tokens  dn=%.0f attn=%.0f moe=%.0f(sh=%.0f rt=%.0f) head=%.0f ms\n",
             g_tm_pre_tokens,g_tm_pre[0],g_tm_pre[1],g_tm_pre[2],g_tm_pre[3],g_tm_pre[4],g_tm_pre[5]);
 }
@@ -827,6 +846,92 @@ static void matmul_q_gs(float *y, const float *x, const int8_t *q, const float *
         y[o] = acc;
     }
 }
+
+static void matmul_i4_row(float *y, const float *x, const uint8_t *q4, const float *scale, int I, int O) {
+    #pragma omp parallel for schedule(static) if(O >= 256)
+    for (int o = 0; o < O; o++) {
+        const uint8_t *w4 = q4 + (int64_t)o * (I / 2);
+        float acc = 0.f;
+        for (int i = 0; i < I; i++) {
+            uint8_t byte = w4[i >> 1];
+            int8_t v = (int8_t)((i & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF));
+            if (v & 8) v -= 16;
+            acc += x[i] * (float)v;
+        }
+        y[o] = acc * scale[o];
+    }
+}
+
+static void matmul_i4_gs_fast(float *y, const float *x, const uint8_t *q4, const float *scale,
+                              int I, int O, int gs) {
+    int ng = (I + gs - 1) / gs;
+#if defined(__AVX2__) && defined(__FMA__)
+    if ((gs & 31) == 0) {
+        const __m128i m4 = _mm_set1_epi8(0x0F);
+        const __m128i s8 = _mm_set1_epi8(0x08);
+
+        #pragma omp parallel for schedule(static) if(O >= 256)
+        for (int o = 0; o < O; o++) {
+            const uint8_t *w4 = q4 + (int64_t)o * (I / 2);
+            const float *sc = scale + (int64_t)o * ng;
+            float acc = 0.f;
+
+            for (int gi = 0; gi < ng; gi++) {
+                __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+                int base = gi * gs, end = base + gs; if (end > I) end = I;
+
+                for (int i = base; i + 32 <= end; i += 32) {
+                    __m128i raw16 = _mm_loadu_si128((const __m128i*)(w4 + (i >> 1)));
+                    __m128i lo = _mm_and_si128(raw16, m4);
+                    __m128i hi = _mm_and_si128(_mm_srli_epi16(raw16, 4), m4);
+                    lo = _mm_sub_epi8(_mm_xor_si128(lo, s8), s8);
+                    hi = _mm_sub_epi8(_mm_xor_si128(hi, s8), s8);
+
+                    __m128i w0_15  = _mm_unpacklo_epi8(lo, hi);
+                    __m128i w16_31 = _mm_unpackhi_epi8(lo, hi);
+
+                    a0 = _mm256_fmadd_ps(_mm256_loadu_ps(x + i),      _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(w0_15)), a0);
+                    a1 = _mm256_fmadd_ps(_mm256_loadu_ps(x + i + 8),  _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(w0_15, 8))), a1);
+                    a0 = _mm256_fmadd_ps(_mm256_loadu_ps(x + i + 16), _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(w16_31)), a0);
+                    a1 = _mm256_fmadd_ps(_mm256_loadu_ps(x + i + 24), _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(w16_31, 8))), a1);
+                }
+
+                a0 = _mm256_add_ps(a0, a1);
+                __m128 s = _mm_add_ps(_mm256_castps256_ps128(a0), _mm256_extractf128_ps(a0,1));
+                s = _mm_add_ps(s, _mm_movehl_ps(s,s));
+                s = _mm_add_ss(s, _mm_shuffle_ps(s,s,1));
+                acc += _mm_cvtss_f32(s) * sc[gi];
+            }
+            y[o] = acc;
+        }
+        return;
+    }
+#endif
+    #pragma omp parallel for schedule(static) if(O >= 256)
+    for (int o = 0; o < O; o++) {
+        const uint8_t *w4 = q4 + (int64_t)o * (I / 2);
+        const float *sc = scale + (int64_t)o * ng;
+        float acc = 0.f;
+        for (int gi = 0; gi < ng; gi++) {
+            int base = gi * gs, end = base + gs; if (end > I) end = I;
+            float part = 0.f;
+            for (int i = base; i < end; i++) {
+                uint8_t byte = w4[i >> 1];
+                int8_t v = (int8_t)((i & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF));
+                if (v & 8) v -= 16;
+                part += x[i] * (float)v;
+            }
+            acc += part * sc[gi];
+        }
+        y[o] = acc;
+    }
+}
+
+static void matmul_i4_qe(float *y, const float *x, const uint8_t *q4, const float *scale, int I, int O) {
+    if (g_expert_gs) matmul_i4_gs_fast(y, x, q4, scale, I, O, g_expert_gs);
+    else matmul_i4_row(y, x, q4, scale, I, O);
+}
+
 /* Expert-GEMV dispatch: per-row scales (classic) or grouped (gs64 container). */
 static void matmul_qe(float *y, const float *x, const int8_t *q, const float *scale, int I, int O) {
     if (g_expert_gs) matmul_q_gs(y, x, q, scale, I, O, g_expert_gs);
@@ -1157,6 +1262,7 @@ static void model_init(Model *m, const char *snap, int cap, int bits) {
         m->DN_conv[i] = calloc((size_t)c->dn_conv_dim * (c->dn_convk - 1), sizeof(float));
     }
     m->freq = calloc((size_t)c->n_layers * c->n_experts, sizeof(uint32_t));
+    m->router_mass = calloc((size_t)c->n_layers * c->n_experts, sizeof(double));
     m->hot_pinned = 0; m->freq_token_count = 0;
     m->hot_n         = getenv("HOT")    ? atoi(getenv("HOT"))    : 0;
     m->warmup_tokens = getenv("WARMUP") ? atoi(getenv("WARMUP")) : 5;
@@ -1181,25 +1287,48 @@ static void model_init(Model *m, const char *snap, int cap, int bits) {
 static int64_t scale_count_gu(const Cfg *c){ return c->expert_gs ? (int64_t)c->inter * ((c->hidden + c->expert_gs - 1) / c->expert_gs) : c->inter; }
 static int64_t scale_count_d (const Cfg *c){ return c->expert_gs ? (int64_t)c->hidden * ((c->inter  + c->expert_gs - 1) / c->expert_gs) : c->hidden; }
 
+static int container_is_int4(Model *m);
+
+static int unpack_int8_mode(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("COLI_UNPACK_INT8"); v = (e && *e == '1'); }
+    return v;
+}
+
 static void slot_ensure_allocated(Model *m, Slot *s) {
-    if (s->g) return;
+    if (s->w4 || s->g) return;
     Cfg *c = &m->c;
     int64_t ng = (int64_t)c->inter * c->hidden;
     int64_t nd = (int64_t)c->hidden * c->inter;
-    int8_t *w_block = malloc(ng + ng + nd);
-    if (!w_block) { fprintf(stderr, "Error: OOM allocating slot weights\n"); exit(1); }
-    s->g = w_block;
-    s->u = w_block + ng;
-    s->d = w_block + ng + ng;
-    float *s_block = falloc(2*scale_count_gu(c) + scale_count_d(c));
+    int64_t want_w = ng + ng + nd;
+    int is_packed = container_is_int4(m) && !unpack_int8_mode();
+
+    if (is_packed) {
+        uint8_t *w4_block = malloc((size_t)(want_w / 2));
+        if (!w4_block) { fprintf(stderr, "Error: OOM allocating packed slot weights\n"); exit(1); }
+        s->w4 = w4_block;
+        s->g4 = w4_block;
+        s->u4 = w4_block + ng / 2;
+        s->d4 = w4_block + (ng + ng) / 2;
+        s->g = NULL; s->u = NULL; s->d = NULL;
+        s->is_int4 = 1;
+    } else {
+        int8_t *w_block = malloc(want_w);
+        if (!w_block) { fprintf(stderr, "Error: OOM allocating slot weights\n"); exit(1); }
+        s->g = w_block;
+        s->u = w_block + ng;
+        s->d = w_block + ng + ng;
+        s->w4 = NULL; s->g4 = NULL; s->u4 = NULL; s->d4 = NULL;
+        s->is_int4 = 0;
+    }
+    float *s_block = falloc(2 * scale_count_gu(c) + scale_count_d(c));
     s->gs = s_block;
     s->us = s_block + scale_count_gu(c);
-    s->ds = s_block + 2*scale_count_gu(c);
+    s->ds = s_block + 2 * scale_count_gu(c);
     s->pinned = 0;
-    s->is_int4 = 0;
 }
 
-static void load_expert_merged(Model *m, int layer, int eid, Slot *s) {
+static void load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pilot) {
     char nm[256], qsnm[256];
     int la = m->active_of[layer];   /* container stores experts under active index */
     snprintf(nm, sizeof(nm), "model.layers.%d.mlp.experts.%d.merged_weight", la, eid);
@@ -1207,7 +1336,7 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s) {
     Cfg *cc = &m->c;
     int64_t ng = (int64_t)cc->inter * cc->hidden, nd = (int64_t)cc->hidden * cc->inter;
     int64_t want_w = ng + ng + nd;
-    int64_t want_s = 2*scale_count_gu(cc) + scale_count_d(cc);
+    int64_t want_s = 2 * scale_count_gu(cc) + scale_count_d(cc);
     st_tensor *tw = st_find(&m->S, nm), *ts = st_find(&m->S, qsnm);
     if (!tw || (tw->nbytes != want_w && tw->nbytes != want_w / 2)) {
         fprintf(stderr, "%s: expert weight is %lld bytes — expected %lld (int8) or %lld (int4)\n",
@@ -1215,36 +1344,47 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s) {
     if (!ts || ts->numel != want_s) {
         fprintf(stderr, "%s: scale array is %lld elems — expected %lld (refusing)\n",
                 qsnm, (long long)(ts ? ts->numel : -1), (long long)want_s); exit(1); }
-    /* int4 detection by ON-DISK SIZE (robust against a mislabeled meta.ebits, e.g. the
-       i8 container whose meta says ebits=4 but stores int8).  True int4 packed uint8 is
-       exactly N/2 bytes (N = 3*inter*hidden, always even).  Unpack in-place to int8 so the
-       rest of the MoE path (matmul_q) is unchanged.  Nibble convention (must match
-       c/tools/convert_qwen36.py pack_int4): LOW nibble = element 2k, HIGH nibble = 2k+1;
-       each nibble is signed 4-bit (sign-extend if bit3 set). */
+    double _t_io0 = tm_now();
     if (tw->nbytes == want_w / 2) {
-        static int noted = 0;
-        if (!noted) { fprintf(stderr, "[qwen36] int4 packed weights detected — unpacking to int8 in slot\n"); noted = 1; }
-        uint8_t *raw = (uint8_t *)malloc((size_t)(want_w / 2));
-        if (!raw) { fprintf(stderr, "OOM reading int4 expert %s\n", nm); exit(1); }
-        st_read_raw(&m->S, nm, raw, 1);
-        for (int64_t i = 0; i < want_w; i++) {
-            uint8_t byte = raw[i >> 1];
-            int8_t v = (int8_t)((i & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF));
-            if (v & 8) v -= 16;                 /* sign-extend signed 4-bit */
-            s->g[i] = v;
+        if (s->w4) {
+            static int noted_p = 0;
+            if (!noted_p) { fprintf(stderr, "[qwen36] packed INT4 expert CPU residency active (1.77 MB/slot)\n"); noted_p = 1; }
+            st_read_raw(&m->S, nm, s->w4, 1);
+            s->is_int4 = 1;
+        } else {
+            static int noted_u = 0;
+            if (!noted_u) { fprintf(stderr, "[qwen36] int4 packed weights detected — unpacking to int8 in slot\n"); noted_u = 1; }
+            uint8_t *raw = (uint8_t *)malloc((size_t)(want_w / 2));
+            if (!raw) { fprintf(stderr, "OOM reading int4 expert %s\n", nm); exit(1); }
+            st_read_raw(&m->S, nm, raw, 1);
+            for (int64_t i = 0; i < want_w; i++) {
+                uint8_t byte = raw[i >> 1];
+                int8_t v = (int8_t)((i & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF));
+                if (v & 8) v -= 16;                 /* sign-extend signed 4-bit */
+                s->g[i] = v;
+            }
+            s->is_int4 = 0;
+            free(raw);
         }
-        s->is_int4 = 1;
-        /* The packed int4 bytes are NOT kept here. This engine only ever reads
-         * the unpacked int8 copy above, so retaining them doubled expert-cache
-         * RSS on the recommended gs64 container for nothing. They are the upload
-         * source for the CUDA expert tier and come back with it (#713), which is
-         * where they are actually read. */
-        free(raw);
     } else {
         s->is_int4 = 0;
         st_read_raw(&m->S, nm, s->g, 1);
     }
     st_read_f32(&m->S, qsnm, s->gs, 0);
+    double _t_io1 = tm_now();
+    double _io_dt = _t_io1 - _t_io0;
+    int64_t total_loaded_bytes = tw->nbytes + ts->nbytes;
+    pthread_mutex_lock(&g_io_stats_mx);
+    if (is_pilot) {
+        g_pilot_loads++;
+        g_pilot_bytes += total_loaded_bytes;
+        g_pilot_pread_ms += _io_dt;
+    } else {
+        g_demand_loads++;
+        g_demand_bytes += total_loaded_bytes;
+        g_demand_pread_ms += _io_dt;
+    }
+    pthread_mutex_unlock(&g_io_stats_mx);
 }
 
 /* Robust int4 detection by on-disk size of one expert tensor (ignores a possibly
@@ -1310,7 +1450,7 @@ static void expert_get(Model *m, int layer, int eid, Slot **out) {
     }
     s->eid = -1; s->used = ++m->clock;
     pthread_mutex_unlock(&g_pilot_mx);
-    load_expert_merged(m, layer, eid, s);
+    load_expert_merged(m, layer, eid, s, 0);
     pthread_mutex_lock(&g_pilot_mx);
     s->eid = eid; s->pinned = m->is_pinned[layer * c->n_experts + eid]; s->used = ++m->clock;
     *out = s; pthread_mutex_unlock(&g_pilot_mx);
@@ -1567,18 +1707,30 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
         }
         /* HF renormalizes the top-k router weights unconditionally */
         { float sm=0; for (int kk=0;kk<K;kk++) sm+=val[kk]; if (sm>0) for (int kk=0;kk<K;kk++) val[kk]/=sm; }
-        if (!m->hot_pinned && m->freq) {
-            uint32_t *freq_l = m->freq + (int64_t)layer * E;
-            for (int kk = 0; kk < K; kk++) if (idx[kk] >= 0) freq_l[idx[kk]]++;
-        }
+
         const float *xs = x + (int64_t)s*D;
         {
+            if (m->freq) {
+                uint32_t *freq_l = m->freq + (int64_t)layer * E;
+                for (int kk = 0; kk < K; kk++) if (idx[kk] >= 0) freq_l[idx[kk]]++;
+            }
+            if (m->router_mass) {
+                double *mass_l = m->router_mass + (int64_t)layer * E;
+                for (int kk = 0; kk < K; kk++) if (idx[kk] >= 0) mass_l[idx[kk]] += val[kk];
+            }
             for (int kk = 0; kk < K; kk++) {
                 Slot *e; expert_get(m, layer, idx[kk], &e);
-                matmul_qe(g, xs, e->g, e->gs, D, I);
-                matmul_qe(u, xs, e->u, e->us, D, I);
-                for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
-                matmul_qe(hh, g, e->d, e->ds, I, D);
+                if (e->is_int4 && e->w4) {
+                    matmul_i4_qe(g, xs, e->g4, e->gs, D, I);
+                    matmul_i4_qe(u, xs, e->u4, e->us, D, I);
+                    for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
+                    matmul_i4_qe(hh, g, e->d4, e->ds, I, D);
+                } else {
+                    matmul_qe(g, xs, e->g, e->gs, D, I);
+                    matmul_qe(u, xs, e->u, e->us, D, I);
+                    for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
+                    matmul_qe(hh, g, e->d, e->ds, I, D);
+                }
                 float w = val[kk];
                 float *os = out + (int64_t)s*D;
                 for (int d = 0; d < D; d++) os[d] += w * hh[d];
@@ -1861,7 +2013,7 @@ static void pilot_realload(Model *m, int layer, int eid) {
     }
     s->eid = -1; s->used = ++m->clock;
     pthread_mutex_unlock(&g_pilot_mx);
-    load_expert_merged(m, layer, eid, s);
+    load_expert_merged(m, layer, eid, s, 1);
     pthread_mutex_lock(&g_pilot_mx);
     s->eid = eid; s->pinned = m->is_pinned[layer*c->n_experts+eid]; s->used = ++m->clock;
     m->is_queued[layer*c->n_experts+eid] = 0; pthread_mutex_unlock(&g_pilot_mx);
@@ -2202,6 +2354,159 @@ static void serve_loop(Model *m){
     }
 }
 
+
+typedef struct { int eid; uint32_t count; } ExpertCountStat;
+typedef struct { int eid; double mass; } ExpertMassStat;
+
+static int cmp_stat_count(const void *a, const void *b) {
+    const ExpertCountStat *sa = (const ExpertCountStat *)a;
+    const ExpertCountStat *sb = (const ExpertCountStat *)b;
+    return (sb->count > sa->count) ? 1 : (sb->count < sa->count) ? -1 : 0;
+}
+static int cmp_stat_mass(const void *a, const void *b) {
+    const ExpertMassStat *sa = (const ExpertMassStat *)a;
+    const ExpertMassStat *sb = (const ExpertMassStat *)b;
+    return (sb->mass > sa->mass) ? 1 : (sb->mass < sa->mass) ? -1 : 0;
+}
+
+static void dump_routing_census(Model *m, const char *out_path) {
+    if (!out_path || !*out_path) return;
+    FILE *f = fopen(out_path, "w");
+    if (!f) { perror(out_path); return; }
+    Cfg *c = &m->c;
+    int L = c->n_layers;
+    int E = c->n_experts;
+
+    uint64_t total_selections_all = 0;
+    double total_mass_all = 0.0;
+
+    fprintf(f, "{\n");
+    fprintf(f, "  \"n_layers\": %d,\n", L);
+    fprintf(f, "  \"n_experts_per_layer\": %d,\n", E);
+    fprintf(f, "  \"layers\": [\n");
+
+    for (int l = 0; l < L; l++) {
+        uint32_t *freq_l = m->freq + (int64_t)l * E;
+        double *mass_l = m->router_mass ? m->router_mass + (int64_t)l * E : NULL;
+        uint64_t l_tot_count = 0;
+        double l_tot_mass = 0.0;
+        for (int e = 0; e < E; e++) {
+            l_tot_count += freq_l[e];
+            if (mass_l) l_tot_mass += mass_l[e];
+        }
+        total_selections_all += l_tot_count;
+        total_mass_all += l_tot_mass;
+
+        ExpertCountStat c_stats[1024];
+        ExpertMassStat m_stats[1024];
+        for (int e = 0; e < E; e++) {
+            c_stats[e].eid = e; c_stats[e].count = freq_l[e];
+            m_stats[e].eid = e; m_stats[e].mass = mass_l ? mass_l[e] : 0.0;
+        }
+        qsort(c_stats, E, sizeof(ExpertCountStat), cmp_stat_count);
+        qsort(m_stats, E, sizeof(ExpertMassStat), cmp_stat_mass);
+
+        int count_90 = 0, count_95 = 0, count_99 = 0, count_999 = 0;
+        int mass_90 = 0, mass_95 = 0, mass_99 = 0, mass_999 = 0;
+        uint64_t cum_c = 0;
+        double cum_m = 0.0;
+
+        int never_sel = 0, lt_001 = 0, lt_01 = 0, lt_1 = 0;
+        double gini_num = 0.0;
+        double entropy = 0.0;
+
+        for (int i = 0; i < E; i++) {
+            cum_c += c_stats[i].count;
+            if (l_tot_count > 0) {
+                if (cum_c >= 0.90 * l_tot_count && count_90 == 0) count_90 = i + 1;
+                if (cum_c >= 0.95 * l_tot_count && count_95 == 0) count_95 = i + 1;
+                if (cum_c >= 0.99 * l_tot_count && count_99 == 0) count_99 = i + 1;
+                if (cum_c >= 0.999 * l_tot_count && count_999 == 0) count_999 = i + 1;
+
+                double frac = (double)c_stats[i].count / l_tot_count;
+                if (c_stats[i].count == 0) never_sel++;
+                if (frac < 0.0001) lt_001++;
+                if (frac < 0.001) lt_01++;
+                if (frac < 0.01) lt_1++;
+                if (c_stats[i].count > 0) {
+                    entropy -= frac * (log(frac) / log(2.0));
+                }
+            } else {
+                never_sel++;
+            }
+        }
+        for (int i = 0; i < E; i++) {
+            cum_m += m_stats[i].mass;
+            if (l_tot_mass > 0) {
+                if (cum_m >= 0.90 * l_tot_mass && mass_90 == 0) mass_90 = i + 1;
+                if (cum_m >= 0.95 * l_tot_mass && mass_95 == 0) mass_95 = i + 1;
+                if (cum_m >= 0.99 * l_tot_mass && mass_99 == 0) mass_99 = i + 1;
+                if (cum_m >= 0.999 * l_tot_mass && mass_999 == 0) mass_999 = i + 1;
+            }
+        }
+        if (count_90 == 0) count_90 = E;
+        if (count_95 == 0) count_95 = E;
+        if (count_99 == 0) count_99 = E;
+        if (count_999 == 0) count_999 = E;
+        if (mass_90 == 0) mass_90 = E;
+        if (mass_95 == 0) mass_95 = E;
+        if (mass_99 == 0) mass_99 = E;
+        if (mass_999 == 0) mass_999 = E;
+
+        if (l_tot_count > 0) {
+            double cum_gini = 0;
+            for (int i = 0; i < E; i++) {
+                cum_gini += (i + 1) * (double)c_stats[E - 1 - i].count;
+            }
+            gini_num = (2.0 * cum_gini) / ((double)E * l_tot_count) - ((double)(E + 1) / (double)E);
+        }
+
+        fprintf(f, "    {\n");
+        fprintf(f, "      \"layer\": %d,\n", l);
+        fprintf(f, "      \"total_selections\": %llu,\n", (unsigned long long)l_tot_count);
+        fprintf(f, "      \"total_router_mass\": %.4f,\n", l_tot_mass);
+        fprintf(f, "      \"experts_for_90pct_selections\": %d,\n", count_90);
+        fprintf(f, "      \"experts_for_95pct_selections\": %d,\n", count_95);
+        fprintf(f, "      \"experts_for_99pct_selections\": %d,\n", count_99);
+        fprintf(f, "      \"experts_for_99_9pct_selections\": %d,\n", count_999);
+        fprintf(f, "      \"experts_for_90pct_mass\": %d,\n", mass_90);
+        fprintf(f, "      \"experts_for_95pct_mass\": %d,\n", mass_95);
+        fprintf(f, "      \"experts_for_99pct_mass\": %d,\n", mass_99);
+        fprintf(f, "      \"experts_for_99_9pct_mass\": %d,\n", mass_999);
+        fprintf(f, "      \"never_selected_count\": %d,\n", never_sel);
+        fprintf(f, "      \"selected_lt_0_01pct_count\": %d,\n", lt_001);
+        fprintf(f, "      \"selected_lt_0_1pct_count\": %d,\n", lt_01);
+        fprintf(f, "      \"selected_lt_1pct_count\": %d,\n", lt_1);
+        fprintf(f, "      \"gini\": %.4f,\n", gini_num);
+        fprintf(f, "      \"entropy\": %.4f,\n", entropy);
+        fprintf(f, "      \"top16_experts\": [");
+        for (int i = 0; i < 16 && i < E; i++) {
+            fprintf(f, "{\"eid\": %d, \"count\": %u, \"mass\": %.4f}%s",
+                    c_stats[i].eid, c_stats[i].count, mass_l ? mass_l[c_stats[i].eid] : 0.0,
+                    (i == 15 || i == E - 1) ? "" : ", ");
+        }
+        fprintf(f, "],\n");
+        fprintf(f, "      \"expert_counts\": [");
+        for (int e = 0; e < E; e++) {
+            fprintf(f, "%u%s", freq_l[e], e == E - 1 ? "" : ",");
+        }
+        fprintf(f, "],\n");
+        fprintf(f, "      \"expert_mass\": [");
+        for (int e = 0; e < E; e++) {
+            fprintf(f, "%.4f%s", mass_l ? mass_l[e] : 0.0, e == E - 1 ? "" : ",");
+        }
+        fprintf(f, "]\n");
+        fprintf(f, "    }%s\n", (l == L - 1) ? "" : ",");
+    }
+
+    fprintf(f, "  ],\n");
+    fprintf(f, "  \"total_selections\": %llu,\n", (unsigned long long)total_selections_all);
+    fprintf(f, "  \"total_router_mass\": %.4f\n", total_mass_all);
+    fprintf(f, "}\n");
+    fclose(f);
+    fprintf(stderr, "[census] dumped routing census to %s\n", out_path);
+}
+
 int main(int argc, char **argv) {
     const char *snap = getenv("SNAP");
     if (!snap) { fprintf(stderr, "set SNAP=<snapshot directory>\n"); return 1; }
@@ -2314,6 +2619,53 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    const char *corpus_path = getenv("CORPUS_FILE");
+    if (corpus_path && *corpus_path) {
+        FILE *cf = fopen(corpus_path, "rb");
+        if (!cf) { perror(corpus_path); return 1; }
+        fseek(cf, 0, SEEK_END); long cflen = ftell(cf); fseek(cf, 0, SEEK_SET);
+        char *cbuf = malloc(cflen + 1);
+        if (fread(cbuf, 1, cflen, cf) != (size_t)cflen) {}
+        cbuf[cflen] = 0; fclose(cf);
+        
+        char *cursor = cbuf;
+        int prompt_idx = 0;
+        int per_prompt_tokens = getenv("N_NEW") ? atoi(getenv("N_NEW")) : 64;
+        if (per_prompt_tokens < 1) per_prompt_tokens = 64;
+        
+        while (cursor && *cursor) {
+            char *next = strstr(cursor, "===PROMPT===");
+            if (next) { *next = 0; }
+            while (*cursor == ' ' || *cursor == '\n' || *cursor == '\r' || *cursor == '\t') cursor++;
+            if (*cursor) {
+                prompt_idx++;
+                fprintf(stderr, "\n--- RUNNING CORPUS PROMPT %d ---\n", prompt_idx);
+                int *p_ids = NULL; int p_np = 0;
+                encode_text(cursor, &p_ids, &p_np);
+                fprintf(stderr, "[enc] prompt tokens: %d | generating %d new tokens\n", p_np, per_prompt_tokens);
+                int *p_out = malloc((p_np + per_prompt_tokens) * sizeof(int));
+                double pt0 = now_s();
+                generate(&m, p_ids, p_np, per_prompt_tokens, p_out);
+                double pdt = now_s() - pt0;
+                fprintf(stderr, "\nPrompt %d generated %d tokens in %.2fs (%.2f tok/s)\n",
+                        prompt_idx, per_prompt_tokens, pdt, per_prompt_tokens / pdt);
+                free(p_ids); free(p_out);
+            }
+            if (next) cursor = next + 12;
+            else break;
+        }
+        free(cbuf);
+        const char *census_out = getenv("CENSUS_OUT");
+        if (census_out && *census_out) dump_routing_census(&m, census_out);
+        double tot = m.hits + m.miss;
+        if (g_ttft >= 0) fprintf(stderr, "TTFT: %.2f s (time to first token)\n", g_ttft);
+        tm_report();
+        fprintf(stderr, "\nPEAK RSS: %.2f GB\n", rss_gb());
+        fprintf(stderr, "Expert cache hit rate: %.1f%% (hit=%llu miss=%llu)\n", tot?100.0*m.hits/tot:0.0,
+               (unsigned long long)m.hits, (unsigned long long)m.miss);
+        return 0;
+    }
+
     if (is_ref && getenv("PPL") && atoi(getenv("PPL")) == 1) {
         double nll; double t = now_s();
         int scored = tf_nll(&m, full, nfull, np, &nll);
@@ -2392,6 +2744,8 @@ int main(int argc, char **argv) {
      * inkling.c does the same (`return (match == ngen) ? 0 : 1;`) and its CI
      * job relies on it — without this, tools/make_qwen36_oracle.py could be
      * wired into a workflow that stays green through any regression. */
+    const char *census_out = getenv("CENSUS_OUT");
+    if (census_out && *census_out) dump_routing_census(&m, census_out);
     if (is_ref) return ref_match == n_new ? 0 : 1;
     return 0;
 }

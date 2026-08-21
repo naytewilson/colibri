@@ -888,6 +888,9 @@ qwen36$(EXE): qwen36.c st.h json.h compat.h
 
 # Context-size gates: KV layout, growth across requests, and the attention
 # capacity. Includes qwen36.c directly, so no model file is needed.
+tests/test_qwen36_i4_kernel$(EXE): tests/test_qwen36_i4_kernel.c
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+
 tests/test_qwen36_ctx$(EXE): tests/test_qwen36_ctx.c qwen36.c st.h json.h compat.h
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
