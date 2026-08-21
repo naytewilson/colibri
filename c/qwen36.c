@@ -730,6 +730,32 @@ static int tm_on(void){ if(g_timers<0){ const char *e=getenv("COLI_TIMERS"); g_t
 double g_dn_sub[12]; // DN: QKV_PROJ Z_PROJ B_PROJ A_PROJ CONV QK_NORM REC_DECAY REC_KV REC_OUTER_UPDATE REC_QS GATED_NORM OUT_PROJ
 double g_tm_step=0;                           /* step() total (decode) */
 static double g_tm_win_moe=0; static int g_tm_win_n=0;
+
+/* --- MoE high-resolution profile counters --- */
+static uint64_t moe_router_calls = 0;
+static uint64_t moe_router_hits = 0;      /* successful top-k selection */
+static uint64_t moe_admission_misses = 0; /* cache miss on expert get */
+static uint64_t moe_int3_gate = 0;        /* shared expert gate (SwiGLU gate) */
+static uint64_t moe_int3_up = 0;          /* INT3 expert GEMV up (GEMV x gate) */
+static uint64_t moe_int3_down = 0;        /* INT3 expert GEMV down (GEMV output proj) */
+static uint64_t moe_int4_gate = 0;        /* shared expert gate (INT4) */
+static uint64_t moe_int4_up = 0;          /* INT4 expert GEMV up */
+static uint64_t moe_int4_down = 0;        /* INT4 expert GEMV down */
+static uint64_t moe_shared_expert = 0;    /* shared expert SwiGLU path */
+static uint64_t moe_weighted_accum = 0;   /* os[d] += w * hh[d] accumulation */
+static uint64_t moe_other = 0;            /* everything else */
+
+static uint64_t routed_int3_selections = 0;   /* per-token count */
+static uint64_t routed_int4_selections = 0;   /* per-token count */
+static uint64_t expert_cache_hits = 0;         /* by format */
+static uint64_t expert_cache_misses = 0;       /* by format */
+static uint64_t bytes_admitted = 0;            /* by format */
+
+/* --- MoE per-token tallies (reset each decode) --- */
+static int moe_router_sel_per_tok = 0;
+static int moe_int3_sel_per_tok = 0;
+static int moe_int4_sel_per_tok = 0;
+
 static void tm_add(int S, int idx, double ms){
     if(S==1){
         g_tm_dec[idx]+=ms;
@@ -1983,6 +2009,9 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
             for (int kk = 0; kk < K; kk++) if (idx[kk] >= 0) m->seen[(int64_t)layer * E + idx[kk]] = 1;
         }
         /* HF renormalizes the top-k router weights unconditionally */
+        /* profile: parallel region entry */
+        static int parallel_region_count = 0;
+        parallel_region_count++;
         { float sm=0; for (int kk=0;kk<K;kk++) sm+=val[kk]; if (sm>0) for (int kk=0;kk<K;kk++) val[kk]/=sm; }
 
         const float *xs = x + (int64_t)s*D;
