@@ -727,7 +727,7 @@ static double g_tm_dec[6], g_tm_pre[6];   /* 0=deltanet 1=attention 2=moe_total 
 static long g_tm_dec_tokens = 0, g_tm_pre_tokens = 0;
 static double tm_now(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return ts.tv_sec*1e3 + ts.tv_nsec/1e6; }
 static int tm_on(void){ if(g_timers<0){ const char *e=getenv("COLI_TIMERS"); g_timers = (e && *e=='1'); } return g_timers; }
-double g_dn_sub[4];                           /* DN: proj, conv+split, l2n+rec, norm+out */
+double g_dn_sub[12]; // DN: QKV_PROJ Z_PROJ B_PROJ A_PROJ CONV QK_NORM REC_DECAY REC_KV REC_OUTER_UPDATE REC_QS GATED_NORM OUT_PROJ
 double g_tm_step=0;                           /* step() total (decode) */
 static double g_tm_win_moe=0; static int g_tm_win_n=0;
 static void tm_add(int S, int idx, double ms){
@@ -756,8 +756,10 @@ static void tm_report(void){
             g_tm_step/g_tm_dec_tokens,
             (g_tm_step-(g_tm_dec[0]+g_tm_dec[1]+g_tm_dec[2]+g_tm_dec[5]))/g_tm_dec_tokens);
     if(g_dn_sub[0]+g_dn_sub[1]+g_dn_sub[2]+g_dn_sub[3]>0)
-        fprintf(stderr,"[timers]   dn-sub: proj %.1f | conv %.1f | l2n+rec %.1f | norm+out %.1f ms/token\n",
-            g_dn_sub[0]/g_tm_dec_tokens,g_dn_sub[1]/g_tm_dec_tokens,g_dn_sub[2]/g_tm_dec_tokens,g_dn_sub[3]/g_tm_dec_tokens);
+        fprintf(stderr,"[timers]   dn-sub: QKV_PROJ %.1f | Z_PROJ %.1f | B_PROJ %.1f | A_PROJ %.1f | CONV %.1f | QK_NORM %.1f | REC_DECAY %.1f | REC_KV %.1f | REC_OUTER_UPDATE %.1f | REC_QS %.1f | GATED_NORM %.1f | OUT_PROJ %.1f ms/token\n",\
+            g_dn_sub[0]/g_tm_dec_tokens,g_dn_sub[1]/g_tm_dec_tokens,g_dn_sub[2]/g_tm_dec_tokens,g_dn_sub[3]/g_tm_dec_tokens,\
+            g_dn_sub[4]/g_tm_dec_tokens,g_dn_sub[5]/g_tm_dec_tokens,g_dn_sub[6]/g_tm_dec_tokens,g_dn_sub[7]/g_tm_dec_tokens,\
+            g_dn_sub[8]/g_tm_dec_tokens,g_dn_sub[9]/g_tm_dec_tokens,g_dn_sub[10]/g_tm_dec_tokens,g_dn_sub[11]/g_tm_dec_tokens);1]/g_tm_dec_tokens,g_dn_sub[2]/g_tm_dec_tokens,g_dn_sub[3]/g_tm_dec_tokens);
     
     fprintf(stderr,"\n[expert_io] demand: %llu loads (%llu bytes, %.2f MB), cum_expert_admission: %.1f ms, avg_latency: %.2f ms/load\n",
             (unsigned long long)g_demand_loads, (unsigned long long)g_demand_bytes,
@@ -2078,14 +2080,22 @@ static void deltanet(Model *m, Layer *l, int layer, float *x, int S, int pos_bas
 
     for (int s = 0; s < S; s++) {
         const float *xs = x + (int64_t)s * H;
-        extern double g_dn_sub[4];
-        double _d0 = tm_on()? tm_now():0;
-        /* projections (single-token matmuls) */
+        /* QKV projection */
+        double _p0 = tm_on()? tm_now():0;
         matmul_d(qkv, xs, l->dn_qkv, 1, H, conv_dim);
-        matmul_d(z,   xs, l->dn_z,   1, H, value_dim);
-        matmul(b,   xs, l->dn_b,   1, H, vh);
-        matmul(a,   xs, l->dn_a,   1, H, vh);
-        if (tm_on() && S==1){ double t=tm_now(); g_dn_sub[0]+=t-_d0; _d0=t; }
+        if (tm_on() && S==1){ g_dn_sub[0]+=tm_now()-_p0; }
+        /* Z projection */
+        _p0 = tm_on()? tm_now():0;
+        matmul_d(z, xs, l->dn_z, 1, H, value_dim);
+        if (tm_on() && S==1){ g_dn_sub[1]+=tm_now()-_p0; }
+        /* B projection (FP32 matmul) */
+        _p0 = tm_on()? tm_now():0;
+        matmul(b, xs, l->dn_b, 1, H, vh);
+        if (tm_on() && S==1){ g_dn_sub[2]+=tm_now()-_p0; }
+        /* A projection (FP32 matmul) */
+        _p0 = tm_on()? tm_now():0;
+        matmul(a, xs, l->dn_a, 1, H, vh);
+        if (tm_on() && S==1){ g_dn_sub[3]+=tm_now()-_p0; }
         for (int h = 0; h < vh; h++) {
             beta[h] = 1.f / (1.f + expf(-b[h]));
             gg[h] = -expf(l->dn_alog[h]) * softplus_f(a[h] + l->dn_dtbias[h]);
@@ -2845,9 +2855,7 @@ static void print_exact_memory_accounting(Model *m) {
         }
     }
     uint64_t total_allocated_slots = total_int3_slots + total_int4_slots + total_int8_slots;
-    uint64_t allocated_expert_bytes = (uint64_t)total_int3_slots * 1376392ULL +
-                                      (uint64_t)total_int4_slots * 1769608ULL +
-                                      (uint64_t)total_int8_slots * 3342472ULL;
+    uint64_t allocated_expert_bytes = 0; for (int l = 0; l < c->n_layers; l++) for (int s = 0; s < m->cache[l].n; s++) allocated_expert_bytes += m->cache[l].slots[s].allocated_weight_bytes; int64_t _want_s = 2 * scale_count_gu(&m->c) + scale_count_d(&m->c); allocated_expert_bytes += (uint64_t)_want_s * 4 * (total_int3_slots + total_int4_slots);
 
     fprintf(stderr, "\n=======================================================\n");
     fprintf(stderr, "=== EXACT LIVE MEMORY ACCOUNTING (QWEN3.6-35B-A3B) ===\n");

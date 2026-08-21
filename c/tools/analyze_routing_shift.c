@@ -1,4 +1,4 @@
-/* Pure Native C Tool to measure Top-k Routing Agreement between Control and Mixed Containers */
+/* Pure Native C Tool to measure Aggregate Expert Count Overlap between Control and Mixed Containers */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,7 +13,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Usage: %s <census_1.json> <census_2.json>\n", argv[0]);
         return 1;
     }
-    printf("=== Analyzing Top-k Expert Routing Agreement ===\n");
+    printf("=== Analyzing AGGREGATE_EXPERT_COUNT_OVERLAP ===\n");
     printf("Census 1: %s\nCensus 2: %s\n", argv[1], argv[2]);
 
     FILE *f1 = fopen(argv[1], "rb");
@@ -58,7 +58,7 @@ int main(int argc, char **argv) {
 
     double agreement = (total_activations_1 > 0) ? (double)common_activations * 100.0 / total_activations_1 : 100.0;
     printf("Total Activations C1: %d | C2: %d\n", total_activations_1, total_activations_2);
-    printf("Top-k Expert Routing Agreement / Overlap: %.2f%%\n", agreement);
+    printf("AGGREGATE_EXPERT_COUNT_OVERLAP / Overlap: %.2f%%\n", agreement);
     printf("Router Stability Verdict: %s\n", agreement >= 95.0 ? "STABLE_ROUTING (Agreement >= 95%)" : "SHIFT_DETECTED");
 
     free(b1); free(b2); free(a1); free(a2);
