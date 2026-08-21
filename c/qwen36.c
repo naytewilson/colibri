@@ -640,19 +640,71 @@ static void ensure_pilot_worker_started(Model *m) {
 
 /* ---------- utility ---------- */
 static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec*1e-9; }
-#if defined(__APPLE__)
-static double rss_gb(void) { struct rusage r; getrusage(RUSAGE_SELF, &r); return r.ru_maxrss / (1024.0*1024.0*1024.0); }
-#else
-static double rss_gb(void) { struct rusage r; getrusage(RUSAGE_SELF, &r); return r.ru_maxrss / (1024.0*1024.0); }
-#endif
 
+/* Peak RSS (high-water mark) from OS getrusage */
+#if defined(__APPLE__)
+static double peak_rss_gb(void) { struct rusage r; getrusage(RUSAGE_SELF, &r); return r.ru_maxrss / (1024.0*1024.0*1024.0); }
+static uint64_t peak_rss_bytes(void) { struct rusage r; getrusage(RUSAGE_SELF, &r); return (uint64_t)r.ru_maxrss; }
+#else
+static double peak_rss_gb(void) { struct rusage r; getrusage(RUSAGE_SELF, &r); return r.ru_maxrss / (1024.0*1024.0); }
+static uint64_t peak_rss_bytes(void) { struct rusage r; getrusage(RUSAGE_SELF, &r); return (uint64_t)r.ru_maxrss * 1024ULL; }
+#endif
+static double rss_gb(void) { return peak_rss_gb(); } /* backward-compatible alias */
+
+/* Authoritative Linux current resident memory (VmRSS) from /proc/self/status */
+static double current_rss_gb(void) {
+#if defined(__linux__)
+    FILE *f = fopen("/proc/self/status", "r");
+    if (f) {
+        char line[256];
+        long rss_kb = 0;
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "VmRSS:", 6) == 0) {
+                sscanf(line + 6, "%ld", &rss_kb);
+                fclose(f);
+                return (double)rss_kb / (1024.0 * 1024.0);
+            }
+        }
+        fclose(f);
+    }
+#endif
+    return peak_rss_gb();
+}
+
+static uint64_t current_rss_bytes(void) {
+#if defined(__linux__)
+    FILE *f = fopen("/proc/self/status", "r");
+    if (f) {
+        char line[256];
+        long rss_kb = 0;
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "VmRSS:", 6) == 0) {
+                sscanf(line + 6, "%ld", &rss_kb);
+                fclose(f);
+                return (uint64_t)rss_kb * 1024ULL;
+            }
+        }
+        fclose(f);
+    }
+#endif
+    return peak_rss_bytes();
+}
+
+static void mem_checkpoint(const char *chk, const char *desc) {
+    double cur_g = current_rss_gb();
+    double pk_g  = peak_rss_gb();
+    uint64_t cur_b = current_rss_bytes();
+    uint64_t pk_b  = peak_rss_bytes();
+    fprintf(stderr, "[MEM_CHECKPOINT %s] %s | Current VmRSS: %.4f GiB (%llu B) | Peak RSS: %.4f GiB (%llu B)\n",
+            chk, desc, cur_g, (unsigned long long)cur_b, pk_g, (unsigned long long)pk_b);
+}
 
 static uint64_t g_demand_loads = 0;
 static uint64_t g_demand_bytes = 0;
-static double g_demand_pread_ms = 0.0;
+static double g_demand_expert_admission_ms = 0.0;
 static uint64_t g_pilot_loads = 0;
 static uint64_t g_pilot_bytes = 0;
-static double g_pilot_pread_ms = 0.0;
+static double g_pilot_expert_admission_ms = 0.0;
 static pthread_mutex_t g_io_stats_mx = PTHREAD_MUTEX_INITIALIZER;
 
 /* ---- M-PROF (R2): per-phase wall-clock accumulators, COLI_TIMERS=1 ---- */
@@ -693,14 +745,15 @@ static void tm_report(void){
         fprintf(stderr,"[timers]   dn-sub: proj %.1f | conv %.1f | l2n+rec %.1f | norm+out %.1f ms/token\n",
             g_dn_sub[0]/g_tm_dec_tokens,g_dn_sub[1]/g_tm_dec_tokens,g_dn_sub[2]/g_tm_dec_tokens,g_dn_sub[3]/g_tm_dec_tokens);
     
-    fprintf(stderr,"\n[expert_io] demand: %llu loads (%llu bytes, %.2f MB), cum_pread: %.1f ms, avg_latency: %.2f ms/load\n",
+    fprintf(stderr,"\n[expert_io] demand: %llu loads (%llu bytes, %.2f MB), cum_expert_admission: %.1f ms, avg_latency: %.2f ms/load\n",
             (unsigned long long)g_demand_loads, (unsigned long long)g_demand_bytes,
-            (double)g_demand_bytes / 1048576.0, g_demand_pread_ms,
-            g_demand_loads ? g_demand_pread_ms / g_demand_loads : 0.0);
-    fprintf(stderr,"[expert_io] pilot : %llu loads (%llu bytes, %.2f MB), cum_pread: %.1f ms, avg_latency: %.2f ms/load\n",
+            (double)g_demand_bytes / 1048576.0, g_demand_expert_admission_ms,
+            g_demand_loads ? g_demand_expert_admission_ms / g_demand_loads : 0.0);
+    fprintf(stderr,"[expert_io] pilot : %llu loads (%llu bytes, %.2f MB), cum_expert_admission: %.1f ms, avg_latency: %.2f ms/load\n",
             (unsigned long long)g_pilot_loads, (unsigned long long)g_pilot_bytes,
-            (double)g_pilot_bytes / 1048576.0, g_pilot_pread_ms,
-            g_pilot_loads ? g_pilot_pread_ms / g_pilot_loads : 0.0);
+            (double)g_pilot_bytes / 1048576.0, g_pilot_expert_admission_ms,
+            g_pilot_loads ? g_pilot_expert_admission_ms / g_pilot_loads : 0.0);
+    fprintf(stderr,"[expert_io] note: expert_admission wraps the whole expert admission interval (read packed weights + optional unpack + scale read), not pure NVMe syscall latency.\n");
     fprintf(stderr,"[timers] prefill: %ld tokens  dn=%.0f attn=%.0f moe=%.0f(sh=%.0f rt=%.0f) head=%.0f ms\n",
             g_tm_pre_tokens,g_tm_pre[0],g_tm_pre[1],g_tm_pre[2],g_tm_pre[3],g_tm_pre[4],g_tm_pre[5]);
 }
@@ -1378,11 +1431,11 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pil
     if (is_pilot) {
         g_pilot_loads++;
         g_pilot_bytes += total_loaded_bytes;
-        g_pilot_pread_ms += _io_dt;
+        g_pilot_expert_admission_ms += _io_dt;
     } else {
         g_demand_loads++;
         g_demand_bytes += total_loaded_bytes;
-        g_demand_pread_ms += _io_dt;
+        g_demand_expert_admission_ms += _io_dt;
     }
     pthread_mutex_unlock(&g_io_stats_mx);
 }
@@ -2152,6 +2205,7 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out) {
     m->max_t = np + n_new;
     reset_recurrent(m);
     ensure_kv(m);
+    mem_checkpoint("M3", "after recurrent state + KV allocation for context");
     m->kv_len = 0;
     for (int i = 0; i < np; i++) out[i] = prompt[i];
     float *logit = step(m, prompt, np, 0);
@@ -2507,6 +2561,112 @@ static void dump_routing_census(Model *m, const char *out_path) {
     fprintf(stderr, "[census] dumped routing census to %s\n", out_path);
 }
 
+static void print_exact_memory_accounting(Model *m) {
+    Cfg *c = &m->c;
+    int is_packed = container_is_int4(m) && !unpack_int8_mode();
+
+    uint64_t embed_bytes = (uint64_t)c->vocab * c->hidden * sizeof(float);
+    uint64_t final_norm_bytes = (uint64_t)c->hidden * sizeof(float);
+    uint64_t in_ln_bytes = (uint64_t)c->n_layers * c->hidden * sizeof(float);
+    uint64_t post_ln_bytes = (uint64_t)c->n_layers * c->hidden * sizeof(float);
+    uint64_t qk_norm_bytes = c->has_qk_norm ? (uint64_t)10 * c->head_dim * sizeof(float) * 2 : 0;
+    uint64_t gate_bias_bytes = (uint64_t)c->n_layers * c->n_experts * sizeof(float);
+    uint64_t sh_gate_bytes = (uint64_t)c->n_layers * c->hidden * sizeof(float);
+    uint64_t dn_dtbias_bytes = (uint64_t)30 * c->dn_vheads * sizeof(float);
+    uint64_t dn_alog_bytes = (uint64_t)30 * c->dn_vheads * sizeof(float);
+    uint64_t dn_norm_bytes = (uint64_t)30 * c->dn_vdim * sizeof(float);
+    uint64_t dn_conv_bytes = (uint64_t)30 * c->dn_conv_dim * c->dn_convk * sizeof(float);
+
+    uint64_t unreg_f32_bytes = final_norm_bytes + in_ln_bytes + post_ln_bytes +
+                               qk_norm_bytes + gate_bias_bytes + sh_gate_bytes +
+                               dn_dtbias_bytes + dn_alog_bytes + dn_norm_bytes + dn_conv_bytes;
+
+    uint64_t dn_rec_bytes = (uint64_t)30 * c->dn_vheads * c->dn_kdim * c->dn_vdim * sizeof(float);
+    uint64_t dn_conv_ring_bytes = (uint64_t)30 * c->dn_conv_dim * (c->dn_convk - 1) * sizeof(float);
+    uint64_t dn_state_bytes = dn_rec_bytes + dn_conv_ring_bytes;
+
+    uint64_t kv_cache_bytes = (uint64_t)10 * 2 * c->kv_heads * m->max_t * c->k_head_dim * sizeof(float);
+    uint64_t attn_sc_bytes = (uint64_t)m->attn_sc_thr * m->max_t * sizeof(float);
+
+    /* Registered QDW INT8 matrices & scales */
+    uint64_t qdw_int8_bytes = 0;
+    uint64_t qdw_scale_bytes = 0;
+    for (int i = 0; i < g_qdw_n; i++) {
+        qdw_int8_bytes += (uint64_t)g_qdw[i].I * g_qdw[i].O;
+        qdw_scale_bytes += (uint64_t)g_qdw[i].O * sizeof(float);
+    }
+
+    uint64_t fixed_post_quant_bytes = embed_bytes + unreg_f32_bytes + qdw_int8_bytes + qdw_scale_bytes + dn_state_bytes;
+
+    int64_t ng = (int64_t)c->inter * c->hidden, nd = (int64_t)c->hidden * c->inter;
+    int64_t want_w = ng + ng + nd;
+    int64_t want_s = 2 * scale_count_gu(c) + scale_count_d(c);
+    uint64_t slot_w_bytes = is_packed ? (uint64_t)(want_w / 2) : (uint64_t)want_w;
+    uint64_t slot_s_bytes = (uint64_t)want_s * sizeof(float);
+    uint64_t slot_struct_bytes = sizeof(Slot);
+    uint64_t bytes_per_slot = slot_w_bytes + slot_s_bytes + slot_struct_bytes;
+
+    uint64_t total_allocated_slots = 0;
+    for (int l = 0; l < c->n_layers; l++) total_allocated_slots += m->cache[l].n;
+    uint64_t allocated_expert_bytes = total_allocated_slots * bytes_per_slot;
+
+    fprintf(stderr, "\n=======================================================\n");
+    fprintf(stderr, "=== EXACT LIVE MEMORY ACCOUNTING (QWEN3.6-35B-A3B) ===\n");
+    fprintf(stderr, "=======================================================\n");
+    fprintf(stderr, "1. Embedding (FP32, unregistered):         %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
+            (unsigned long long)embed_bytes, (double)embed_bytes/1048576.0, (double)embed_bytes/1073741824.0);
+    fprintf(stderr, "2. Registered Dense INT8 Matrices (%d mat):%12llu bytes (%7.3f MiB / %6.3f GiB)\n",
+            g_qdw_n, (unsigned long long)qdw_int8_bytes, (double)qdw_int8_bytes/1048576.0, (double)qdw_int8_bytes/1073741824.0);
+    fprintf(stderr, "3. Registered Dense Scales (FP32):         %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
+            (unsigned long long)qdw_scale_bytes, (double)qdw_scale_bytes/1048576.0, (double)qdw_scale_bytes/1073741824.0);
+    fprintf(stderr, "4. Unregistered FP32 Params (Norms/Conv):  %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
+            (unsigned long long)unreg_f32_bytes, (double)unreg_f32_bytes/1048576.0, (double)unreg_f32_bytes/1073741824.0);
+    fprintf(stderr, "5. DeltaNet Recurrent & Conv State (30L):  %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
+            (unsigned long long)dn_state_bytes, (double)dn_state_bytes/1048576.0, (double)dn_state_bytes/1073741824.0);
+    fprintf(stderr, "6. KV Cache & Scratch (ctx=%d):            %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
+            m->max_t, (unsigned long long)(kv_cache_bytes + attn_sc_bytes),
+            (double)(kv_cache_bytes + attn_sc_bytes)/1048576.0, (double)(kv_cache_bytes + attn_sc_bytes)/1073741824.0);
+    fprintf(stderr, "-------------------------------------------------------\n");
+    fprintf(stderr, "POST-QUANT FIXED RESIDENT FLOOR:           %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
+            (unsigned long long)fixed_post_quant_bytes, (double)fixed_post_quant_bytes/1048576.0, (double)fixed_post_quant_bytes/1073741824.0);
+    fprintf(stderr, "BYTES PER EXPERT SLOT (%s):          %12llu bytes (%7.4f MiB)\n",
+            is_packed ? "PACKED INT4" : "UNPACKED INT8", (unsigned long long)bytes_per_slot, (double)bytes_per_slot/1048576.0);
+    fprintf(stderr, "ALLOCATED EXPERT SLOTS (%llu slots):        %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
+            (unsigned long long)total_allocated_slots, (unsigned long long)allocated_expert_bytes,
+            (double)allocated_expert_bytes/1048576.0, (double)allocated_expert_bytes/1073741824.0);
+    fprintf(stderr, "TOTAL COMPUTED LIVE RESIDENT:              %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
+            (unsigned long long)(fixed_post_quant_bytes + allocated_expert_bytes + kv_cache_bytes),
+            (double)(fixed_post_quant_bytes + allocated_expert_bytes + kv_cache_bytes)/1048576.0,
+            (double)(fixed_post_quant_bytes + allocated_expert_bytes + kv_cache_bytes)/1073741824.0);
+    fprintf(stderr, "CURRENT VMRSS MEASURED:                    %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
+            (unsigned long long)current_rss_bytes(), (double)current_rss_bytes()/1048576.0, current_rss_gb());
+    fprintf(stderr, "PEAK RSS MEASURED:                         %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
+            (unsigned long long)peak_rss_bytes(), (double)peak_rss_bytes()/1048576.0, peak_rss_gb());
+    fprintf(stderr, "=======================================================\n\n");
+}
+
+static void probe_touch_all_cache_slots(Model *m) {
+    Cfg *c = &m->c;
+    int64_t ng = (int64_t)c->inter * c->hidden, nd = (int64_t)c->hidden * c->inter;
+    int64_t want_w = ng + ng + nd;
+    int64_t want_s = 2 * scale_count_gu(c) + scale_count_d(c);
+    int is_packed = container_is_int4(m) && !unpack_int8_mode();
+
+    fprintf(stderr, "[PROBE] Pre-allocating and touching all %d slots (%d layers x %d cap)...\n",
+            c->n_layers * m->cache[0].cap, c->n_layers, m->cache[0].cap);
+    for (int l = 0; l < c->n_layers; l++) {
+        for (int s = 0; s < m->cache[l].cap; s++) {
+            Slot *slot = &m->cache[l].slots[s];
+            slot_ensure_allocated(m, slot);
+            if (is_packed && slot->w4) memset(slot->w4, 0x55, (size_t)(want_w / 2));
+            else if (slot->g) memset(slot->g, 1, (size_t)want_w);
+            if (slot->gs) memset(slot->gs, 0, (size_t)want_s * sizeof(float));
+        }
+        m->cache[l].n = m->cache[l].cap;
+    }
+    mem_checkpoint("PROBE_COMMITTED", "all cache slots allocated and touched in RAM");
+}
+
 int main(int argc, char **argv) {
     const char *snap = getenv("SNAP");
     if (!snap) { fprintf(stderr, "set SNAP=<snapshot directory>\n"); return 1; }
@@ -2577,7 +2737,9 @@ int main(int argc, char **argv) {
         if (getenv("ENC_DEBUG") && np <= 300) { fprintf(stderr, "[enc] prompt ids: "); for (int i=0;i<np;i++) fprintf(stderr, "%d ", prompt[i]); fprintf(stderr, "\n"); }
     }
 
+    mem_checkpoint("M0", "immediately before model load");
     Model m; model_init(&m, snap, cap, bits);
+    mem_checkpoint("M1", "after FP32 model/dense load (before QDW quantization)");
     g_expert_gs = m.c.expert_gs;
     if (g_expert_gs) fprintf(stderr, "[qwen36] group-scaled experts: gs=%d\n", g_expert_gs);
     fprintf(stderr, "resident weights loaded in %.1fs | RSS after load: %.2f GB\n", m.dense_load_s, rss_gb());
@@ -2610,6 +2772,11 @@ int main(int argc, char **argv) {
         }
         fprintf(stderr, "[dense-i8] %d matrices quantized in %.1f s, %.1f GB f32 freed\n",
                 g_qdw_n, now_s()-tq, freed/1073741824.0);
+    }
+    mem_checkpoint("M2", "after QDW INT8 quantization & freeing FP32 originals");
+
+    if (getenv("COLIBRI_PROBE_TOUCH_SLOTS") && atoi(getenv("COLIBRI_PROBE_TOUCH_SLOTS")) == 1) {
+        probe_touch_all_cache_slots(&m);
     }
 
     /* coli serve mode: speak the gateway wire protocol instead of argv generation */
@@ -2660,7 +2827,9 @@ int main(int argc, char **argv) {
         double tot = m.hits + m.miss;
         if (g_ttft >= 0) fprintf(stderr, "TTFT: %.2f s (time to first token)\n", g_ttft);
         tm_report();
-        fprintf(stderr, "\nPEAK RSS: %.2f GB\n", rss_gb());
+        mem_checkpoint("M4", "after expert cache population during inference");
+        print_exact_memory_accounting(&m);
+        fprintf(stderr, "\nPEAK RSS: %.2f GB | Current VmRSS: %.2f GB\n", peak_rss_gb(), current_rss_gb());
         fprintf(stderr, "Expert cache hit rate: %.1f%% (hit=%llu miss=%llu)\n", tot?100.0*m.hits/tot:0.0,
                (unsigned long long)m.hits, (unsigned long long)m.miss);
         return 0;
@@ -2735,7 +2904,9 @@ int main(int argc, char **argv) {
     double tot = m.hits + m.miss;
     if (g_ttft >= 0) fprintf(stderr, "TTFT: %.2f s (time to first token)\n", g_ttft);
     tm_report();
-    fprintf(stderr, "\nPEAK RSS: %.2f GB\n", rss_gb());
+    mem_checkpoint("M4", "after expert cache population during inference");
+    print_exact_memory_accounting(&m);
+    fprintf(stderr, "\nPEAK RSS: %.2f GB | Current VmRSS: %.2f GB\n", peak_rss_gb(), current_rss_gb());
     fprintf(stderr, "Expert cache hit rate: %.1f%% (hit=%llu miss=%llu)\n", tot?100.0*m.hits/tot:0.0,
            (unsigned long long)m.hits, (unsigned long long)m.miss);
     fprintf(stderr, "Speed: %.2f tok/s (%.1fs for %d tokens)\n", n_new/dt, dt, n_new);
