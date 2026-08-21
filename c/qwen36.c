@@ -588,6 +588,7 @@ typedef struct {
     int pinned;
     int is_int4;
     int is_int3;
+    size_t allocated_weight_bytes;
     uint8_t *w4;
     uint8_t *w3;
     int8_t *g, *u, *d;
@@ -1508,8 +1509,8 @@ static int expert_fmt(Model *m, int layer, int eid) {
 
 static int container_fmt(Model *m) {
     int f0 = expert_fmt(m, 0, 0);
-    for (int l = 0; l < m->c.n_layers; l += 4) {
-        for (int e = 0; e < m->c.n_experts; e += 32) {
+    for (int l = 0; l < m->c.n_layers; l++) {
+        for (int e = 0; e < m->c.n_experts; e++) {
             int fe = expert_fmt(m, l, e);
             if (fe > 0 && fe != f0) return 0; /* fmt=0 indicates heterogeneous/mixed container */
         }
@@ -1551,7 +1552,7 @@ static void slot_ensure_format(Model *m, Slot *s, int fmt) {
             } else if (s->g) {
                 s->w3 = (uint8_t*)s->g;
             } else {
-                s->w3 = malloc((size_t)want_w3);
+                s->w3 = malloc((size_t)want_w3); s->allocated_weight_bytes = (size_t)want_w3;
                 if (!s->w3) { fprintf(stderr, "Error: OOM allocating INT3 slot weights\n"); exit(1); }
             }
         }
@@ -1566,11 +1567,11 @@ static void slot_ensure_format(Model *m, Slot *s, int fmt) {
             if (s->g) {
                 s->w4 = (uint8_t*)s->g;
             } else if (s->w3) {
-                s->w4 = realloc(s->w3, (size_t)want_w4);
+                s->w4 = realloc(s->w3, (size_t)want_w4); s->allocated_weight_bytes = (size_t)want_w4;
                 if (!s->w4) { fprintf(stderr, "Error: OOM expanding slot weights to INT4\n"); exit(1); }
                 s->w3 = NULL;
             } else {
-                s->w4 = malloc((size_t)want_w4);
+                s->w4 = malloc((size_t)want_w4); s->allocated_weight_bytes = (size_t)want_w4;
                 if (!s->w4) { fprintf(stderr, "Error: OOM allocating packed slot weights\n"); exit(1); }
             }
         }
@@ -2951,7 +2952,7 @@ int main(int argc, char **argv) {
 #endif
 
 
-    int is_ref = 0;
+    int is_ref = 0; jval *ref = NULL;
     int rplen = (int)strlen(refpath);
     if (rplen>=5 && strcmp(refpath+rplen-5, ".json")==0) is_ref = 1;
 
@@ -2978,10 +2979,10 @@ int main(int argc, char **argv) {
         FILE *f = fopen(refpath, "rb"); if (!f) { perror(refpath); return 1; }
         fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET);
         buf=malloc(n+1); if (fread(buf,1,n,f)!=(size_t)n) {} buf[n]=0; fclose(f);
-        jval *ref = json_parse(buf, &arena);
-        prompt = read_int_array(ref,"prompt_ids",&np);
-        full   = read_int_array(ref,"full_ids",&nfull);
-        n_new  = nfull - np;
+        ref = json_parse(buf, &arena);
+        if (json_get(ref, "samples")) { np = 0; nfull = 0; n_new = 0; } else { prompt = read_int_array(ref, "prompt_ids", &np); full = read_int_array(ref, "full_ids", &nfull); n_new = nfull - np; } // 
+        // 
+        // 
     } else {
         /* text-prompt mode: read file as raw text, encode in C */
         FILE *f = fopen(refpath, "rb"); if (!f) { perror(refpath); return 1; }
@@ -3095,15 +3096,51 @@ int main(int argc, char **argv) {
     }
 
     if (is_ref && getenv("PPL") && atoi(getenv("PPL")) == 1) {
-        double nll; double t = now_s();
-        int scored = tf_nll(&m, full, nfull, np, &nll);
-        double dt = now_s() - t;
-        double tot = m.hits + m.miss;
-        printf("TF-NLL: %.4f nats/token over %d tokens | ppl = %.2f\n", nll, scored, exp(nll));
-        printf("Expert cache hit rate: %.1f%% (hit=%llu miss=%llu)\n", tot?100.0*m.hits/tot:0.0,
-               (unsigned long long)m.hits, (unsigned long long)m.miss);
-        printf("Speed: %.2f tok/s (%.1fs for %d tokens) | PEAK RSS: %.2f GB\n", scored/dt, dt, scored, rss_gb());
-        free(buf); free(arena); return 0;
+        jval *samples = json_get(ref, "samples");
+        if (samples && samples->t == J_ARR) {
+            printf("\n=== Multi-Domain Held-Out Evaluation (%d Samples) ===\n", samples->len);
+            printf("%-24s | %-12s | %-12s | %-10s\n", "Domain", "Prompt Tok", "Scored Tok", "TF-NLL");
+            printf("-----------------------------------------------------------------------\n");
+            double total_weighted_nll = 0.0;
+            int total_scored = 0;
+            double t_all0 = now_s();
+            for (int i = 0; i < samples->len; i++) {
+                jval *samp = samples->kids[i];
+                const char *dom = json_get(samp, "domain") ? json_get(samp, "domain")->str : "sample";
+                int s_np = 0, s_nfull = 0;
+                int *s_p = read_int_array(samp, "prompt_ids", &s_np);
+                int *s_f = read_int_array(samp, "full_ids", &s_nfull);
+                double s_nll = 0.0;
+                int scored = tf_nll(&m, s_f, s_nfull, s_np, &s_nll);
+                total_weighted_nll += s_nll * scored;
+                total_scored += scored;
+                printf("%-24s | %10d | %10d | %10.4f nats\n", dom, s_np, scored, s_nll);
+                free(s_p); free(s_f);
+            }
+            double t_all1 = now_s();
+            double dt_all = t_all1 - t_all0;
+            double agg_nll = (total_scored > 0) ? (total_weighted_nll / total_scored) : 0.0;
+            double tot = m.hits + m.miss;
+            printf("-----------------------------------------------------------------------\n");
+            printf("AGGREGATE TOKEN-WEIGHTED NLL: %.4f nats/token\n", agg_nll);
+            printf("AGGREGATE PERPLEXITY (PPL):   %.2f\n", exp(agg_nll));
+            printf("TOTAL SCORED TOKENS:          %d\n", total_scored);
+            printf("EVALUATION TIME:              %.2fs (%.2f tok/s)\n", dt_all, total_scored / dt_all);
+            printf("PEAK RSS:                     %.2f GB | VmRSS: %.2f GB\n", peak_rss_gb(), current_rss_gb());
+            printf("EXPERT CACHE HIT RATE:        %.1f%% (hit=%llu miss=%llu)\n\n",
+                   tot ? 100.0 * m.hits / tot : 0.0, (unsigned long long)m.hits, (unsigned long long)m.miss);
+            free(buf); free(arena); return 0;
+        } else {
+            double nll; double t = now_s();
+            int scored = tf_nll(&m, full, nfull, np, &nll);
+            double dt = now_s() - t;
+            double tot = m.hits + m.miss;
+            printf("TF-NLL: %.4f nats/token over %d tokens | ppl = %.2f\n", nll, scored, exp(nll));
+            printf("Expert cache hit rate: %.1f%% (hit=%llu miss=%llu)\n", tot?100.0*m.hits/tot:0.0,
+                   (unsigned long long)m.hits, (unsigned long long)m.miss);
+            printf("Speed: %.2f tok/s (%.1fs for %d tokens) | PEAK RSS: %.2f GB\n", scored/dt, dt, scored, rss_gb());
+            free(buf); free(arena); return 0;
+        }
     }
 
     out = malloc((np + n_new) * sizeof(int));

@@ -1,8 +1,7 @@
-/* Pure Native C Sensitivity Analysis & GEMQ Global Allocation Solver for Qwen3.6-35B-A3B.
- * Computes direct BF16->INT3 vs BF16->INT4 reconstruction errors, aggregates multi-domain
- * routing census (counts, masses, domain masks), solves global Pareto budget allocation,
- * and generates durable allocation manifests.
- *
+/* Pure Native C Tool to compute direct BF16 expert sensitivity and GEMQ global Pareto allocation for Qwen3.6-35B-A3B.
+ * Reads AUTHORITATIVE BF16 routed expert tensors directly from source shards.
+ * Computes direct BF16 -> INT3 and BF16 -> INT4 reconstruction MSE and delta-MSE.
+ * Combines with 9-domain routing counts, router mass, and domain coverage.
  * NO Python dependency. Compiles with gcc -O3 -fopenmp -mavx512f -mavx512bw -mf16c.
  */
 #define _GNU_SOURCE
@@ -24,8 +23,8 @@
 
 #define NUM_LAYERS 40
 #define NUM_EXPERTS 256
-#define TOTAL_EXPERTS (NUM_LAYERS * NUM_EXPERTS) /* 10,240 */
-#define GS 64
+#define TOTAL_EXPERTS (NUM_LAYERS * NUM_EXPERTS)
+
 #define INTER_SIZE 512
 #define HIDDEN_SIZE 2048
 #define GU_ELEMS_PER_EXPERT (2 * INTER_SIZE * HIDDEN_SIZE) /* 2,097,152 */
@@ -35,109 +34,98 @@
 typedef struct {
     int layer;
     int eid;
-    uint32_t count;
-    double mass;
-    uint32_t domain_mask;
+    uint64_t total_count;
+    double total_mass;
+    uint16_t domain_mask;
     int domain_count;
     double mse_int3;
     double mse_int4;
     double delta_mse;
-    double rel_error_reduction;
-    double global_score;
+    double composite_score;
+    int assigned_fmt; /* 4 = INT4, 5 = INT3 */
     int is_uncertain;
-    int assigned_fmt; /* 5 = INT3, 4 = INT4 */
-    int global_rank;
-} ExpertSensitivity;
+} ExpertStats;
 
-static inline void quant_group_i3_eval(const float *w, float *mse_out) {
+static inline void quantize_group_f32_to_i3(const float *w, uint8_t *lo, uint8_t *hi, float *s_out) {
     float max_abs = 0.0f;
     for (int k = 0; k < 64; k++) { float a = fabsf(w[k]); if (a > max_abs) max_abs = a; }
-    if (max_abs <= 1e-12f) { *mse_out = 0.0f; return; }
+    if (max_abs <= 1e-12f) { *s_out = 1e-8f; memset(lo, 0x55, 16); memset(hi, 0xFF, 8); return; }
     float s = max_abs / 3.0f;
     if (s < 1e-12f) s = 1e-12f;
+    *s_out = s;
     float inv_s = 1.0f / s;
-    double sum_sq = 0.0;
+    memset(lo, 0, 16); memset(hi, 0, 8);
     for (int k = 0; k < 64; k++) {
         int v = (int)lrintf(w[k] * inv_s);
         if (v > 3) v = 3; if (v < -4) v = -4;
-        float deq = (float)v * s;
-        float diff = w[k] - deq;
-        sum_sq += (double)diff * diff;
+        unsigned u = (unsigned)(v + 4);
+        lo[k >> 2] |= (uint8_t)((u & 3) << ((k & 3) * 2));
+        hi[k >> 3] |= (uint8_t)(((u >> 2) & 1) << (k & 7));
     }
-    *mse_out = (float)(sum_sq / 64.0);
 }
 
-static inline void quant_group_i4_eval(const float *w, float *mse_out) {
+static inline void quantize_group_f32_to_i4(const float *w, uint8_t *p4, float *s_out) {
     float max_abs = 0.0f;
     for (int k = 0; k < 64; k++) { float a = fabsf(w[k]); if (a > max_abs) max_abs = a; }
-    if (max_abs <= 1e-12f) { *mse_out = 0.0f; return; }
+    if (max_abs <= 1e-12f) { *s_out = 1e-8f; memset(p4, 0x88, 32); return; }
     float s = max_abs / 7.0f;
     if (s < 1e-12f) s = 1e-12f;
+    *s_out = s;
     float inv_s = 1.0f / s;
-    double sum_sq = 0.0;
-    for (int k = 0; k < 64; k++) {
-        int v = (int)lrintf(w[k] * inv_s);
-        if (v > 7) v = 7; if (v < -8) v = -8;
-        float deq = (float)v * s;
-        float diff = w[k] - deq;
-        sum_sq += (double)diff * diff;
+    for (int k = 0; k < 64; k += 2) {
+        int v0 = (int)lrintf(w[k] * inv_s);
+        if (v0 > 7) v0 = 7; if (v0 < -8) v0 = -8;
+        int v1 = (int)lrintf(w[k+1] * inv_s);
+        if (v1 > 7) v1 = 7; if (v1 < -8) v1 = -8;
+        uint8_t b0 = (uint8_t)(v0 & 0xF);
+        uint8_t b1 = (uint8_t)(v1 & 0xF);
+        p4[k >> 1] = (b1 << 4) | b0;
     }
-    *mse_out = (float)(sum_sq / 64.0);
 }
 
-static void eval_expert_quant_errors(const float *gu, const float *down, double *mse3_out, double *mse4_out) {
-    const float *gate = gu;
-    const float *up   = gu + (INTER_SIZE * HIDDEN_SIZE);
-    double sum_mse3 = 0.0, sum_mse4 = 0.0;
-    int n_groups = WEIGHTS_PER_EXPERT / 64; /* 49,152 */
-
-    /* 1. Gate */
-    for (int i = 0; i < (INTER_SIZE * HIDDEN_SIZE); i += 64) {
-        float e3, e4;
-        quant_group_i3_eval(gate + i, &e3);
-        quant_group_i4_eval(gate + i, &e4);
-        sum_mse3 += e3; sum_mse4 += e4;
+static double eval_expert_quant_mse_i3(const float *w, int n) {
+    double total_sq_err = 0.0;
+    for (int i = 0; i < n; i += 64) {
+        uint8_t lo[16], hi[8];
+        float s;
+        quantize_group_f32_to_i3(w + i, lo, hi, &s);
+        for (int k = 0; k < 64; k++) {
+            uint8_t lbyte = lo[k >> 2], hbyte = hi[k >> 3];
+            uint8_t lbits = (lbyte >> ((k & 3) * 2)) & 3, hbit = (hbyte >> (k & 7)) & 1;
+            unsigned u = (unsigned)lbits | ((unsigned)hbit << 2);
+            float recon = (float)((int)u - 4) * s;
+            float diff = w[i + k] - recon;
+            total_sq_err += (double)(diff * diff);
+        }
     }
-    /* 2. Up */
-    for (int i = 0; i < (INTER_SIZE * HIDDEN_SIZE); i += 64) {
-        float e3, e4;
-        quant_group_i3_eval(up + i, &e3);
-        quant_group_i4_eval(up + i, &e4);
-        sum_mse3 += e3; sum_mse4 += e4;
-    }
-    /* 3. Down */
-    for (int i = 0; i < (HIDDEN_SIZE * INTER_SIZE); i += 64) {
-        float e3, e4;
-        quant_group_i3_eval(down + i, &e3);
-        quant_group_i4_eval(down + i, &e4);
-        sum_mse3 += e3; sum_mse4 += e4;
-    }
-    *mse3_out = sum_mse3 / n_groups;
-    *mse4_out = sum_mse4 / n_groups;
+    return total_sq_err / (double)n;
 }
 
-static int cmp_sensitivity_desc(const void *a, const void *b) {
-    const ExpertSensitivity *ea = (const ExpertSensitivity *)a;
-    const ExpertSensitivity *eb = (const ExpertSensitivity *)b;
-    if (ea->global_score < eb->global_score) return 1;
-    if (ea->global_score > eb->global_score) return -1;
-    return 0;
+static double eval_expert_quant_mse_i4(const float *w, int n) {
+    double total_sq_err = 0.0;
+    for (int i = 0; i < n; i += 64) {
+        uint8_t p4[32];
+        float s;
+        quantize_group_f32_to_i4(w + i, p4, &s);
+        for (int k = 0; k < 64; k += 2) {
+            uint8_t b = p4[k >> 1];
+            int8_t v0 = (int8_t)(b & 0xF); if (v0 & 8) v0 -= 16;
+            int8_t v1 = (int8_t)((b >> 4) & 0xF); if (v1 & 8) v1 -= 16;
+            float r0 = (float)v0 * s, r1 = (float)v1 * s;
+            float d0 = w[i + k] - r0, d1 = w[i + k + 1] - r1;
+            total_sq_err += (double)(d0 * d0 + d1 * d1);
+        }
+    }
+    return total_sq_err / (double)n;
 }
 
-static int popcount32(uint32_t x) {
-    int c = 0;
-    while (x) { c += (x & 1); x >>= 1; }
-    return c;
-}
-
-/* Parse a census JSON file and accumulate stats into the table */
-static int parse_and_accumulate_census(const char *census_path, int domain_id, ExpertSensitivity *table) {
-    char *buf = NULL;
-    size_t sz = 0;
-    FILE *f = fopen(census_path, "rb");
-    if (!f) { fprintf(stderr, "Warning: Could not open census %s\n", census_path); return 0; }
-    fseek(f, 0, SEEK_END); sz = ftell(f); fseek(f, 0, SEEK_SET);
-    buf = malloc(sz + 1);
+static int parse_and_accumulate_census(const char *json_path, int domain_id, ExpertStats *stats) {
+    FILE *f = fopen(json_path, "rb");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END);
+    size_t sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = malloc(sz + 1);
     if (!buf) { fclose(f); return 0; }
     if (fread(buf, 1, sz, f) != sz) { free(buf); fclose(f); return 0; }
     buf[sz] = '\0';
@@ -153,216 +141,212 @@ static int parse_and_accumulate_census(const char *census_path, int domain_id, E
         jval *layer_obj = layers->kids[l];
         jval *counts = json_get(layer_obj, "expert_counts");
         jval *masses = json_get(layer_obj, "expert_mass");
-        if (counts && counts->t == J_ARR && masses && masses->t == J_ARR) {
-            for (int e = 0; e < counts->len && e < NUM_EXPERTS; e++) {
-                uint32_t c = (uint32_t)counts->kids[e]->num;
-                double m = (double)masses->kids[e]->num;
+
+        if (counts && masses && counts->t == J_ARR && masses->t == J_ARR) {
+            for (int e = 0; e < NUM_EXPERTS && e < counts->len && e < masses->len; e++) {
                 int idx = l * NUM_EXPERTS + e;
-                table[idx].count += c;
-                table[idx].mass += m;
+                uint64_t c = (uint64_t)counts->kids[e]->num;
+                double m = masses->kids[e]->num;
+
+                stats[idx].total_count += c;
+                stats[idx].total_mass += m;
                 if (c > 0) {
-                    table[idx].domain_mask |= (1 << domain_id);
+                    if (!(stats[idx].domain_mask & (1 << domain_id))) {
+                        stats[idx].domain_mask |= (1 << domain_id);
+                        stats[idx].domain_count++;
+                    }
                 }
             }
         }
     }
+
     free(buf);
+    free(arena);
     return 1;
 }
 
-static void export_manifest(const char *out_path, const char *profile_name,
-                            const ExpertSensitivity *sorted_table, int n_int4, int n_int3) {
-    FILE *f = fopen(out_path, "w");
-    if (!f) { perror(out_path); return; }
+static int compare_expert_scores(const void *a, const void *b) {
+    const ExpertStats *ea = (const ExpertStats *)a;
+    const ExpertStats *eb = (const ExpertStats *)b;
+    if (ea->composite_score > eb->composite_score) return -1;
+    if (ea->composite_score < eb->composite_score) return 1;
+    return 0;
+}
 
-    uint64_t total_model_bytes = (uint64_t)n_int4 * 1572864ULL + (uint64_t)n_int3 * 1179648ULL + (uint64_t)TOTAL_EXPERTS * (49152 * 4);
-    /* Dense + Embed FP16 + Unreg params: 3,026,309,632 bytes (2.818 GiB) */
-    uint64_t dense_floor = 3026309632ULL;
-    total_model_bytes += dense_floor;
+static void export_manifest(const char *out_path, ExpertStats *stats, int n_int4, const char *profile_name) {
+    FILE *f = fopen(out_path, "w");
+    if (!f) { perror(out_path); exit(1); }
+
+    int *fmt_map = malloc(TOTAL_EXPERTS * sizeof(int));
+    for (int i = 0; i < TOTAL_EXPERTS; i++) fmt_map[i] = 5; /* default INT3 */
+    for (int i = 0; i < n_int4 && i < TOTAL_EXPERTS; i++) {
+        int idx = stats[i].layer * NUM_EXPERTS + stats[i].eid;
+        fmt_map[idx] = 4; /* INT4 */
+    }
 
     fprintf(f, "{\n");
-    fprintf(f, "  \"profile_name\": \"%s\",\n", profile_name);
-    fprintf(f, "  \"target_model\": \"Qwen3.6-35B-A3B\",\n");
+    fprintf(f, "  \"profile\": \"%s\",\n", profile_name);
+    fprintf(f, "  \"model\": \"Qwen3.6-35B-A3B\",\n");
+    fprintf(f, "  \"num_layers\": %d,\n", NUM_LAYERS);
+    fprintf(f, "  \"num_experts\": %d,\n", NUM_EXPERTS);
     fprintf(f, "  \"total_experts\": %d,\n", TOTAL_EXPERTS);
     fprintf(f, "  \"int4_experts\": %d,\n", n_int4);
-    fprintf(f, "  \"int3_experts\": %d,\n", n_int3);
-    fprintf(f, "  \"int4_percentage\": %.2f,\n", (double)n_int4 * 100.0 / TOTAL_EXPERTS);
-    fprintf(f, "  \"projected_model_bytes\": %llu,\n", (unsigned long long)total_model_bytes);
-    fprintf(f, "  \"projected_model_gb\": %.3f,\n", (double)total_model_bytes / 1073741824.0);
+    fprintf(f, "  \"int3_experts\": %d,\n", TOTAL_EXPERTS - n_int4);
+    fprintf(f, "  \"int4_pct\": %.2f,\n", (double)n_int4 * 100.0 / TOTAL_EXPERTS);
     fprintf(f, "  \"allocations\": [\n");
 
-    for (int i = 0; i < TOTAL_EXPERTS; i++) {
-        const ExpertSensitivity *e = &sorted_table[i];
-        fprintf(f, "    {\"layer\": %d, \"eid\": %d, \"fmt\": %d, \"rank\": %d, \"score\": %.6f, \"mass\": %.4f, \"count\": %u, \"domain_count\": %d, \"delta_mse\": %.6f, \"uncertain\": %d}%s\n",
-                e->layer, e->eid, e->assigned_fmt, e->global_rank, e->global_score, e->mass, e->count,
-                e->domain_count, e->delta_mse, e->is_uncertain, (i == TOTAL_EXPERTS - 1) ? "" : ",");
+    for (int l = 0; l < NUM_LAYERS; l++) {
+        for (int e = 0; e < NUM_EXPERTS; e++) {
+            int idx = l * NUM_EXPERTS + e;
+            int is_last = (l == NUM_LAYERS - 1 && e == NUM_EXPERTS - 1);
+            fprintf(f, "    {\"layer\": %d, \"eid\": %d, \"fmt\": %d}%s\n",
+                    l, e, fmt_map[idx], is_last ? "" : ",");
+        }
     }
     fprintf(f, "  ]\n");
     fprintf(f, "}\n");
     fclose(f);
-    printf("Exported allocation manifest: %s (%d INT4, %d INT3)\n", out_path, n_int4, n_int3);
+    free(fmt_map);
+    printf("Exported allocation manifest: %s (%d INT4, %d INT3)\n",
+           out_path, n_int4, TOTAL_EXPERTS - n_int4);
 }
 
 int main(int argc, char **argv) {
-    const char *census_dir = argc > 1 ? argv[1] : "/home/nayte/census_runs";
-    const char *out_dir = argc > 2 ? argv[2] : "/home/nayte/allocations";
+    const char *src_dir = (argc > 1) ? argv[1] : "/data/ANVIL/models/hf/source_shards";
+    const char *census_dir = (argc > 2) ? argv[2] : "/home/nayte/census_runs";
+    const char *out_dir = (argc > 3) ? argv[3] : "/home/nayte/allocations";
     mkdir(out_dir, 0755);
 
-    printf("=== Qwen3.6 Sensitivity Analysis & GEMQ Allocation Solver ===\n");
-    printf("Census Directory: %s | Output Directory: %s\n", census_dir, out_dir);
+    printf("=== Qwen3.6 Direct-BF16 Sensitivity Analysis & GEMQ Allocation Solver ===\n");
+    printf("Authoritative Source Shards: %s\nCensus Directory: %s | Output Directory: %s\n\n",
+           src_dir, census_dir, out_dir);
 
-    ExpertSensitivity *table = calloc(TOTAL_EXPERTS, sizeof(ExpertSensitivity));
+    ExpertStats *stats = calloc(TOTAL_EXPERTS, sizeof(ExpertStats));
     for (int l = 0; l < NUM_LAYERS; l++) {
         for (int e = 0; e < NUM_EXPERTS; e++) {
             int idx = l * NUM_EXPERTS + e;
-            table[idx].layer = l;
-            table[idx].eid = e;
+            stats[idx].layer = l;
+            stats[idx].eid = e;
+            stats[idx].assigned_fmt = 5;
         }
     }
 
-    /* 1. Parse all domain census files */
-    int found_census = 0;
-    char path[512];
+    /* 1. Ingest Multi-Domain Routing Census Data (all 9 domains) */
+    int loaded_census_count = 0;
     for (int d = 1; d <= 9; d++) {
+        char pattern[512];
+        snprintf(pattern, sizeof(pattern), "census_p%d_", d);
         DIR *dir = opendir(census_dir);
-        if (!dir) break;
-        struct dirent *ent;
-        while ((ent = readdir(dir)) != NULL) {
-            char prefix[32]; snprintf(prefix, sizeof(prefix), "census_p%d_", d);
-            if (strncmp(ent->d_name, prefix, strlen(prefix)) == 0) {
-                snprintf(path, sizeof(path), "%s/%s", census_dir, ent->d_name);
-                if (parse_and_accumulate_census(path, d, table)) {
-                    printf("Parsed domain %d census: %s\n", d, ent->d_name);
-                    found_census++;
+        if (dir) {
+            struct dirent *ent;
+            while ((ent = readdir(dir)) != NULL) {
+                if (strstr(ent->d_name, pattern) && strstr(ent->d_name, ".json")) {
+                    char full_path[1024];
+                    snprintf(full_path, sizeof(full_path), "%s/%s", census_dir, ent->d_name);
+                    if (parse_and_accumulate_census(full_path, d - 1, stats)) {
+                        loaded_census_count++;
+                        printf("Parsed domain %d census: %s\n", d, ent->d_name);
+                    }
+                    break;
                 }
-                break;
             }
+            closedir(dir);
         }
-        closedir(dir);
     }
-    printf("Total Domain Census Files Loaded: %d/9\n", found_census);
+    printf("Total Domain Census Files Loaded: %d/9\n\n", loaded_census_count);
 
-    /* 2. Compute Quantization Errors across all 10,240 experts */
-    printf("\nComputing direct BF16->INT3 and BF16->INT4 reconstruction errors across all %d experts...\n", TOTAL_EXPERTS);
-    /* Load layer shards from source safetensors or generate synthetic precision reference */
-    const char *model_dir = "/home/nayte/models/qwen36_i4_gs64";
+    /* 2. Compute Direct BF16 -> INT3 and BF16 -> INT4 Reconstruction MSE */
     shards S;
-    st_init(&S, model_dir);
+    st_init(&S, src_dir);
+    printf("Computing direct BF16->INT3 and BF16->INT4 reconstruction errors across all %d experts...\n", TOTAL_EXPERTS);
 
     #pragma omp parallel for schedule(dynamic)
     for (int l = 0; l < NUM_LAYERS; l++) {
-        float *gu = malloc(GU_ELEMS_PER_EXPERT * sizeof(float));
-        float *down = malloc(D_ELEMS_PER_EXPERT * sizeof(float));
+        char gu_name1[256], gu_name2[256], d_name1[256], d_name2[256];
+        snprintf(gu_name1, sizeof(gu_name1), "model.language_model.layers.%d.mlp.experts.gate_up_proj", l);
+        snprintf(gu_name2, sizeof(gu_name2), "model.layers.%d.mlp.experts.gate_up_proj", l);
+        snprintf(d_name1, sizeof(d_name1), "model.language_model.layers.%d.mlp.experts.down_proj", l);
+        snprintf(d_name2, sizeof(d_name2), "model.layers.%d.mlp.experts.down_proj", l);
+
+        const char *gu_name = st_find(&S, gu_name1) ? gu_name1 : (st_find(&S, gu_name2) ? gu_name2 : NULL);
+        const char *d_name  = st_find(&S, d_name1) ? d_name1 : (st_find(&S, d_name2) ? d_name2 : NULL);
+
+        if (!gu_name || !d_name) {
+            fprintf(stderr, "Layer %d: routed experts not found in BF16 source shards\n", l);
+            exit(1);
+        }
+
+        float *gu = malloc((size_t)GU_ELEMS_PER_EXPERT * sizeof(float));
+        float *down = malloc((size_t)D_ELEMS_PER_EXPERT * sizeof(float));
+        if (!gu || !down) { fprintf(stderr, "OOM in sensitivity buffers\n"); exit(1); }
+
         for (int e = 0; e < NUM_EXPERTS; e++) {
             int idx = l * NUM_EXPERTS + e;
-            /* Read expert weight from model shard */
-            char nm[256];
-            snprintf(nm, sizeof(nm), "model.layers.%d.mlp.experts.%d.merged_weight", l, e);
-            st_tensor *tw = st_find(&S, nm);
-            if (tw) {
-                /* In INT4 container: unpack to float and evaluate relative errors */
-                uint8_t *raw = malloc(tw->nbytes);
-                st_read_raw(&S, nm, raw, 0);
-                /* Read scales */
-                char qsnm[256];
-                snprintf(qsnm, sizeof(qsnm), "model.layers.%d.mlp.experts.%d.qs", l, e);
-                float *scales = malloc(49152 * sizeof(float));
-                st_read_f32(&S, qsnm, scales, 0);
 
-                /* Reconstruct float weights from INT4 */
-                int g_idx = 0;
-                for (int i = 0; i < GU_ELEMS_PER_EXPERT; i += 64) {
-                    float sc = scales[g_idx++];
-                    for (int k = 0; k < 64; k++) {
-                        int byte_idx = (i + k) >> 1;
-                        uint8_t b = raw[byte_idx];
-                        int8_t v = (int8_t)(((i + k) & 1) ? ((b >> 4) & 0xF) : (b & 0xF));
-                        if (v & 8) v -= 16;
-                        gu[i + k] = (float)v * sc;
-                    }
-                }
-                for (int i = 0; i < D_ELEMS_PER_EXPERT; i += 64) {
-                    float sc = scales[g_idx++];
-                    for (int k = 0; k < 64; k++) {
-                        int byte_idx = (GU_ELEMS_PER_EXPERT / 2) + ((i + k) >> 1);
-                        uint8_t b = raw[byte_idx];
-                        int8_t v = (int8_t)(((i + k) & 1) ? ((b >> 4) & 0xF) : (b & 0xF));
-                        if (v & 8) v -= 16;
-                        down[i + k] = (float)v * sc;
-                    }
-                }
-                eval_expert_quant_errors(gu, down, &table[idx].mse_int3, &table[idx].mse_int4);
-                free(raw);
-                free(scales);
-            } else {
-                /* Default fallback */
-                table[idx].mse_int3 = 0.045;
-                table[idx].mse_int4 = 0.012;
-            }
-            table[idx].delta_mse = table[idx].mse_int3 - table[idx].mse_int4;
-            table[idx].rel_error_reduction = table[idx].delta_mse / (table[idx].mse_int3 > 1e-12 ? table[idx].mse_int3 : 1e-12);
+            st_read_slice_f32(&S, gu_name, (int64_t)e * GU_ELEMS_PER_EXPERT, GU_ELEMS_PER_EXPERT, gu, 0);
+            st_read_slice_f32(&S, d_name,  (int64_t)e * D_ELEMS_PER_EXPERT,  D_ELEMS_PER_EXPERT,  down,  0);
+
+            double mse3_gu = eval_expert_quant_mse_i3(gu, GU_ELEMS_PER_EXPERT);
+            double mse3_d  = eval_expert_quant_mse_i3(down, D_ELEMS_PER_EXPERT);
+            double mse3    = (mse3_gu * 2.0 + mse3_d) / 3.0;
+
+            double mse4_gu = eval_expert_quant_mse_i4(gu, GU_ELEMS_PER_EXPERT);
+            double mse4_d  = eval_expert_quant_mse_i4(down, D_ELEMS_PER_EXPERT);
+            double mse4    = (mse4_gu * 2.0 + mse4_d) / 3.0;
+
+            stats[idx].mse_int3 = mse3;
+            stats[idx].mse_int4 = mse4;
+            stats[idx].delta_mse = (mse3 > mse4) ? (mse3 - mse4) : 0.0;
         }
+
         free(gu);
         free(down);
     }
 
     /* 3. Compute Composite Importance Scores */
     int active_experts = 0, uncertain_experts = 0;
-    double max_mass = 0.0;
     for (int i = 0; i < TOTAL_EXPERTS; i++) {
-        table[i].domain_count = popcount32(table[i].domain_mask);
-        if (table[i].mass > max_mass) max_mass = table[i].mass;
-        if (table[i].count > 0) active_experts++;
-        else uncertain_experts++;
-    }
-
-    for (int i = 0; i < TOTAL_EXPERTS; i++) {
-        if (table[i].count > 0) {
-            /* Active expert: mass * delta_mse * domain_diversity */
-            table[i].global_score = table[i].mass * table[i].delta_mse * (1.0 + 0.15 * table[i].domain_count);
-            table[i].is_uncertain = 0;
+        if (stats[i].total_count > 0) {
+            active_experts++;
+            double domain_multiplier = 1.0 + (0.15 * (double)stats[i].domain_count);
+            stats[i].composite_score = stats[i].total_mass * stats[i].delta_mse * domain_multiplier;
+            stats[i].is_uncertain = 0;
         } else {
-            /* Inactive during calibration: protected via pure structural sensitivity */
-            table[i].global_score = 0.25 * table[i].delta_mse;
-            table[i].is_uncertain = 1;
+            uncertain_experts++;
+            stats[i].is_uncertain = 1;
+            stats[i].composite_score = 0.25 * stats[i].delta_mse;
         }
     }
 
-    /* 4. Sort globally by score */
-    ExpertSensitivity *sorted = malloc(TOTAL_EXPERTS * sizeof(ExpertSensitivity));
-    memcpy(sorted, table, TOTAL_EXPERTS * sizeof(ExpertSensitivity));
-    qsort(sorted, TOTAL_EXPERTS, sizeof(ExpertSensitivity), cmp_sensitivity_desc);
-
-    for (int i = 0; i < TOTAL_EXPERTS; i++) sorted[i].global_rank = i + 1;
+    /* 4. Global Pareto Ranking */
+    ExpertStats *sorted_stats = malloc(TOTAL_EXPERTS * sizeof(ExpertStats));
+    memcpy(sorted_stats, stats, TOTAL_EXPERTS * sizeof(ExpertStats));
+    qsort(sorted_stats, TOTAL_EXPERTS, sizeof(ExpertStats), compare_expert_scores);
 
     printf("\n========================================================================================\n");
-    printf("=== TOP 20 MOST SENSITIVE EXPERTS (GLOBAL GEMQ RANKING) ===\n");
+    printf("=== TOP 20 MOST SENSITIVE EXPERTS (GLOBAL GEMQ DIRECT-BF16 RANKING) ===\n");
     printf("========================================================================================\n");
     printf("%-5s | %-6s | %-5s | %-8s | %-8s | %-6s | %-10s | %-10s | %-10s\n",
            "Rank", "Layer", "EID", "Count", "Mass", "Domain", "MSE(INT3)", "MSE(INT4)", "Score");
     printf("----------------------------------------------------------------------------------------\n");
     for (int i = 0; i < 20; i++) {
-        printf("#%-4d | L%-5d | E%-4d | %8u | %8.3f | %6d | %10.6f | %10.6f | %10.6f\n",
-               sorted[i].global_rank, sorted[i].layer, sorted[i].eid, sorted[i].count,
-               sorted[i].mass, sorted[i].domain_count, sorted[i].mse_int3, sorted[i].mse_int4,
-               sorted[i].global_score);
+        printf("#%-4d | L%-5d | E%-4d | %8lu | %8.3f | %6d | %10.6f | %10.6f | %10.6f\n",
+               i + 1, sorted_stats[i].layer, sorted_stats[i].eid,
+               (unsigned long)sorted_stats[i].total_count,
+               sorted_stats[i].total_mass,
+               sorted_stats[i].domain_count,
+               sorted_stats[i].mse_int3,
+               sorted_stats[i].mse_int4,
+               sorted_stats[i].composite_score);
     }
     printf("========================================================================================\n\n");
 
-    /* 5. Generate Candidate Allocation Profiles */
-    /* Profile B: MIXED-LOW (15% INT4 = 1,536 experts) */
-    int n_low_int4 = 1536;
-    for (int i = 0; i < TOTAL_EXPERTS; i++) sorted[i].assigned_fmt = (i < n_low_int4) ? 4 : 5;
-    snprintf(path, sizeof(path), "%s/allocation_mixed_low.json", out_dir);
-    export_manifest(path, "MIXED-LOW (15% INT4)", sorted, n_low_int4, TOTAL_EXPERTS - n_low_int4);
+    /* Export Allocation Profiles */
+    char out_mixed_low[1024];
+    snprintf(out_mixed_low, sizeof(out_mixed_low), "%s/allocation_mixed_low.json", out_dir);
+    export_manifest(out_mixed_low, sorted_stats, 1536, "MIXED-LOW-15pct-INT4-DIRECT-BF16");
 
-    /* Profile C: MIXED-MEDIUM (30% INT4 = 3,072 experts) */
-    int n_med_int4 = 3072;
-    for (int i = 0; i < TOTAL_EXPERTS; i++) sorted[i].assigned_fmt = (i < n_med_int4) ? 4 : 5;
-    snprintf(path, sizeof(path), "%s/allocation_mixed_med.json", out_dir);
-    export_manifest(path, "MIXED-MEDIUM (30% INT4)", sorted, n_med_int4, TOTAL_EXPERTS - n_med_int4);
-
-    free(table);
-    free(sorted);
+    free(stats);
+    free(sorted_stats);
     return 0;
 }

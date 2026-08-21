@@ -1,8 +1,11 @@
-/* Pure Native C Direct-Source Mixed INT3/INT4-g64 Container Builder for Qwen3.6-35B-A3B.
- * Converts source container to a heterogeneous GEMQ-style container
- * based on an allocation manifest JSON. Includes all dense weights, global embeddings,
- * metadata, and tokenizer.
+/* Pure Native C Direct BF16 -> Heterogeneous Mixed INT3/INT4-g64 Container Builder for Qwen3.6-35B-A3B.
+ * Converts authoritative BF16 safetensors shards directly to a mixed container based on an allocation manifest.
  *
+ * For each expert:
+ *   if manifest specifies INT4 (fmt=4): direct BF16 -> INT4-g64 (1,572,864 B)
+ *   if manifest specifies INT3 (fmt=5): direct BF16 -> INT3-g64 (1,179,648 B)
+ *
+ * Emits complete self-contained container with dense weights in FP16, global embeddings, and metadata.
  * NO Python dependency. Compiles with gcc -O3 -fopenmp -mavx512f -mavx512bw -mf16c.
  */
 #define _GNU_SOURCE
@@ -33,6 +36,8 @@
 #define GU_ELEMS_PER_EXPERT (2 * INTER_SIZE * HIDDEN_SIZE) /* 2,097,152 */
 #define D_ELEMS_PER_EXPERT (HIDDEN_SIZE * INTER_SIZE)       /* 1,048,576 */
 #define WEIGHTS_PER_EXPERT (GU_ELEMS_PER_EXPERT + D_ELEMS_PER_EXPERT) /* 3,145,728 */
+#define GROUPS_PER_EXPERT 49152
+#define SCALE_BYTES_PER_EXPERT (GROUPS_PER_EXPERT * 4)
 
 typedef struct {
     char name[256];
@@ -42,6 +47,32 @@ typedef struct {
     int64_t nbytes;
     void *src_buf;
 } OutTensor;
+
+static inline void f32_to_f16_array(const float *src, uint16_t *dst, int64_t n) {
+    int64_t i = 0;
+#if defined(__F16C__)
+    for (; i + 8 <= n; i += 8) {
+        __m256 f = _mm256_loadu_ps(src + i);
+        __m128i h = _mm256_cvtps_ph(f, _MM_FROUND_TO_NEAREST_INT |_MM_FROUND_NO_EXC);
+        _mm_storeu_si128((__m128i*)(dst + i), h);
+    }
+#endif
+    for (; i < n; i++) {
+#if defined(__F16C__)
+        __m128 f1 = _mm_set_ss(src[i]);
+        __m128i h1 = _mm_cvtps_ph(f1, _MM_FROUND_TO_NEAREST_INT |_MM_FROUND_NO_EXC);
+        dst[i] = (uint16_t)_mm_extract_epi16(h1, 0);
+#else
+        union { float f; uint32_t u; } v; v.f = src[i];
+        uint32_t sign = (v.u >> 16) & 0x8000;
+        int32_t exp = ((v.u >> 23) & 0xFF) - 127 + 15;
+        uint32_t mant = v.u & 0x7FFFFF;
+        if (exp <= 0) dst[i] = sign;
+        else if (exp >= 31) dst[i] = sign | 0x7C00;
+        else dst[i] = sign | (exp << 10) | (mant >> 13);
+#endif
+    }
+}
 
 static inline void quantize_group_f32_to_i3(const float *w, uint8_t *lo, uint8_t *hi, float *s_out) {
     float max_abs = 0.0f;
@@ -163,14 +194,12 @@ static void write_shard(const char *dst_path, OutTensor *tensors, int n_tensors)
     free(hbuf);
 }
 
-/* Load allocation map: layer*256+eid -> fmt (4 or 5) */
 static int load_allocation_map(const char *manifest_path, int *fmt_map) {
     for (int i = 0; i < TOTAL_EXPERTS; i++) fmt_map[i] = 5; /* default INT3 */
-    char *buf = NULL; size_t sz = 0;
     FILE *f = fopen(manifest_path, "rb");
     if (!f) { fprintf(stderr, "Error: Could not open manifest %s\n", manifest_path); return 0; }
-    fseek(f, 0, SEEK_END); sz = ftell(f); fseek(f, 0, SEEK_SET);
-    buf = malloc(sz + 1);
+    fseek(f, 0, SEEK_END); size_t sz = ftell(f); fseek(f, 0, SEEK_SET);
+    char *buf = malloc(sz + 1);
     if (!buf) { fclose(f); return 0; }
     if (fread(buf, 1, sz, f) != sz) { free(buf); fclose(f); return 0; }
     buf[sz] = '\0'; fclose(f);
@@ -196,14 +225,69 @@ static int load_allocation_map(const char *manifest_path, int *fmt_map) {
     }
     free(buf);
     free(arena);
-    printf("Loaded allocation map: %d INT4 experts, %d INT3 experts (Total %d)\n",
-           count_i4, count_i3, count_i4 + count_i3);
+    printf("Loaded allocation map: %d INT4 experts (%.2f%%), %d INT3 experts\n",
+           count_i4, (double)count_i4 * 100.0 / TOTAL_EXPERTS, count_i3);
     return 1;
+}
+
+int convert_globals_direct(shards *S, const char *dst_dir) {
+    char dst_path[1024];
+    snprintf(dst_path, sizeof(dst_path), "%s/model-globals.safetensors", dst_dir);
+
+    const char *glob_keys[3][2] = {
+        {"model.language_model.embed_tokens.weight", "model.embed_tokens.weight"},
+        {"model.language_model.lm_head.weight", "lm_head.weight"},
+        {"model.language_model.norm.weight", "model.norm.weight"}
+    };
+    const char *out_names[3] = {
+        "model.embed_tokens.weight",
+        "lm_head.weight",
+        "model.norm.weight"
+    };
+
+    OutTensor out_tensors[3];
+    uint16_t *glob_blobs[3];
+    int n_out = 0;
+
+    for (int k = 0; k < 3; k++) {
+        const char *k1 = glob_keys[k][0];
+        const char *k2 = glob_keys[k][1];
+        const char *src_k = st_find(S, k1) ? k1 : (st_find(S, k2) ? k2 : NULL);
+        if (!src_k) {
+            fprintf(stderr, "Global tensor %s not found in source shards\n", k1);
+            continue;
+        }
+        st_tensor *st = st_find(S, src_k);
+        OutTensor *ot = &out_tensors[n_out++];
+        strcpy(ot->name, out_names[k]);
+        strcpy(ot->dtype, "F16");
+        ot->rank = st->rank;
+        for (int r = 0; r < st->rank; r++) ot->shape[r] = st->shape[r];
+        ot->nbytes = st->numel * sizeof(uint16_t);
+
+        float *f32_tmp = malloc((size_t)st->numel * sizeof(float));
+        uint16_t *f16_buf = malloc((size_t)st->numel * sizeof(uint16_t));
+        if (!f32_tmp || !f16_buf) { fprintf(stderr, "OOM reading global tensor %s\n", src_k); exit(1); }
+
+        st_read_f32(S, src_k, f32_tmp, 0);
+        f32_to_f16_array(f32_tmp, f16_buf, st->numel);
+        free(f32_tmp);
+
+        glob_blobs[k] = f16_buf;
+        ot->src_buf = f16_buf;
+    }
+
+    if (n_out > 0) {
+        write_shard(dst_path, out_tensors, n_out);
+        printf("[direct-c] wrote globals shard -> %s (%d tensors)\n", dst_path, n_out);
+        for (int k = 0; k < n_out; k++) free(glob_blobs[k]);
+    }
+    return 0;
 }
 
 int main(int argc, char **argv) {
     if (argc < 4) {
-        fprintf(stderr, "Usage: %s <source_model_dir> <manifest.json> <output_dir>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <bf16_source_shards_dir> <manifest.json> <output_dir>\n", argv[0]);
         return 1;
     }
     const char *src_dir = argv[1];
@@ -211,124 +295,78 @@ int main(int argc, char **argv) {
     const char *out_dir = argv[3];
     mkdir(out_dir, 0755);
 
-    printf("=== Pure C Mixed INT3/INT4 Container Builder ===\n");
-    printf("Source Model: %s\nManifest: %s\nOutput Dir: %s\n", src_dir, manifest_path, out_dir);
+    printf("=== Pure C Direct BF16 -> Mixed INT3/INT4 Container Builder ===\n");
+    printf("Authoritative Source Shards: %s\nManifest: %s\nOutput Dir: %s\n\n",
+           src_dir, manifest_path, out_dir);
 
     int *fmt_map = malloc(TOTAL_EXPERTS * sizeof(int));
-    if (!load_allocation_map(manifest_path, fmt_map)) {
-        return 1;
-    }
+    if (!load_allocation_map(manifest_path, fmt_map)) return 1;
 
     shards S;
     st_init(&S, src_dir);
+
+    convert_globals_direct(&S, out_dir);
 
     #pragma omp parallel for schedule(dynamic)
     for (int l = 0; l < NUM_LAYERS; l++) {
         char dst_path[1024];
         snprintf(dst_path, sizeof(dst_path), "%s/model-%05d.safetensors", out_dir, l);
 
+        char gu_name1[256], gu_name2[256], d_name1[256], d_name2[256];
+        snprintf(gu_name1, sizeof(gu_name1), "model.language_model.layers.%d.mlp.experts.gate_up_proj", l);
+        snprintf(gu_name2, sizeof(gu_name2), "model.layers.%d.mlp.experts.gate_up_proj", l);
+        snprintf(d_name1, sizeof(d_name1), "model.language_model.layers.%d.mlp.experts.down_proj", l);
+        snprintf(d_name2, sizeof(d_name2), "model.layers.%d.mlp.experts.down_proj", l);
+
+        const char *gu_name = st_find(&S, gu_name1) ? gu_name1 : (st_find(&S, gu_name2) ? gu_name2 : NULL);
+        const char *d_name  = st_find(&S, d_name1) ? d_name1 : (st_find(&S, d_name2) ? d_name2 : NULL);
+
+        if (!gu_name || !d_name) {
+            fprintf(stderr, "Layer %d: routed experts not found in source shards\n", l);
+            exit(1);
+        }
+
         OutTensor out_tensors[600];
         int n_out = 0;
 
         uint8_t *w_all[NUM_EXPERTS];
         float *s_all[NUM_EXPERTS];
-        float *dense_blobs[64];
+        uint16_t *dense_blobs[64];
         int n_dense = 0;
-
-        /* 1. Quantize each expert according to its assigned format */
-        float *gu = malloc(GU_ELEMS_PER_EXPERT * sizeof(float));
-        float *down = malloc(D_ELEMS_PER_EXPERT * sizeof(float));
 
         for (int e = 0; e < NUM_EXPERTS; e++) {
             int idx = l * NUM_EXPERTS + e;
             int fmt = fmt_map[idx];
 
-            char nm[256], qsnm[256];
-            snprintf(nm, sizeof(nm), "model.layers.%d.mlp.experts.%d.merged_weight", l, e);
-            snprintf(qsnm, sizeof(qsnm), "model.layers.%d.mlp.experts.%d.qs", l, e);
+            float *gu_buf = malloc((size_t)GU_ELEMS_PER_EXPERT * sizeof(float));
+            float *d_buf  = malloc((size_t)D_ELEMS_PER_EXPERT * sizeof(float));
+            if (!gu_buf || !d_buf) { fprintf(stderr, "OOM allocating expert buffers\n"); exit(1); }
 
-            st_tensor *tw = st_find(&S, nm);
-            st_tensor *ts = st_find(&S, qsnm);
-            if (!tw || !ts) {
-                fprintf(stderr, "Missing expert %s in source\n", nm); exit(1);
-            }
+            st_read_slice_f32(&S, gu_name, (int64_t)e * GU_ELEMS_PER_EXPERT, GU_ELEMS_PER_EXPERT, gu_buf, 0);
+            st_read_slice_f32(&S, d_name,  (int64_t)e * D_ELEMS_PER_EXPERT,  D_ELEMS_PER_EXPERT,  d_buf,  0);
 
-            uint8_t *raw_src = malloc(tw->nbytes);
-            st_read_raw(&S, nm, raw_src, 0);
-            float *scales_src = malloc(49152 * sizeof(float));
-            st_read_f32(&S, qsnm, scales_src, 0);
-
-            /* Dequantize source */
-            int g_idx = 0;
-            if (tw->nbytes == 1572864) {
-                for (int i = 0; i < GU_ELEMS_PER_EXPERT; i += 64) {
-                    float sc = scales_src[g_idx++];
-                    for (int k = 0; k < 64; k++) {
-                        int byte_idx = (i + k) >> 1;
-                        uint8_t b = raw_src[byte_idx];
-                        int8_t v = (int8_t)(((i + k) & 1) ? ((b >> 4) & 0xF) : (b & 0xF));
-                        if (v & 8) v -= 16;
-                        gu[i + k] = (float)v * sc;
-                    }
-                }
-                for (int i = 0; i < D_ELEMS_PER_EXPERT; i += 64) {
-                    float sc = scales_src[g_idx++];
-                    for (int k = 0; k < 64; k++) {
-                        int byte_idx = (GU_ELEMS_PER_EXPERT / 2) + ((i + k) >> 1);
-                        uint8_t b = raw_src[byte_idx];
-                        int8_t v = (int8_t)(((i + k) & 1) ? ((b >> 4) & 0xF) : (b & 0xF));
-                        if (v & 8) v -= 16;
-                        down[i + k] = (float)v * sc;
-                    }
-                }
-            } else if (tw->nbytes == 1179648) {
-                for (int i = 0; i < GU_ELEMS_PER_EXPERT; i += 64) {
-                    float sc = scales_src[g_idx];
-                    const uint8_t *lo = raw_src + g_idx * I3_GBYTES, *hi = lo + 16;
-                    g_idx++;
-                    for (int k = 0; k < 64; k++) {
-                        uint8_t lbyte = lo[k >> 2], hbyte = hi[k >> 3];
-                        uint8_t lbits = (lbyte >> ((k & 3) * 2)) & 3, hbit = (hbyte >> (k & 7)) & 1;
-                        unsigned u = (unsigned)lbits | ((unsigned)hbit << 2);
-                        gu[i + k] = (float)((int)u - 4) * sc;
-                    }
-                }
-                for (int i = 0; i < D_ELEMS_PER_EXPERT; i += 64) {
-                    float sc = scales_src[g_idx];
-                    const uint8_t *lo = raw_src + g_idx * I3_GBYTES, *hi = lo + 16;
-                    g_idx++;
-                    for (int k = 0; k < 64; k++) {
-                        uint8_t lbyte = lo[k >> 2], hbyte = hi[k >> 3];
-                        uint8_t lbits = (lbyte >> ((k & 3) * 2)) & 3, hbit = (hbyte >> (k & 7)) & 1;
-                        unsigned u = (unsigned)lbits | ((unsigned)hbit << 2);
-                        down[i + k] = (float)((int)u - 4) * sc;
-                    }
-                }
-            }
-            free(raw_src);
-            free(scales_src);
-
-            /* Target format quantization */
             size_t w_bytes = (fmt == 4) ? 1572864 : 1179648;
             uint8_t *dst_w = malloc(w_bytes);
-            float *dst_s = malloc(49152 * sizeof(float));
+            float *dst_s = malloc((size_t)GROUPS_PER_EXPERT * sizeof(float));
 
             if (fmt == 4) {
-                quantize_expert_i4(gu, down, dst_w, dst_s);
+                quantize_expert_i4(gu_buf, d_buf, dst_w, dst_s);
             } else {
-                quantize_expert_i3(gu, down, dst_w, dst_s);
+                quantize_expert_i3(gu_buf, d_buf, dst_w, dst_s);
             }
+
+            free(gu_buf);
+            free(d_buf);
 
             w_all[e] = dst_w;
             s_all[e] = dst_s;
 
-            /* Add to OutTensor list */
             OutTensor *ot_s = &out_tensors[n_out++];
             snprintf(ot_s->name, sizeof(ot_s->name), "model.layers.%d.mlp.experts.%d.qs", l, e);
             strcpy(ot_s->dtype, "F32");
             ot_s->rank = 1;
-            ot_s->shape[0] = 49152;
-            ot_s->nbytes = 49152 * sizeof(float);
+            ot_s->shape[0] = GROUPS_PER_EXPERT;
+            ot_s->nbytes = SCALE_BYTES_PER_EXPERT;
             ot_s->src_buf = dst_s;
 
             OutTensor *ot_w = &out_tensors[n_out++];
@@ -339,29 +377,42 @@ int main(int argc, char **argv) {
             ot_w->nbytes = w_bytes;
             ot_w->src_buf = dst_w;
         }
-        free(gu);
-        free(down);
 
-        /* 2. Copy all dense weights for layer l */
-        char prefix[64];
-        snprintf(prefix, sizeof(prefix), "model.layers.%d.", l);
-        size_t p_len = strlen(prefix);
+        /* Copy and convert all dense weights for layer l */
+        char prefix1[64], prefix2[64];
+        snprintf(prefix1, sizeof(prefix1), "model.language_model.layers.%d.", l);
+        snprintf(prefix2, sizeof(prefix2), "model.layers.%d.", l);
+        size_t p1_len = strlen(prefix1), p2_len = strlen(prefix2);
 
         for (int i = 0; i < S.n; i++) {
             const char *tname = S.t[i].name;
-            if (strncmp(tname, prefix, p_len) == 0 && strstr(tname, ".mlp.experts.") == NULL) {
+            int match = 0;
+            const char *clean_suffix = NULL;
+            if (strncmp(tname, prefix1, p1_len) == 0 && strstr(tname, ".mlp.experts.") == NULL) {
+                match = 1; clean_suffix = tname + p1_len;
+            } else if (strncmp(tname, prefix2, p2_len) == 0 && strstr(tname, ".mlp.experts.") == NULL) {
+                match = 1; clean_suffix = tname + p2_len;
+            }
+
+            if (match) {
                 st_tensor *st = &S.t[i];
                 OutTensor *ot = &out_tensors[n_out++];
-                strcpy(ot->name, tname);
-                strcpy(ot->dtype, (st->dtype == 2) ? "F32" : (st->dtype == 1) ? "F16" : "U8");
+                snprintf(ot->name, sizeof(ot->name), "model.layers.%d.%s", l, clean_suffix);
+                strcpy(ot->dtype, "F16");
                 ot->rank = st->rank;
                 for (int r = 0; r < st->rank; r++) ot->shape[r] = st->shape[r];
-                ot->nbytes = st->nbytes;
+                ot->nbytes = st->numel * sizeof(uint16_t);
 
-                void *dense_buf = malloc(st->nbytes);
-                st_read_raw(&S, tname, dense_buf, 0);
-                dense_blobs[n_dense++] = (float*)dense_buf;
-                ot->src_buf = dense_buf;
+                float *f32_tmp = malloc((size_t)st->numel * sizeof(float));
+                uint16_t *f16_buf = malloc((size_t)st->numel * sizeof(uint16_t));
+                if (!f32_tmp || !f16_buf) { fprintf(stderr, "OOM reading dense tensor %s\n", tname); exit(1); }
+
+                st_read_f32(&S, tname, f32_tmp, 0);
+                f32_to_f16_array(f32_tmp, f16_buf, st->numel);
+                free(f32_tmp);
+
+                dense_blobs[n_dense++] = f16_buf;
+                ot->src_buf = f16_buf;
             }
         }
 
@@ -369,21 +420,17 @@ int main(int argc, char **argv) {
 
         for (int e = 0; e < NUM_EXPERTS; e++) { free(w_all[e]); free(s_all[e]); }
         for (int i = 0; i < n_dense; i++) free(dense_blobs[i]);
-        printf("[Layer %02d/40] Wrote mixed shard: %s (%d tensors)\n", l, dst_path, n_out);
+        printf("[direct-c] wrote layer shard %02d / %02d -> %s (%d tensors)\n", l + 1, NUM_LAYERS, dst_path, n_out);
     }
 
-    /* 3. Copy globals shard */
+    /* Copy metadata files */
     char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "cp %s/model-globals.safetensors %s/model-globals.safetensors 2>/dev/null || true", src_dir, out_dir);
+    snprintf(cmd, sizeof(cmd), "cp %s/config.json %s/tokenizer.json /home/nayte/models/qwen36_i3_gs64_clean/qwen36_meta.json %s/ 2>/dev/null || true", src_dir, src_dir, out_dir);
     int rc = system(cmd); (void)rc;
-
-    /* 4. Copy config.json, tokenizer.json, qwen36_meta.json, manifest */
-    snprintf(cmd, sizeof(cmd), "cp %s/config.json %s/tokenizer.json %s/qwen36_meta.json %s/ 2>/dev/null || true", src_dir, src_dir, src_dir, out_dir);
-    rc = system(cmd); (void)rc;
     snprintf(cmd, sizeof(cmd), "cp %s %s/allocation_manifest.json", manifest_path, out_dir);
     rc = system(cmd); (void)rc;
 
-    printf("=== Mixed Container Build Complete: %s ===\n", out_dir);
+    printf("\n=== Direct BF16 Mixed Container Build Complete: %s ===\n", out_dir);
     free(fmt_map);
     return 0;
 }
