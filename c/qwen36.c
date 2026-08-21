@@ -1490,17 +1490,31 @@ static void model_init(Model *m, const char *snap, int cap, int bits) {
 static int64_t scale_count_gu(const Cfg *c){ return c->expert_gs ? (int64_t)c->inter * ((c->hidden + c->expert_gs - 1) / c->expert_gs) : c->inter; }
 static int64_t scale_count_d (const Cfg *c){ return c->expert_gs ? (int64_t)c->hidden * ((c->inter  + c->expert_gs - 1) / c->expert_gs) : c->hidden; }
 
-static int container_fmt(Model *m) {
+static int expert_fmt(Model *m, int layer, int eid) {
+    char nm[256];
+    int la = m->active_of[layer];
+    snprintf(nm, sizeof(nm), "model.layers.%d.mlp.experts.%d.merged_weight", la, eid);
+    st_tensor *tw = st_find(&m->S, nm);
+    if (!tw) return 1;
     Cfg *cc = &m->c;
     int64_t ng = (int64_t)cc->inter * cc->hidden, nd = (int64_t)cc->hidden * cc->inter;
     int64_t want_w = ng + ng + nd;
-    char nm[256];
-    snprintf(nm, sizeof(nm), "model.layers.0.mlp.experts.0.merged_weight");
-    st_tensor *tw = st_find(&m->S, nm);
-    if (!tw) return 1;
-    if (tw->nbytes == (want_w / 64) * 24) return 5; /* fmt=5 INT3-g64 (1,179,648 B) */
-    if (tw->nbytes == want_w / 2) return 4;         /* fmt=4 INT4-g64 (1,572,864 B) */
-    return 1;                                       /* fmt=1 INT8 (3,145,728 B) */
+    int64_t want_w3 = (want_w / 64) * 24;
+    if (tw->nbytes == want_w3) return 5; /* fmt=5 INT3-g64 (1,179,648 B) */
+    if (tw->nbytes == want_w / 2) return 4; /* fmt=4 INT4-g64 (1,572,864 B) */
+    if (tw->nbytes == want_w) return 1;     /* fmt=1 INT8 (3,145,728 B) */
+    return 1;
+}
+
+static int container_fmt(Model *m) {
+    int f0 = expert_fmt(m, 0, 0);
+    for (int l = 0; l < m->c.n_layers; l += 4) {
+        for (int e = 0; e < m->c.n_experts; e += 32) {
+            int fe = expert_fmt(m, l, e);
+            if (fe > 0 && fe != f0) return 0; /* fmt=0 indicates heterogeneous/mixed container */
+        }
+    }
+    return f0;
 }
 
 static int container_is_int3(Model *m) { return container_fmt(m) == 5; }
@@ -1512,54 +1526,84 @@ static int unpack_int8_mode(void) {
     return v;
 }
 
-static void slot_ensure_allocated(Model *m, Slot *s) {
-    if (s->w3 || s->w4 || s->g) return;
+static void slot_ensure_format(Model *m, Slot *s, int fmt) {
     Cfg *c = &m->c;
     int64_t ng = (int64_t)c->inter * c->hidden;
     int64_t nd = (int64_t)c->hidden * c->inter;
     int64_t want_w = ng + ng + nd;
-    int fmt = container_fmt(m);
+    int64_t want_w3 = (want_w / 64) * 24;
+    int64_t want_w4 = want_w / 2;
+
+    if (!s->gs) {
+        float *s_block = falloc(2 * scale_count_gu(c) + scale_count_d(c));
+        s->gs = s_block;
+        s->us = s_block + scale_count_gu(c);
+        s->ds = s_block + 2 * scale_count_gu(c);
+        s->pinned = 0;
+    }
 
     if (fmt == 5) {
         /* INT3-g64: 24 bytes per 64 weights */
-        int64_t want_w3 = (want_w / 64) * 24;
         int64_t g_sz = (ng / 64) * 24;
-        uint8_t *w3_block = malloc((size_t)want_w3);
-        if (!w3_block) { fprintf(stderr, "Error: OOM allocating INT3 slot weights\n"); exit(1); }
-        s->w3 = w3_block;
-        s->g3 = w3_block;
-        s->u3 = w3_block + g_sz;
-        s->d3 = w3_block + g_sz + g_sz;
-        s->w4 = NULL; s->g4 = NULL; s->u4 = NULL; s->d4 = NULL;
-        s->g = NULL; s->u = NULL; s->d = NULL;
-        s->is_int3 = 1; s->is_int4 = 0;
+        if (!s->w3) {
+            if (s->w4) {
+                s->w3 = s->w4;
+            } else if (s->g) {
+                s->w3 = (uint8_t*)s->g;
+            } else {
+                s->w3 = malloc((size_t)want_w3);
+                if (!s->w3) { fprintf(stderr, "Error: OOM allocating INT3 slot weights\n"); exit(1); }
+            }
+        }
+        s->g3 = s->w3;
+        s->u3 = s->w3 + g_sz;
+        s->d3 = s->w3 + g_sz + g_sz;
+        s->is_int3 = 1;
+        s->is_int4 = 0;
     } else if (fmt == 4 && !unpack_int8_mode()) {
         /* Packed INT4 */
-        uint8_t *w4_block = malloc((size_t)(want_w / 2));
-        if (!w4_block) { fprintf(stderr, "Error: OOM allocating packed slot weights\n"); exit(1); }
-        s->w4 = w4_block;
-        s->g4 = w4_block;
-        s->u4 = w4_block + ng / 2;
-        s->d4 = w4_block + (ng + ng) / 2;
-        s->w3 = NULL; s->g3 = NULL; s->u3 = NULL; s->d3 = NULL;
-        s->g = NULL; s->u = NULL; s->d = NULL;
-        s->is_int4 = 1; s->is_int3 = 0;
+        if (!s->w4) {
+            if (s->g) {
+                s->w4 = (uint8_t*)s->g;
+            } else if (s->w3) {
+                s->w4 = realloc(s->w3, (size_t)want_w4);
+                if (!s->w4) { fprintf(stderr, "Error: OOM expanding slot weights to INT4\n"); exit(1); }
+                s->w3 = NULL;
+            } else {
+                s->w4 = malloc((size_t)want_w4);
+                if (!s->w4) { fprintf(stderr, "Error: OOM allocating packed slot weights\n"); exit(1); }
+            }
+        }
+        s->g4 = s->w4;
+        s->u4 = s->w4 + ng / 2;
+        s->d4 = s->w4 + (ng + ng) / 2;
+        s->is_int4 = 1;
+        s->is_int3 = 0;
     } else {
         /* Unpacked INT8 */
-        int8_t *w_block = malloc(want_w);
-        if (!w_block) { fprintf(stderr, "Error: OOM allocating slot weights\n"); exit(1); }
-        s->g = w_block;
-        s->u = w_block + ng;
-        s->d = w_block + ng + ng;
-        s->w3 = NULL; s->g3 = NULL; s->u3 = NULL; s->d3 = NULL;
-        s->w4 = NULL; s->g4 = NULL; s->u4 = NULL; s->d4 = NULL;
-        s->is_int4 = 0; s->is_int3 = 0;
+        if (!s->g) {
+            if (s->w4) {
+                s->g = (int8_t*)realloc(s->w4, (size_t)want_w);
+                s->w4 = NULL;
+            } else if (s->w3) {
+                s->g = (int8_t*)realloc(s->w3, (size_t)want_w);
+                s->w3 = NULL;
+            } else {
+                s->g = malloc((size_t)want_w);
+            }
+            if (!s->g) { fprintf(stderr, "Error: OOM allocating slot weights\n"); exit(1); }
+        }
+        s->u = s->g + ng;
+        s->d = s->g + ng + ng;
+        s->is_int4 = 0;
+        s->is_int3 = 0;
     }
-    float *s_block = falloc(2 * scale_count_gu(c) + scale_count_d(c));
-    s->gs = s_block;
-    s->us = s_block + scale_count_gu(c);
-    s->ds = s_block + 2 * scale_count_gu(c);
-    s->pinned = 0;
+}
+
+static void slot_ensure_allocated(Model *m, Slot *s) {
+    int fmt = container_fmt(m);
+    if (fmt == 0) fmt = 5; /* default to INT3 slot size for initial pre-alloc */
+    slot_ensure_format(m, s, fmt);
 }
 
 static void load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pilot) {
@@ -1583,18 +1627,20 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pil
     if (tw->nbytes == want_w3) {
         static int noted_3 = 0;
         if (!noted_3) { fprintf(stderr, "[qwen36] packed INT3-g64 expert CPU residency active (1.38 MB/slot)\n"); noted_3 = 1; }
+        slot_ensure_format(m, s, 5);
         st_read_raw(&m->S, nm, s->w3, 1);
         s->is_int3 = 1; s->is_int4 = 0;
     } else if (tw->nbytes == want_w / 2) {
-        s->is_int3 = 0;
-        if (s->w4) {
+        if (!unpack_int8_mode()) {
             static int noted_p = 0;
             if (!noted_p) { fprintf(stderr, "[qwen36] packed INT4 expert CPU residency active (1.77 MB/slot)\n"); noted_p = 1; }
+            slot_ensure_format(m, s, 4);
             st_read_raw(&m->S, nm, s->w4, 1);
-            s->is_int4 = 1;
+            s->is_int4 = 1; s->is_int3 = 0;
         } else {
             static int noted_u = 0;
             if (!noted_u) { fprintf(stderr, "[qwen36] int4 packed weights detected — unpacking to int8 in slot\n"); noted_u = 1; }
+            slot_ensure_format(m, s, 1);
             uint8_t *raw = (uint8_t *)malloc((size_t)(want_w / 2));
             if (!raw) { fprintf(stderr, "OOM reading int4 expert %s\n", nm); exit(1); }
             st_read_raw(&m->S, nm, raw, 1);
@@ -1604,10 +1650,11 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pil
                 if (v & 8) v -= 16;                 /* sign-extend signed 4-bit */
                 s->g[i] = v;
             }
-            s->is_int4 = 0;
+            s->is_int4 = 0; s->is_int3 = 0;
             free(raw);
         }
     } else {
+        slot_ensure_format(m, s, 1);
         s->is_int3 = 0;
         s->is_int4 = 0;
         st_read_raw(&m->S, nm, s->g, 1);
@@ -2749,7 +2796,7 @@ static void dump_routing_census(Model *m, const char *out_path) {
 static void print_exact_memory_accounting(Model *m) {
     Cfg *c = &m->c;
     int fmt = container_fmt(m);
-    const char *fmt_str = (fmt == 5) ? "PACKED INT3-g64" : (fmt == 4 && !unpack_int8_mode()) ? "PACKED INT4" : "UNPACKED INT8";
+    const char *fmt_str = (fmt == 5) ? "PACKED INT3-g64" : (fmt == 4 && !unpack_int8_mode()) ? "PACKED INT4" : (fmt == 0) ? "MIXED INT3/INT4-g64" : "UNPACKED INT8";
 
     uint64_t embed_bytes = m->embed_f16 ?
                            (uint64_t)c->vocab * c->hidden * sizeof(uint16_t) :
@@ -2786,19 +2833,20 @@ static void print_exact_memory_accounting(Model *m) {
 
     uint64_t fixed_post_quant_bytes = embed_bytes + unreg_f32_bytes + qdw_int8_bytes + qdw_scale_bytes + dn_state_bytes;
 
-    int64_t ng = (int64_t)c->inter * c->hidden, nd = (int64_t)c->hidden * c->inter;
-    int64_t want_w = ng + ng + nd;
-    int64_t want_s = 2 * scale_count_gu(c) + scale_count_d(c);
-    uint64_t slot_w_bytes = (fmt == 5) ? (uint64_t)((want_w / 64) * 24) :
-                            (fmt == 4 && !unpack_int8_mode()) ? (uint64_t)(want_w / 2) :
-                            (uint64_t)want_w;
-    uint64_t slot_s_bytes = (uint64_t)want_s * sizeof(float);
-    uint64_t slot_struct_bytes = sizeof(Slot);
-    uint64_t bytes_per_slot = slot_w_bytes + slot_s_bytes + slot_struct_bytes;
-
-    uint64_t total_allocated_slots = 0;
-    for (int l = 0; l < c->n_layers; l++) total_allocated_slots += m->cache[l].n;
-    uint64_t allocated_expert_bytes = total_allocated_slots * bytes_per_slot;
+    int total_int3_slots = 0;
+    int total_int4_slots = 0;
+    int total_int8_slots = 0;
+    for (int l = 0; l < c->n_layers; l++) {
+        for (int s = 0; s < m->cache[l].n; s++) {
+            if (m->cache[l].slots[s].is_int3) total_int3_slots++;
+            else if (m->cache[l].slots[s].is_int4) total_int4_slots++;
+            else total_int8_slots++;
+        }
+    }
+    uint64_t total_allocated_slots = total_int3_slots + total_int4_slots + total_int8_slots;
+    uint64_t allocated_expert_bytes = (uint64_t)total_int3_slots * 1376392ULL +
+                                      (uint64_t)total_int4_slots * 1769608ULL +
+                                      (uint64_t)total_int8_slots * 3342472ULL;
 
     fprintf(stderr, "\n=======================================================\n");
     fprintf(stderr, "=== EXACT LIVE MEMORY ACCOUNTING (QWEN3.6-35B-A3B) ===\n");
@@ -2819,10 +2867,10 @@ static void print_exact_memory_accounting(Model *m) {
     fprintf(stderr, "-------------------------------------------------------\n");
     fprintf(stderr, "POST-QUANT FIXED RESIDENT FLOOR:           %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
             (unsigned long long)fixed_post_quant_bytes, (double)fixed_post_quant_bytes/1048576.0, (double)fixed_post_quant_bytes/1073741824.0);
-    fprintf(stderr, "BYTES PER EXPERT SLOT (%s):          %12llu bytes (%7.4f MiB)\n",
-            fmt_str, (unsigned long long)bytes_per_slot, (double)bytes_per_slot/1048576.0);
-    fprintf(stderr, "ALLOCATED EXPERT SLOTS (%llu slots):        %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
-            (unsigned long long)total_allocated_slots, (unsigned long long)allocated_expert_bytes,
+    fprintf(stderr, "ACTIVE EXPERT CACHE FORMAT:                %s\n", fmt_str);
+    fprintf(stderr, "ALLOCATED EXPERT SLOTS (%llu slots: %d INT3, %d INT4): %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
+            (unsigned long long)total_allocated_slots, total_int3_slots, total_int4_slots,
+            (unsigned long long)allocated_expert_bytes,
             (double)allocated_expert_bytes/1048576.0, (double)allocated_expert_bytes/1073741824.0);
     fprintf(stderr, "TOTAL COMPUTED LIVE RESIDENT:              %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
             (unsigned long long)(fixed_post_quant_bytes + allocated_expert_bytes + kv_cache_bytes),
@@ -2848,8 +2896,8 @@ static void probe_touch_all_cache_slots(Model *m) {
         for (int s = 0; s < m->cache[l].cap; s++) {
             Slot *slot = &m->cache[l].slots[s];
             slot_ensure_allocated(m, slot);
-            if (fmt == 5 && slot->w3) memset(slot->w3, 0x55, (size_t)((want_w / 64) * 24));
-            else if (fmt == 4 && slot->w4) memset(slot->w4, 0x55, (size_t)(want_w / 2));
+            if (slot->w3) memset(slot->w3, 0x55, (size_t)((want_w / 64) * 24));
+            else if (slot->w4) memset(slot->w4, 0x55, (size_t)(want_w / 2));
             else if (slot->g) memset(slot->g, 1, (size_t)want_w);
             if (slot->gs) memset(slot->gs, 0, (size_t)want_s * sizeof(float));
         }
@@ -2868,6 +2916,19 @@ int main(int argc, char **argv) {
     const char *mv = getenv("MODEL"); if (mv && *mv) g_model = mv;
     int hot_n = getenv("HOT") ? atoi(getenv("HOT")) : 0;
     int cap   = argc > 1 ? atoi(argv[1]) : 16;
+    const char *env_cgb = getenv("COLI_EXPERT_CACHE_GB");
+    if (env_cgb && *env_cgb) {
+        double budget_gb = atof(env_cgb);
+        if (budget_gb > 0.1) {
+            int total_slots = (int)((budget_gb * 1073741824.0) / 1572864.0);
+            int cap_dyn = total_slots / 40;
+            if (cap_dyn < 4) cap_dyn = 4;
+            if (cap_dyn > 256) cap_dyn = 256;
+            cap = cap_dyn;
+            fprintf(stderr, "[cache_budget] COLI_EXPERT_CACHE_GB=%.2f GB -> cap=%d/layer (%d total slots)\n",
+                    budget_gb, cap, cap * 40);
+        }
+    }
     int bits  = argc > 2 ? atoi(argv[2]) : 4;
     /* cap < 1 leaves every layer cache empty, so expert_get finds no slot to
      * evict and waits for a publish that can never come. The old lru=0 fallback
