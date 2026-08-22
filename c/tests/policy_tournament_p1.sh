@@ -73,11 +73,15 @@ for POLSPEC in \
       DMP=$(awk -v m="$M" -v b="$BM" 'BEGIN{if(b>0) printf "%.2f", (b-m)*100/b; else print "n/a"}')
       BK=$(( (Q + IN + W + DF) - BQ ))
       ADM=$(awk -v d="$DMP" 'BEGIN{print (d<0?-d:d)}')
+      # Adjudication terminology (V4R.1 review): the simulator is deterministic
+      # — tiny effects are NOT "noise"; label them by materiality instead.
+      # Materiality rule (campaign): >=20% demand-miss reduction required for
+      # READY_FOR_LIVE_AB candidacy; 0.05-20% = negligible/below-threshold;
+      # <=-1% = loss. There is no stochastic noise floor in this harness.
       if   $(awk -v d="$DMP" 'BEGIN{exit !(d>=20)}'); then VER="WIN@cad"
       elif $(awk -v d="$DMP" 'BEGIN{exit !(d<=-1)}'); then VER="LOSS@cad"
-      elif $(awk -v d="$DMP" 'BEGIN{exit !(d>=0.5)}'); then VER="minor@cad"
-      elif $(awk -v d="$DMP" 'BEGIN{exit !(d>=0.05)}'); then VER="noise+"; else VER="~base"; fi
-      if [ "$VER" != "~base" ] && [ "${VER#noise}" = "+${VER#noise+}" ] 2>/dev/null; then :; fi
+      elif $(awk -v d="$DMP" 'BEGIN{exit !(d>=0.5)}'); then VER="below-materiality@cad"
+      elif $(awk -v d="$DMP" 'BEGIN{exit !(d>=0.05)}'); then VER="negligible@cad"; else VER="null@cad"; fi
       # backlog-shift law
       if [ "$BK" -gt 64 ]; then VER="$VER+BACKLOG_SHIFT"; fi
     fi
