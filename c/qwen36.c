@@ -778,6 +778,26 @@ static FILE *g_trace_fp = NULL;
 static uint64_t g_trace_seq = 0;
 static int64_t g_trace_tok = -1;
 static int64_t g_trace_tok_base = 0;   /* running decode index across corpus prompts */
+/* ---- v4 POLICY-INDEPENDENT REQUEST STREAM (COLI_TRACE_REQ=<path>) ----
+ * Counterfactual replay input: every admission REQUEST in global order with
+ * NO outcome fields (no HIT/EVICT/INSERT/victim/slot). The simulator owns all
+ * cache decisions. The v3 outcome trace remains a separate ORACLE artifact.
+ *   E  <layer> <eid> <fmt> <bytes>              static expert metadata
+ *   B  GEN <np> <n_new> <tok_base> <arm>        prompt/window boundary
+ *   R  DEMAND <tok> <layer> <eid> <router_mass> demand acquisition request
+ *   C  PC <srctok> <layer> <eid> <rank> <conf>  pilot candidate enqueued
+ *   Q  PQ <layer> <eid>                         worker dequeued candidate
+ *   P  DP|PP <layer> <eid>                      demand/pilot load published
+ * seq is a per-stream monotonic counter assigned under g_pilot_mx where the
+ * event is generated on a locked path. */
+static FILE *g_req_fp = NULL;
+static uint64_t g_req_seq = 0;
+static void req_emit(const char *kind, const char *body) {
+    if (!g_req_fp) return;
+    unsigned long long seq = ++g_req_seq;
+    fprintf(g_req_fp, "%llu %s %s\n", seq, kind, body);
+}
+static void req_emit_expert_meta(Model *m);   /* defined after st_* usage below */
 static void trace_emit(const char *cls, const char *event, int64_t tok, int layer,
                        int eid, int fmt, int64_t bytes, double adm_ms, int64_t victim_eid,
                        int slot) {
@@ -1877,11 +1897,45 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pil
     pthread_mutex_unlock(&g_io_stats_mx);
 }
 
-static void expert_get(Model *m, int layer, int eid, Slot **out) {
+/* Static per-(layer,eid) expert metadata for the v4 request stream: format and
+ * byte size are container constants, NOT cache outcomes — any policy needs
+ * them for byte-budget decisions. Mirrors load_expert_merged sizing exactly. */
+static void req_emit_expert_meta(Model *m) {
+    Cfg *cc = &m->c;
+    int64_t ng = (int64_t)cc->inter * cc->hidden, nd = (int64_t)cc->hidden * cc->inter;
+    int64_t want_w = ng + ng + nd;
+    int64_t want_w3 = (want_w / 64) * 24;
+    int64_t want_s = 2 * scale_count_gu(cc) + scale_count_d(cc);
+    for (int layer = 0; layer < cc->n_layers; layer++) {
+        int la = m->active_of[layer];
+        for (int eid = 0; eid < cc->n_experts; eid++) {
+            char nm[256], qsnm[256];
+            snprintf(nm, sizeof nm, "model.layers.%d.mlp.experts.%d.merged_weight", la, eid);
+            snprintf(qsnm, sizeof qsnm, "model.layers.%d.mlp.experts.%d.qs", la, eid);
+            st_tensor *tw = st_find(&m->S, nm), *ts = st_find(&m->S, qsnm);
+            int fmt = -1; int64_t bytes = -1;
+            if (tw && ts && ts->numel == want_s) {
+                if (tw->nbytes == want_w3) fmt = 3;
+                else if (tw->nbytes == want_w / 2) fmt = 4;
+                else if (tw->nbytes == want_w) fmt = 8;
+                bytes = tw->nbytes + ts->nbytes;
+            }
+            if (g_req_fp) { unsigned long long s_ = ++g_req_seq;
+                fprintf(g_req_fp, "%llu E %d %d %d %lld\n", s_, layer, eid, fmt, (long long)bytes); }
+        }
+    }
+}
+
+static void expert_get(Model *m, int layer, int eid, Slot **out, float router_mass) {
     LCache *lc = &m->cache[layer];
     int _tp = tm_on();
     double _tl0 = _tp ? tm_now() : 0;
     pthread_mutex_lock(&g_pilot_mx);
+    /* v4 request event: emitted BEFORE any cache decision — carries intent
+     * (who wants which expert, when, with what router mass), never outcomes */
+    if (g_req_fp) { unsigned long long s_ = ++g_req_seq;
+        fprintf(g_req_fp, "%llu R DEMAND %lld %d %d %.6f\n",
+                s_, (long long)g_trace_tok, layer, eid, (double)router_mass); }
     double _tl1 = _tp ? tm_now() : 0;
     double _ts0 = _tl1;
     for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) {
@@ -1910,6 +1964,8 @@ static void expert_get(Model *m, int layer, int eid, Slot **out) {
             pthread_mutex_lock(&g_pilot_mx);
             for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) {
                 /* the coalesced load published: serve as a resident hit */
+                if (g_req_fp) { unsigned long long s_ = ++g_req_seq;
+                    fprintf(g_req_fp, "%llu W WAKE %d %d\n", s_, layer, eid); }
                 m->hits++; g_acq_hits++; lc->slots[i].used = ++m->clock; *out = &lc->slots[i];
                 if ((*out)->is_int3) g_cache_hit_int3++;
                 else if ((*out)->is_int4) g_cache_hit_int4++;
@@ -1922,6 +1978,8 @@ static void expert_get(Model *m, int layer, int eid, Slot **out) {
         /* re-scan once more after the registry cleared; fall through to a
          * normal miss only if still absent */
         for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) {
+            if (g_req_fp) { unsigned long long s_ = ++g_req_seq;
+                fprintf(g_req_fp, "%llu W WAKE %d %d\n", s_, layer, eid); }
             m->hits++; g_acq_hits++; lc->slots[i].used = ++m->clock; *out = &lc->slots[i];
             if ((*out)->is_int3) g_cache_hit_int3++;
             else if ((*out)->is_int4) g_cache_hit_int4++;
@@ -1988,6 +2046,8 @@ static void expert_get(Model *m, int layer, int eid, Slot **out) {
     if (s->is_int3) g_cache_miss_int3++;
     else if (s->is_int4) g_cache_miss_int4++;
     if (_tp) g_eg_lock_wait_ms += tm_now() - _tl2;
+    if (g_req_fp) { unsigned long long s_ = ++g_req_seq;
+        fprintf(g_req_fp, "%llu P DP %d %d\n", s_, layer, eid); }   /* demand publish marker */
     trace_emit("DEMAND", "INSERT", g_trace_tok, layer, eid,
                res.fmt, res.bytes, res.ms, _victim_eid, (int)(s - lc->slots));
     *out = s; pthread_mutex_unlock(&g_pilot_mx);
@@ -2265,7 +2325,7 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
         double _t_lk = tm_on() ? tm_now() : 0.0;
         Slot *e_slots[256];
         for (int kk = 0; kk < K; kk++) {
-            expert_get(m, layer, idx[kk], &e_slots[kk]);
+            expert_get(m, layer, idx[kk], &e_slots[kk], val[kk]);
             if (S == 1) {
                 if (e_slots[kk]->is_int3) g_routed_int3_count++;
                 else if (e_slots[kk]->is_int4) g_routed_int4_count++;
@@ -2643,6 +2703,9 @@ static float *step(Model *m, const int *ids, int S, int pos_base) {
 static void pilot_realload(Model *m, int layer, int eid) {
     LCache *lc = &m->cache[layer]; Cfg *c = &m->c;
     pthread_mutex_lock(&g_pilot_mx);
+    /* Q event under the cache lock: shares the total order with R/C/P */
+    if (g_req_fp) { unsigned long long s_ = ++g_req_seq;
+        fprintf(g_req_fp, "%llu Q PQ %d %d\n", s_, layer, eid); }
     if (!m->is_queued[layer * c->n_experts + eid]) { pthread_mutex_unlock(&g_pilot_mx); return; }
     for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) { m->is_queued[layer*c->n_experts+eid]=0; pthread_mutex_unlock(&g_pilot_mx); return; }
     /* COALESCE: an admission (demand or pilot) is already loading this expert —
@@ -2674,6 +2737,8 @@ static void pilot_realload(Model *m, int layer, int eid) {
     s->eid = eid; s->pinned = m->is_pinned[layer*c->n_experts+eid]; s->used = ++m->clock;
     m->is_queued[layer*c->n_experts+eid] = 0;
     lc->loading[eid] = -1;   /* publish */
+    if (g_req_fp) { unsigned long long s_ = ++g_req_seq;
+        fprintf(g_req_fp, "%llu P PP %d %d\n", s_, layer, eid); }
     trace_emit("PILOT", "INSERT", -1, layer, eid, res.fmt, res.bytes, res.ms, victim_eid,
                (int)(s - lc->slots));
     pthread_mutex_unlock(&g_pilot_mx);
@@ -2736,15 +2801,23 @@ static void pilot_prefetch(Model *m, int lnext, const float *x, int S) {
             pthread_mutex_unlock(&g_pilot_mx);
             if (!found) {
                 int gidx = lnext*E + eid;
-                pthread_mutex_lock(&g_pilot_mx); int already_queued = m->is_queued[gidx];
-                if (!already_queued) m->is_queued[gidx] = 1;
-                pthread_mutex_unlock(&g_pilot_mx);
-                if (!already_queued) {
-                    unsigned w2 = __atomic_load_n(&pilot_w, __ATOMIC_RELAXED);
-                    unsigned r2 = __atomic_load_n(&pilot_r, __ATOMIC_ACQUIRE);
-                    if (w2 - r2 < 4096) { pilot_q[w2 & 4095].l = lnext; pilot_q[w2 & 4095].e = eid; __atomic_store_n(&pilot_w, w2+1, __ATOMIC_RELEASE); }
-                    else { pthread_mutex_lock(&g_pilot_mx); m->is_queued[gidx] = 0; pthread_mutex_unlock(&g_pilot_mx); }
+                /* enqueue entirely under g_pilot_mx so the C event shares the
+                 * same lock order as R/Q/P — the v4 stream is a true total
+                 * order of admission events */
+                pthread_mutex_lock(&g_pilot_mx);
+                int already_queued = m->is_queued[gidx];
+                unsigned w2 = __atomic_load_n(&pilot_w, __ATOMIC_RELAXED);
+                unsigned r2 = __atomic_load_n(&pilot_r, __ATOMIC_ACQUIRE);
+                if (!already_queued && w2 - r2 < 4096) {
+                    pilot_q[w2 & 4095].l = lnext; pilot_q[w2 & 4095].e = eid;
+                    __atomic_store_n(&pilot_w, w2 + 1, __ATOMIC_RELEASE);
+                    m->is_queued[gidx] = 1;
+                    if (g_req_fp) { unsigned long long s_ = ++g_req_seq;
+                        fprintf(g_req_fp, "%llu C PC %lld %d %d %d %.6f\n", s_,
+                                (long long)g_trace_tok, lnext, eid, kk,
+                                (double)(sum_exps > 0.f ? exps[eid] / sum_exps : 0.f)); }
                 }
+                pthread_mutex_unlock(&g_pilot_mx);
             }
         }
     }
@@ -2844,7 +2917,34 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out) {
                 }
             }
         }
+        /* v4 request stream: opened at the same choke point; expert meta and
+         * config identity are emitted once, boundary event once per prompt */
+        {
+            static int g_req_opened = 0;
+            if (!g_req_opened) {
+                const char *rp = getenv("COLI_TRACE_REQ");
+                if (rp && rp[0]) {
+                    g_req_fp = fopen(rp, "w");
+                    if (!g_req_fp) fprintf(stderr, "[req] cannot open %s — request stream disabled\n", rp);
+                    else {
+                        setvbuf(g_req_fp, NULL, _IOFBF, 1 << 20);
+                        { unsigned long long s_ = ++g_req_seq;
+                          fprintf(g_req_fp, "%llu # qwen36_req_stream v4 cap=%d ep=%d pilot=%s wide=%s omp=%s snap=%s\n",
+                                  s_, m->cache ? m->cache[0].cap : 0,
+                                  expert_parallel_on(), getenv("PILOT") ? getenv("PILOT") : "0",
+                                  getenv("COLI_WIDE") ? getenv("COLI_WIDE") : "-",
+                                  getenv("OMP_NUM_THREADS") ? getenv("OMP_NUM_THREADS") : "-",
+                                  getenv("SNAP") ? getenv("SNAP") : "-"); }
+                        req_emit_expert_meta(m);
+                    }
+                }
+                g_req_opened = 1;
+            }
+        }
         g_trace_tok = -1;   /* prefill acquisitions trace with tok=-1 */
+        if (g_req_fp) { unsigned long long s_ = ++g_req_seq;
+            fprintf(g_req_fp, "%llu B GEN %d %d %lld %s\n", s_, np, n_new,
+                    (long long)g_trace_tok_base, expert_parallel_on() ? "EP" : "REF"); }
     }
     for (int i = 0; i < np; i++) out[i] = prompt[i];
     float *logit = step(m, prompt, np, 0);
