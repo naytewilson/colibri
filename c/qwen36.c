@@ -2813,19 +2813,21 @@ static void pilot_prefetch(Model *m, int lnext, const float *x, int S) {
             int eid = idx[kk]; if (eid < 0) continue;
             /* v4 INTENT event: emitted UNCONDITIONALLY before residency /
              * queue-gating / ring-capacity decisions, so alternative policies
-             * can recover prefetch opportunities the baseline suppressed */
+             * can recover prefetch opportunities the baseline suppressed.
+             * R3: intent + decisions share ONE g_pilot_mx critical section —
+             * the C event is mutex-ordered like every other v4 event. */
+            pthread_mutex_lock(&g_pilot_mx);
+            LCache *lc = &m->cache[lnext];
             if (g_req_fp) { unsigned long long s_ = ++g_req_seq;
                 fprintf(g_req_fp, "%llu C PC %lld %d %d %d %d %.6f %d %lld\n", s_,
                         (long long)g_trace_tok, lnext, eid,
                         score_rank[kk], kk, (double)cand_conf[kk],
                         (g_req_meta_ready ? g_emeta_fmt[lnext][eid] : -1),
                         (long long)(g_req_meta_ready ? g_emeta_bytes[lnext][eid] : -1)); }
-            int found = 0; pthread_mutex_lock(&g_pilot_mx); LCache *lc = &m->cache[lnext];
+            int found = 0;
             for (int z = 0; z < lc->n; z++) if (lc->slots[z].eid == eid) { found = 1; break; }
-            pthread_mutex_unlock(&g_pilot_mx);
             if (!found) {
                 int gidx = lnext*E + eid;
-                pthread_mutex_lock(&g_pilot_mx);
                 int already_queued = m->is_queued[gidx];
                 unsigned w2 = __atomic_load_n(&pilot_w, __ATOMIC_RELAXED);
                 unsigned r2 = __atomic_load_n(&pilot_r, __ATOMIC_ACQUIRE);
@@ -2834,8 +2836,8 @@ static void pilot_prefetch(Model *m, int lnext, const float *x, int S) {
                     __atomic_store_n(&pilot_w, w2 + 1, __ATOMIC_RELEASE);
                     m->is_queued[gidx] = 1;
                 }
-                pthread_mutex_unlock(&g_pilot_mx);
             }
+            pthread_mutex_unlock(&g_pilot_mx);
         }
     }
     free(logits);

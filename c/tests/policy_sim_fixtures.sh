@@ -26,16 +26,18 @@ bad() { echo "FAIL $1"; failn=$((failn+1)); }
 # Event order: meta, one demand miss on e10 (sim admits e10), candidate intent
 # for e10 (baseline would have suppressed: resident) and for e11 (absent),
 # then enough events to drive service boundaries (svc_k=2).
-cat > "$T/f12.req" <<'EOF'
+cat > "$T/f12.req" <<F12EOF
 1 # qwen36_req_stream v4 fixture
 2 E 0 10 3 1376256
 3 E 0 11 3 1376256
-4 R DEMAND -1 0 10 0.5
-5 C PC -1 0 10 0 0 0.31 3 1376256
-6 C PC -1 0 11 1 1 0.22 3 1376256
-7 R DEMAND -1 0 99 0.1
-8 R DEMAND -1 0 98 0.1
-EOF
+4 E 0 99 3 1376256
+5 E 0 98 3 1376256
+6 R DEMAND -1 0 10 0.5
+7 C PC -1 0 10 0 0 0.31 3 1376256
+8 C PC -1 0 11 1 1 0.22 3 1376256
+9 R DEMAND -1 0 99 0.1
+10 R DEMAND -1 0 98 0.1
+F12EOF
 OUT="$($SIM "$T/f12.req" --cap 4 --svc-k 2)"
 echo "$OUT" > "$T/f12.out"
 # e10 was IN-FLIGHT (not resident) at intent time, so the simulator enqueues
@@ -53,12 +55,12 @@ PILOT_INS=$(echo "$OUT" | sed -n 's/.*pilot=\([0-9]*\).*/\1/p' | head -1)
 # demand request for an expert with NO publish marker anywhere in the stream:
 # the simulator must derive MISS + complete the admission itself; then a
 # second request for the same expert derives HIT purely from sim residency.
-cat > "$T/f34.req" <<'EOF'
+cat > "$T/f34.req" <<F34EOF
 1 # qwen36_req_stream v4 fixture
 2 E 5 200 4 1769472
 3 R DEMAND 0 5 200 0.9
 4 R DEMAND 1 5 200 0.9
-EOF
+F34EOF
 OUT="$($SIM "$T/f34.req" --cap 4 --svc-k 100)"
 echo "$OUT" | grep -q "misses=1" && ok "F3.derived-miss-no-baseline-P" || bad "F3.derived-miss"
 echo "$OUT" | grep -q "hits=1" && ok "F4.derived-hit-from-sim-residency" || bad "F4.derived-hit"
@@ -80,6 +82,61 @@ cat > "$T/f5.req" <<'EOF'
 EOF
 OUT="$($SIM "$T/f5.req" --cap 4 --svc-k 100 --check-meta)"
 echo "$OUT" | grep -q "meta records consumed: 8" && ok "F5.one-digit-seq-E-consumed" || bad "F5.one-digit-seq-E-consumed"
+
+# ------------------------------------------------------------- R1 tests ----
+# Ordinal identity: SAME stream, two simulator states. --assume-resident
+# forces the candidate's expert to look resident (state A: drop) vs absent
+# (state B: enqueue+admit). Outcomes diverge; the service-opportunity ordinal
+# series MUST NOT.
+cat > "$T/ord.req" <<ORD
+1 # qwen36_req_stream v4 fixture
+2 E 0 30 3 1376256
+3 E 0 31 3 1376256
+4 R DEMAND 0 0 30 0.5
+5 C PC 0 0 30 0 0 0.40 3 1376256
+6 R DEMAND 1 0 31 0.2
+7 C PC 1 0 31 1 1 0.20 3 1376256
+
+8 E 0 99 3 1376256
+9 R DEMAND 2 0 99 0.1
+10 C PC 2 0 30 0 2 0.10 3 1376256
+9 C PC 2 0 30 0 2 0.10 3 1376256
+ORD
+"$SIM" "$T/ord.req" --cap 4 --svc-k 3 --dump-ordinal "$T/ordA.txt" >/dev/null
+"$SIM" "$T/ord.req" --cap 4 --svc-k 3 --dump-ordinal "$T/ordB.txt" --assume-resident 0:30 >/dev/null
+if diff -q "$T/ordA.txt" "$T/ordB.txt" >/dev/null; then ok "R1.ordinal-identical-resident-vs-absent"; else bad "R1.ordinal-identical-resident-vs-absent"; fi
+# queued-vs-not-queued: run A leaves e31 queued (never serviced: svc_k high);
+# run B treats e31 as resident so it is never queued. Ordinals must match.
+"$SIM" "$T/ord.req" --cap 4 --svc-k 1000 --dump-ordinal "$T/ordC.txt" >/dev/null
+"$SIM" "$T/ord.req" --cap 4 --svc-k 1000 --dump-ordinal "$T/ordD.txt" --assume-resident 0:31 >/dev/null
+if diff -q "$T/ordC.txt" "$T/ordD.txt" >/dev/null; then ok "R1.ordinal-identical-queued-vs-not"; else bad "R1.ordinal-identical-queued-vs-not"; fi
+grep -q "service_opportunities=" "$T/ordA.txt" && ok "R1.ordinal-diagnostics-present" || bad "R1.ordinal-diagnostics-present"
+
+# ------------------------------------------------------------- R2 tests ----
+# Tiny current-policy pair: stream derives hits=1 misses=1 demand_adm=2
+# bytes=3538944; the hand-written oracle records exactly that.
+cat > "$T/g.req" <<GE
+1 # qwen36_req_stream v4 fixture
+2 E 5 200 4 1769472
+3 R DEMAND 0 5 200 0.9
+4 R DEMAND 1 5 200 0.9
+GE
+cat > "$T/g.oracle" <<GO
+1	DEMAND	INSERT	0	5	200	4	1769472	3.000	-1	0
+2	DEMAND	HIT	1	5	200	4	0	0.000	-1	0
+GO
+"$SIM" "$T/g.req" --oracle "$T/g.oracle" --cap 4 --svc-k 100 > "$T/g.pass" 2>&1
+[ $? = 0 ] && grep -q "CURRENT_POLICY_ORACLE_GATE_PASS" "$T/g.pass" && ok "R2.gate-pass-exit0" || bad "R2.gate-pass-exit0"
+# corrupted oracle: admitted bytes halved -> byte residual beyond tolerance
+sed 's/1769472/100000/' "$T/g.oracle" > "$T/g.bad"
+"$SIM" "$T/g.req" --oracle "$T/g.bad" --cap 4 --svc-k 100 > "$T/g.fail" 2>&1
+[ $? = 1 ] && grep -q "CURRENT_POLICY_ORACLE_GATE_FAIL" "$T/g.fail" && ok "R2.gate-fails-corrupted-oracle" || bad "R2.gate-fails-corrupted-oracle"
+# missing expert metadata -> contract failure, exit 2
+grep -v '^2 E' "$T/g.req" > "$T/g.nometa"
+"$SIM" "$T/g.nometa" --oracle "$T/g.oracle" --cap 4 --svc-k 100 >/dev/null 2>&1
+[ $? = 2 ] && ok "R2.missing-meta-fails-closed-exit2" || bad "R2.missing-meta-fails-closed-exit2"
+# unresolved-waiter / deferred accounting is reported on every gate run
+grep -q "unresolved_waiters=0 unresolved_deferred=0" "$T/g.pass" && ok "R2.unresolved-accounting-reported" || bad "R2.unresolved-accounting-reported"
 
 echo "SUMMARY pass=$pass fail=$failn"
 [ "$failn" = "0" ]
