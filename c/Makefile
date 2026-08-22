@@ -886,6 +886,10 @@ olmoe$(EXE): olmoe.c st.h json.h compat.h sample.h tok.h tok_unicode.h tok_unico
 qwen36$(EXE): qwen36.c st.h json.h compat.h
 	$(CC) $(NOCUDA_CFLAGS) qwen36.c -o qwen36$(EXE) $(NOCUDA_LDFLAGS)
 
+# Offline replay gate for the MoE admission trace (no runtime deps, no model).
+qwen36_trace_replay$(EXE): qwen36_trace_replay.c
+	$(CC) $(NOCUDA_CFLAGS) qwen36_trace_replay.c -o qwen36_trace_replay$(EXE) $(NOCUDA_LDFLAGS)
+
 # Context-size gates: KV layout, growth across requests, and the attention
 # capacity. Includes qwen36.c directly, so no model file is needed.
 tests/test_qwen36_i4_kernel$(EXE): tests/test_qwen36_i4_kernel.c

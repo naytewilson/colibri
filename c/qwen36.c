@@ -749,15 +749,37 @@ static double g_win_slot_ms = 0.0, g_win_lock_ms = 0.0, g_win_lookup_ms = 0.0, g
 static uint64_t g_win_hit_ms = 0, g_win_miss_ms = 0;
 static int g_window_armed = 0;        /* baselines valid (armed post-prefill) */
 static int g_window_fold_armed = 0;   /* an unfolded decode stretch is pending */
-/* last completed demand load (set under g_io_stats_mx by load_expert_merged)
- * consumed by the expert_get trace emitter on the miss path */
-static double g_last_load_ms = 0.0;
-static int64_t g_last_load_bytes = 0;
+/* result of ONE expert load, delivered to the caller that triggered it —
+ * never via shared globals, so concurrent demand/pilot loads cannot
+ * cross-annotate each other's trace rows */
+typedef struct ExpertLoadResult {
+    double ms;
+    int64_t bytes;
+    int fmt;   /* 3=INT3, 4=INT4, 8=INT8, 0=unknown */
+} ExpertLoadResult;
 /* offline cache-replay trace (Phase 5): COLI_MOE_TRACE=<path> enables one TSV
- * row per expert acquisition; tok=-1 marks prefill-window acquisitions */
+ * row per cache-mutating event. seq is assigned while holding g_pilot_mx — the
+ * lock both demand and pilot mutation paths hold — so the stream is a total
+ * order of cache mutations and deterministic replay input. slot identifies the
+ * exact LCache slot touched, so replay mirrors the runtime array even across
+ * the pilot-publish duplicate-residency race (two slots may briefly hold one
+ * eid — the current policy permits it; the replay must model it, not hide it).
+ * Row: seq class event tok layer eid fmt bytes adm_ms victim_eid slot
+ *   class: DEMAND | PILOT      event: HIT | EVICT | INSERT
+ *   tok=-1 marks prefill-window (DEMAND) or no-token-context (PILOT) rows */
 static FILE *g_trace_fp = NULL;
+static uint64_t g_trace_seq = 0;
 static int64_t g_trace_tok = -1;
 static int64_t g_trace_tok_base = 0;   /* running decode index across corpus prompts */
+static void trace_emit(const char *cls, const char *event, int64_t tok, int layer,
+                       int eid, int fmt, int64_t bytes, double adm_ms, int64_t victim_eid,
+                       int slot) {
+    if (!g_trace_fp) return;
+    unsigned long long seq = ++g_trace_seq;   /* callers hold g_pilot_mx: total mutation order */
+    fprintf(g_trace_fp, "%llu\t%s\t%s\t%lld\t%d\t%d\t%d\t%lld\t%.3f\t%lld\t%d\n",
+            seq, cls, event, (long long)tok, layer,
+            eid, fmt, (long long)bytes, adm_ms, (long long)victim_eid, slot);
+}
 static pthread_mutex_t g_io_stats_mx = PTHREAD_MUTEX_INITIALIZER;
 
 /* ---- M-PROF (R2): per-phase wall-clock accumulators, COLI_TIMERS=1 ---- */
@@ -1762,7 +1784,7 @@ static void slot_ensure_allocated(Model *m, Slot *s) {
     slot_ensure_format(m, s, fmt);
 }
 
-static double load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pilot) {
+static void load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pilot, ExpertLoadResult *out) {
     char nm[256], qsnm[256];
     int la = m->active_of[layer];   /* container stores experts under active index */
     snprintf(nm, sizeof(nm), "model.layers.%d.mlp.experts.%d.merged_weight", la, eid);
@@ -1823,7 +1845,11 @@ static double load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_p
     double _io_s  = _t_io1 - _t_io_w;                /* scales segment */
     int64_t total_loaded_bytes = tw->nbytes + ts->nbytes;
     pthread_mutex_lock(&g_io_stats_mx);
-    g_last_load_ms = _io_dt; g_last_load_bytes = total_loaded_bytes;
+    if (out) {
+        out->ms = _io_dt;
+        out->bytes = total_loaded_bytes;
+        out->fmt = s->is_int3 ? 3 : (s->is_int4 ? 4 : 8);
+    }
     if (is_pilot) {
         g_pilot_loads++;
         g_pilot_bytes += total_loaded_bytes;
@@ -1840,7 +1866,6 @@ static double load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_p
         else if (s->is_int4) g_admitted_bytes_int4 += total_loaded_bytes;
     }
     pthread_mutex_unlock(&g_io_stats_mx);
-    return _io_dt;
 }
 
 static void expert_get(Model *m, int layer, int eid, Slot **out) {
@@ -1855,9 +1880,9 @@ static void expert_get(Model *m, int layer, int eid, Slot **out) {
         if ((*out)->is_int3) g_cache_hit_int3++;
         else if ((*out)->is_int4) g_cache_hit_int4++;
         if (_tp) { double _tn = tm_now(); g_eg_lock_wait_ms += _tl1 - _tl0; g_eg_lookup_ms += _tn - _tl1; }
-        if (g_trace_fp)
-            fprintf(g_trace_fp, "%lld\t%d\t%d\t%c\t1\t0\t0.000\t-1\n",
-                    (long long)g_trace_tok, layer, eid, (*out)->is_int3 ? '3' : '4');
+        trace_emit("DEMAND", "HIT", g_trace_tok, layer, eid,
+                   (*out)->is_int3 ? 3 : ((*out)->is_int4 ? 4 : 8), 0, 0.0, -1,
+                   (int)(*out - lc->slots));
         pthread_mutex_unlock(&g_pilot_mx); return;
     }
     m->miss++;
@@ -1904,20 +1929,21 @@ static void expert_get(Model *m, int layer, int eid, Slot **out) {
         s = &lc->slots[lru]; s->pinned = 0;
         if (_tp) g_eg_victim_ms += tm_now() - _tv0;   /* includes in-flight wait spins */
         _victim_eid = s->eid;   /* evicted expert id (trace) */
+        trace_emit("DEMAND", "EVICT", g_trace_tok, layer, _victim_eid,
+                   s->is_int3 ? 3 : (s->is_int4 ? 4 : 8), 0, 0.0, -1, lru);
     }
     s->eid = -1; s->used = ++m->clock;
     pthread_mutex_unlock(&g_pilot_mx);
-    load_expert_merged(m, layer, eid, s, 0);
+    ExpertLoadResult res;
+    load_expert_merged(m, layer, eid, s, 0, &res);
     double _tl2 = _tp ? tm_now() : 0;
     pthread_mutex_lock(&g_pilot_mx);
     s->eid = eid; s->pinned = m->is_pinned[layer * c->n_experts + eid]; s->used = ++m->clock;
     if (s->is_int3) g_cache_miss_int3++;
     else if (s->is_int4) g_cache_miss_int4++;
     if (_tp) g_eg_lock_wait_ms += tm_now() - _tl2;
-    if (g_trace_fp)
-        fprintf(g_trace_fp, "%lld\t%d\t%d\t%c\t0\t%lld\t%.3f\t%lld\n",
-                (long long)g_trace_tok, layer, eid, s->is_int3 ? '3' : '4',
-                (long long)g_last_load_bytes, g_last_load_ms, (long long)_victim_eid);
+    trace_emit("DEMAND", "INSERT", g_trace_tok, layer, eid,
+               res.fmt, res.bytes, res.ms, _victim_eid, (int)(s - lc->slots));
     *out = s; pthread_mutex_unlock(&g_pilot_mx);
 }
 
@@ -2574,19 +2600,27 @@ static void pilot_realload(Model *m, int layer, int eid) {
     if (!m->is_queued[layer * c->n_experts + eid]) { pthread_mutex_unlock(&g_pilot_mx); return; }
     for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) { m->is_queued[layer*c->n_experts+eid]=0; pthread_mutex_unlock(&g_pilot_mx); return; }
     Slot *s;
+    int64_t victim_eid = -1;
     if (lc->n < lc->cap) { s = &lc->slots[lc->n++]; slot_ensure_allocated(m, s); }
     else {
         int lru = -1;
         for (int i = 0; i < lc->n; i++) { if (lc->slots[i].pinned || lc->slots[i].eid < 0) continue; if (lru < 0 || lc->slots[i].used < lc->slots[lru].used) lru = i; }
         if (lru < 0) { m->is_queued[layer*c->n_experts+eid]=0; pthread_mutex_unlock(&g_pilot_mx); return; }
         s = &lc->slots[lru]; s->pinned = 0;
+        victim_eid = s->eid;   /* evicted expert id (trace) */
+        trace_emit("PILOT", "EVICT", -1, layer, victim_eid,
+                   s->is_int3 ? 3 : (s->is_int4 ? 4 : 8), 0, 0.0, -1, lru);
     }
     s->eid = -1; s->used = ++m->clock;
     pthread_mutex_unlock(&g_pilot_mx);
-    load_expert_merged(m, layer, eid, s, 1);
+    ExpertLoadResult res;
+    load_expert_merged(m, layer, eid, s, 1, &res);
     pthread_mutex_lock(&g_pilot_mx);
     s->eid = eid; s->pinned = m->is_pinned[layer*c->n_experts+eid]; s->used = ++m->clock;
-    m->is_queued[layer*c->n_experts+eid] = 0; pthread_mutex_unlock(&g_pilot_mx);
+    m->is_queued[layer*c->n_experts+eid] = 0;
+    trace_emit("PILOT", "INSERT", -1, layer, eid, res.fmt, res.bytes, res.ms, victim_eid,
+               (int)(s - lc->slots));
+    pthread_mutex_unlock(&g_pilot_mx);
 }
 
 static void *pilot_worker(void *arg) {
@@ -2750,7 +2784,7 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out) {
                 if (!g_trace_fp) fprintf(stderr, "[trace] cannot open %s — trace disabled\n", tp);
                 else {
                     setvbuf(g_trace_fp, NULL, _IOFBF, 1 << 20);
-                    fprintf(g_trace_fp, "# qwen36_moe_trace v1 rows: tok(-1=prefill) layer eid fmt(3|4) hit bytes adm_ms victim_eid(-1=none)\n");
+                    fprintf(g_trace_fp, "# qwen36_moe_trace v3 rows: seq class(DEMAND|PILOT) event(HIT|EVICT|INSERT) tok(-1=prefill/no-ctx) layer eid fmt(3|4|8) bytes adm_ms victim_eid(-1=none) slot\n");
                 }
             }
         }
