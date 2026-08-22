@@ -719,6 +719,45 @@ static double g_demand_expert_admission_ms = 0.0;
 static uint64_t g_pilot_loads = 0;
 static uint64_t g_pilot_bytes = 0;
 static double g_pilot_expert_admission_ms = 0.0;
+/* admission decomposition (Phase 1): weight-read vs scale-read segments of the
+ * same interval g_*_expert_admission_ms wraps; operation-boundary timers only */
+static double g_demand_weight_ms = 0.0, g_demand_scale_ms = 0.0;
+static double g_pilot_weight_ms  = 0.0, g_pilot_scale_ms  = 0.0;
+/* expert_get internals (Phase 1): lock wait vs hit lookup vs victim/LRU scan.
+ * Gated by tm_on(); two clock calls max per phase, never inside matmul loops. */
+static double g_eg_lock_wait_ms = 0.0, g_eg_lookup_ms = 0.0, g_eg_victim_ms = 0.0;
+/* decode-window accounting: hits/misses accumulate from process start (prefill
+ * included), which previously made the final hit-rate line mix prefill demand
+ * traffic into the decode window. Baselines are snapshotted right after the
+ * prefill forward so reported deltas are decode-only. g_acq_* mirror m->hits/
+ * m->miss at the single expert_get call site so tm_report (which has no Model
+ * pointer) can compute the window delta and the acquisitions/token self-check. */
+static uint64_t g_acq_hits = 0, g_acq_miss = 0;
+static uint64_t g_win_hits0 = 0, g_win_miss0 = 0, g_prefill_acq = 0;
+static int g_rep_layers = 0, g_rep_topk = 0;
+/* decode-window baselines for the admission timers too: g_demand_* accumulate
+ * prefill+decode, so the slot-acquisition decomposition must subtract matched
+ * window deltas, never the cumulative counter (req B). The serving corpus runs
+ * MULTIPLE prompts, so at every prefill boundary the finished decode stretch is
+ * folded into the running window sums and the baselines re-arm — later corpus
+ * prefills (S>1 forwards) otherwise contaminate the admission delta while
+ * contributing nothing to the decode-only sub[1]. */
+static double g_win_adm0 = 0.0, g_win_wgt0 = 0.0, g_win_scl0 = 0.0;
+static double g_win_slot0 = 0.0, g_win_lock0 = 0.0, g_win_lookup0 = 0.0, g_win_victim0 = 0.0;
+static double g_win_adm_ms = 0.0, g_win_wgt_ms = 0.0, g_win_scl_ms = 0.0;
+static double g_win_slot_ms = 0.0, g_win_lock_ms = 0.0, g_win_lookup_ms = 0.0, g_win_victim_ms = 0.0;
+static uint64_t g_win_hit_ms = 0, g_win_miss_ms = 0;
+static int g_window_armed = 0;        /* baselines valid (armed post-prefill) */
+static int g_window_fold_armed = 0;   /* an unfolded decode stretch is pending */
+/* last completed demand load (set under g_io_stats_mx by load_expert_merged)
+ * consumed by the expert_get trace emitter on the miss path */
+static double g_last_load_ms = 0.0;
+static int64_t g_last_load_bytes = 0;
+/* offline cache-replay trace (Phase 5): COLI_MOE_TRACE=<path> enables one TSV
+ * row per expert acquisition; tok=-1 marks prefill-window acquisitions */
+static FILE *g_trace_fp = NULL;
+static int64_t g_trace_tok = -1;
+static int64_t g_trace_tok_base = 0;   /* running decode index across corpus prompts */
 static pthread_mutex_t g_io_stats_mx = PTHREAD_MUTEX_INITIALIZER;
 
 /* ---- M-PROF (R2): per-phase wall-clock accumulators, COLI_TIMERS=1 ---- */
@@ -761,6 +800,20 @@ static void tm_add(int S, int idx, double ms){
 }
 static void tm_report(void){
     if(!tm_on()) return;
+    /* fold the FINAL decode stretch (after the last prefill) into the window
+     * sums so reported decode windows cover every decoded token */
+    if (g_window_fold_armed) {
+        g_win_adm_ms    += g_demand_expert_admission_ms - g_win_adm0;
+        g_win_wgt_ms    += g_demand_weight_ms - g_win_wgt0;
+        g_win_scl_ms    += g_demand_scale_ms - g_win_scl0;
+        g_win_slot_ms   += g_moe_sub[1] - g_win_slot0;
+        g_win_lock_ms   += g_eg_lock_wait_ms - g_win_lock0;
+        g_win_lookup_ms += g_eg_lookup_ms - g_win_lookup0;
+        g_win_victim_ms += g_eg_victim_ms - g_win_victim0;
+        g_win_hit_ms    += g_acq_hits - g_win_hits0;
+        g_win_miss_ms   += g_acq_miss - g_win_miss0;
+        g_window_fold_armed = 0;
+    }
     static const char *nm[6]={"deltanet","attention","moe_total","(shared)","(router)","lm_head"};
     fprintf(stderr,"[timers] decode: %ld tokens  (shared/router are subsets of moe_total)\n", g_tm_dec_tokens);
     double sum=0;
@@ -795,6 +848,11 @@ static void tm_report(void){
         fprintf(stderr, "  Router (matmul + top-k):          %8.2f ms/token (%5.1f%%)\n", g_moe_sub[0] / g_tm_dec_tokens, 100.0 * g_moe_sub[0] / g_tm_dec[2]);
         fprintf(stderr, "  Expert slot acquisition:         %8.2f ms/token (%5.1f%%)\n", g_moe_sub[1] / g_tm_dec_tokens, 100.0 * g_moe_sub[1] / g_tm_dec[2]);
         fprintf(stderr, "  Routed expert compute (only):    %8.2f ms/token (%5.1f%%)\n", compute_only_ms / g_tm_dec_tokens, 100.0 * compute_only_ms / g_tm_dec[2]);
+        if (expert_parallel_on())
+            fprintf(stderr, "    [mode] EXPERT_PARALLEL=1: the routed region is timed as ONE fused interval in the\n"
+                            "    INT3 gate bucket (INT3+INT4 combined); per-format gate/up/down fields below are 0 by construction.\n");
+        else
+            fprintf(stderr, "    [mode] REF_GEMV=1 (COLI_EXPERT_PARALLEL unset/0): per-format gate/up/down decomposition active.\n");
         fprintf(stderr, "    - INT3 routed (gate/up/down):  %8.2f ms/token (gate %.2f, up %.2f, down %.2f)\n",
                 routed_i3_ms / g_tm_dec_tokens, g_moe_sub[2]/g_tm_dec_tokens, g_moe_sub[3]/g_tm_dec_tokens, g_moe_sub[4]/g_tm_dec_tokens);
         fprintf(stderr, "    - INT4 routed (gate/up/down):  %8.2f ms/token (gate %.2f, up %.2f, down %.2f)\n",
@@ -802,6 +860,28 @@ static void tm_report(void){
         fprintf(stderr, "  Shared expert (SwiGLU + gate):   %8.2f ms/token (%5.1f%%)\n", g_moe_sub[8] / g_tm_dec_tokens, 100.0 * g_moe_sub[8] / g_tm_dec[2]);
         fprintf(stderr, "  Weighted output accumulation:    %8.2f ms/token (%5.1f%%)\n", g_moe_sub[9] / g_tm_dec_tokens, 100.0 * g_moe_sub[9] / g_tm_dec[2]);
         fprintf(stderr, "  Admission (demand NVMe I/O):     %8.2f ms/token\n", g_demand_expert_admission_ms / g_tm_dec_tokens);
+        /* Phase 1 decomposition of Expert slot acquisition (sub[1]):
+         * sub[1] wraps lookup + victim/LRU + lock waits AND the synchronous
+         * admission I/O of misses (loads run inline on this thread). The
+         * machinery-only share is sub[1] minus demand admission I/O. */
+        {
+            /* req B: decode-window sums only — folded at every prefill boundary
+             * in generate(); never cumulative prefill+decode counters. */
+            double slot_ms = g_win_slot_ms;   /* decode-only by construction, window-accumulated */
+            double adm_ms  = g_win_adm_ms;    if (adm_ms < 0) adm_ms = 0;
+            double wgt_ms  = g_win_wgt_ms;    if (wgt_ms < 0) wgt_ms = 0;
+            double scl_ms  = g_win_scl_ms;    if (scl_ms < 0) scl_ms = 0;
+            double mach_ms = slot_ms - adm_ms; if (mach_ms < 0) mach_ms = 0;
+            fprintf(stderr, "  --- Slot Acquisition Decomposition (Phase 1, decode window) ---\n");
+            fprintf(stderr, "  Slot acquisition total:          %8.2f ms/token\n", slot_ms / g_tm_dec_tokens);
+            fprintf(stderr, "    demand admission I/O inside:   %8.2f ms/token (weights %.2f + scales %.2f)\n",
+                    adm_ms / g_tm_dec_tokens, wgt_ms / g_tm_dec_tokens, scl_ms / g_tm_dec_tokens);
+            fprintf(stderr, "    cache machinery (excl I/O):    %8.2f ms/token\n", mach_ms / g_tm_dec_tokens);
+            if (tm_on()) {
+                fprintf(stderr, "      lock wait:      %7.2f ms/token | hit/miss scan: %7.2f ms/token | LRU/victim: %7.2f ms/token\n",
+                        g_win_lock_ms / g_tm_dec_tokens, g_win_lookup_ms / g_tm_dec_tokens, g_win_victim_ms / g_tm_dec_tokens);
+            }
+        }
         fprintf(stderr, "  --- Routed Format Mix ---\n");
         fprintf(stderr, "  INT3 routed selections/token:    %8.2f\n", (double)g_routed_int3_count / g_tm_dec_tokens);
         fprintf(stderr, "  INT4 routed selections/token:    %8.2f\n", (double)g_routed_int4_count / g_tm_dec_tokens);
@@ -819,10 +899,29 @@ static void tm_report(void){
             (unsigned long long)g_demand_loads, (unsigned long long)g_demand_bytes,
             (double)g_demand_bytes / 1048576.0, g_demand_expert_admission_ms,
             g_demand_loads ? g_demand_expert_admission_ms / g_demand_loads : 0.0);
+    fprintf(stderr,"[expert_io] demand split (CUMULATIVE prefill+decode): weights %.1f ms | scales %.1f ms (sum %.1f of %.1f total)\n",
+            g_demand_weight_ms, g_demand_scale_ms,
+            g_demand_weight_ms + g_demand_scale_ms, g_demand_expert_admission_ms);
     fprintf(stderr,"[expert_io] pilot : %llu loads (%llu bytes, %.2f MB), cum_expert_admission: %.1f ms, avg_latency: %.2f ms/load\n",
             (unsigned long long)g_pilot_loads, (unsigned long long)g_pilot_bytes,
             (double)g_pilot_bytes / 1048576.0, g_pilot_expert_admission_ms,
             g_pilot_loads ? g_pilot_expert_admission_ms / g_pilot_loads : 0.0);
+    /* decode-window acquisition self-check: hits/misses are demand-only by
+     * construction (single expert_get call site), so window acquisitions/token
+     * must equal layers*topk. Any deviation means the window is contaminated
+     * (prefill/warmup forwards inside it) or a second call site appeared. */
+    {
+        uint64_t w_hit = g_win_hit_ms, w_mis = g_win_miss_ms;
+        uint64_t w_tot = w_hit + w_mis;
+        double per_tok = g_tm_dec_tokens > 0 ? (double)w_tot / (double)g_tm_dec_tokens : 0.0;
+        double expect  = (double)g_rep_layers * (double)g_rep_topk;
+        fprintf(stderr,"[expert_io] decode window: hit %llu miss %llu | %.1f acq/token (expect %.1f = layers*topk)%s\n",
+                (unsigned long long)w_hit, (unsigned long long)w_mis, per_tok, expect,
+                (expect > 0 && w_tot > 0 && (per_tok > expect * 1.01 || per_tok < expect * 0.99)) ? "  << WINDOW CONTAMINATION" : "");
+        if (g_prefill_acq)
+            fprintf(stderr,"[expert_io] prefill consumed %llu acquisitions before the window\n",
+                    (unsigned long long)g_prefill_acq);
+    }
     fprintf(stderr,"[expert_io] note: expert_admission wraps the whole expert admission interval (read packed weights + optional unpack + scale read), not pure NVMe syscall latency.\n");
     fprintf(stderr,"[timers] prefill: %ld tokens  dn=%.0f attn=%.0f moe=%.0f(sh=%.0f rt=%.0f) head=%.0f ms\n",
             g_tm_pre_tokens,g_tm_pre[0],g_tm_pre[1],g_tm_pre[2],g_tm_pre[3],g_tm_pre[4],g_tm_pre[5]);
@@ -1663,7 +1762,7 @@ static void slot_ensure_allocated(Model *m, Slot *s) {
     slot_ensure_format(m, s, fmt);
 }
 
-static void load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pilot) {
+static double load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pilot) {
     char nm[256], qsnm[256];
     int la = m->active_of[layer];   /* container stores experts under active index */
     snprintf(nm, sizeof(nm), "model.layers.%d.mlp.experts.%d.merged_weight", la, eid);
@@ -1716,39 +1815,60 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pil
         s->is_int4 = 0;
         st_read_raw(&m->S, nm, s->g, 1);
     }
+    double _t_io_w = tm_now();                       /* weight read (+ optional unpack) done */
     st_read_f32(&m->S, qsnm, s->gs, 0);
     double _t_io1 = tm_now();
     double _io_dt = _t_io1 - _t_io0;
+    double _io_w  = _t_io_w - _t_io0;                /* weights segment */
+    double _io_s  = _t_io1 - _t_io_w;                /* scales segment */
     int64_t total_loaded_bytes = tw->nbytes + ts->nbytes;
     pthread_mutex_lock(&g_io_stats_mx);
+    g_last_load_ms = _io_dt; g_last_load_bytes = total_loaded_bytes;
     if (is_pilot) {
         g_pilot_loads++;
         g_pilot_bytes += total_loaded_bytes;
         g_pilot_expert_admission_ms += _io_dt;
+        g_pilot_weight_ms += _io_w;
+        g_pilot_scale_ms  += _io_s;
     } else {
         g_demand_loads++;
         g_demand_bytes += total_loaded_bytes;
         g_demand_expert_admission_ms += _io_dt;
+        g_demand_weight_ms += _io_w;
+        g_demand_scale_ms  += _io_s;
         if (s->is_int3) g_admitted_bytes_int3 += total_loaded_bytes;
         else if (s->is_int4) g_admitted_bytes_int4 += total_loaded_bytes;
     }
     pthread_mutex_unlock(&g_io_stats_mx);
+    return _io_dt;
 }
 
 static void expert_get(Model *m, int layer, int eid, Slot **out) {
     LCache *lc = &m->cache[layer];
+    int _tp = tm_on();
+    double _tl0 = _tp ? tm_now() : 0;
     pthread_mutex_lock(&g_pilot_mx);
+    double _tl1 = _tp ? tm_now() : 0;
+    double _ts0 = _tl1;
     for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) {
-        m->hits++; lc->slots[i].used = ++m->clock; *out = &lc->slots[i];
+        m->hits++; g_acq_hits++; lc->slots[i].used = ++m->clock; *out = &lc->slots[i];
         if ((*out)->is_int3) g_cache_hit_int3++;
         else if ((*out)->is_int4) g_cache_hit_int4++;
+        if (_tp) { double _tn = tm_now(); g_eg_lock_wait_ms += _tl1 - _tl0; g_eg_lookup_ms += _tn - _tl1; }
+        if (g_trace_fp)
+            fprintf(g_trace_fp, "%lld\t%d\t%d\t%c\t1\t0\t0.000\t-1\n",
+                    (long long)g_trace_tok, layer, eid, (*out)->is_int3 ? '3' : '4');
         pthread_mutex_unlock(&g_pilot_mx); return;
     }
     m->miss++;
+    g_acq_miss++;
     Cfg *c = &m->c; Slot *s;
+    if (_tp) { double _tn = tm_now(); g_eg_lookup_ms += _tn - _ts0; }   /* failed hit scan */
+    int64_t _victim_eid = -1;   /* -1 = free capacity (no eviction) */
     if (lc->n < lc->cap) { s = &lc->slots[lc->n++]; slot_ensure_allocated(m, s); }
     else {
         /* LRU eviction — skip pinned and in-flight (eid==-1) slots */
+        double _tv0 = _tp ? tm_now() : 0;
         int lru = -1;
         for (int i = 0; i < lc->n; i++) {
             if (lc->slots[i].pinned || lc->slots[i].eid < 0) continue;
@@ -1782,14 +1902,22 @@ static void expert_get(Model *m, int layer, int eid, Slot **out) {
             }
         }
         s = &lc->slots[lru]; s->pinned = 0;
+        if (_tp) g_eg_victim_ms += tm_now() - _tv0;   /* includes in-flight wait spins */
+        _victim_eid = s->eid;   /* evicted expert id (trace) */
     }
     s->eid = -1; s->used = ++m->clock;
     pthread_mutex_unlock(&g_pilot_mx);
     load_expert_merged(m, layer, eid, s, 0);
+    double _tl2 = _tp ? tm_now() : 0;
     pthread_mutex_lock(&g_pilot_mx);
     s->eid = eid; s->pinned = m->is_pinned[layer * c->n_experts + eid]; s->used = ++m->clock;
     if (s->is_int3) g_cache_miss_int3++;
     else if (s->is_int4) g_cache_miss_int4++;
+    if (_tp) g_eg_lock_wait_ms += tm_now() - _tl2;
+    if (g_trace_fp)
+        fprintf(g_trace_fp, "%lld\t%d\t%d\t%c\t0\t%lld\t%.3f\t%lld\n",
+                (long long)g_trace_tok, layer, eid, s->is_int3 ? '3' : '4',
+                (long long)g_last_load_bytes, g_last_load_ms, (long long)_victim_eid);
     *out = s; pthread_mutex_unlock(&g_pilot_mx);
 }
 
@@ -2596,10 +2724,58 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out) {
     ensure_kv(m);
     mem_checkpoint("M3", "after recurrent state + KV allocation for context");
     m->kv_len = 0;
+    /* HOOK A — fold the PREVIOUS decode stretch (pure decode: last arm point
+     * was the previous prefill's end) into the running window sums BEFORE this
+     * prompt's prefill can contaminate the deltas. */
+    {
+        if (g_window_armed) {
+            g_win_adm_ms    += g_demand_expert_admission_ms - g_win_adm0;
+            g_win_wgt_ms    += g_demand_weight_ms - g_win_wgt0;
+            g_win_scl_ms    += g_demand_scale_ms - g_win_scl0;
+            g_win_slot_ms   += g_moe_sub[1] - g_win_slot0;
+            g_win_lock_ms   += g_eg_lock_wait_ms - g_win_lock0;
+            g_win_lookup_ms += g_eg_lookup_ms - g_win_lookup0;
+            g_win_victim_ms += g_eg_victim_ms - g_win_victim0;
+            g_win_hit_ms    += g_acq_hits - g_win_hits0;
+            g_win_miss_ms   += g_acq_miss - g_win_miss0;
+        }
+        g_window_fold_armed = g_window_armed;
+        /* lazy trace open: must precede the FIRST prefill row, so it lives here
+         * (every serving path crosses generate(); main()'s opener missed the
+         * corpus call site entirely). */
+        if (!g_trace_fp) {
+            const char *tp = getenv("COLI_MOE_TRACE");
+            if (tp && tp[0]) {
+                g_trace_fp = fopen(tp, "w");
+                if (!g_trace_fp) fprintf(stderr, "[trace] cannot open %s — trace disabled\n", tp);
+                else {
+                    setvbuf(g_trace_fp, NULL, _IOFBF, 1 << 20);
+                    fprintf(g_trace_fp, "# qwen36_moe_trace v1 rows: tok(-1=prefill) layer eid fmt(3|4) hit bytes adm_ms victim_eid(-1=none)\n");
+                }
+            }
+        }
+        g_trace_tok = -1;   /* prefill acquisitions trace with tok=-1 */
+    }
     for (int i = 0; i < np; i++) out[i] = prompt[i];
     float *logit = step(m, prompt, np, 0);
+    /* HOOK B — arm/re-arm the decode window AFTER this prompt's prefill so the
+     * baselines exclude every prefill position of every corpus prompt. */
+    {
+        g_rep_layers = c->n_layers; g_rep_topk = c->topk;
+        if (!g_window_armed) g_prefill_acq = g_acq_hits + g_acq_miss;
+        g_win_hits0 = g_acq_hits; g_win_miss0 = g_acq_miss;
+        g_win_adm0 = g_demand_expert_admission_ms;
+        g_win_wgt0 = g_demand_weight_ms; g_win_scl0 = g_demand_scale_ms;
+        g_win_slot0 = g_moe_sub[1];
+        g_win_lock0 = g_eg_lock_wait_ms; g_win_lookup0 = g_eg_lookup_ms; g_win_victim0 = g_eg_victim_ms;
+        g_window_armed = 1; g_window_fold_armed = 1;
+    }
+    if (g_trace_fp)
+        fprintf(g_trace_fp, "# window_begin layers=%d topk=%d prefill_tokens=%d arm=%s\n",
+                c->n_layers, c->topk, np, expert_parallel_on() ? "EXPERT_PARALLEL" : "REF_GEMV");
     int len = np;
     for (int s = 0; s < n_new; s++) {
+        g_trace_tok = g_trace_tok_base + s;   /* process-wide decode index; -1 marks prefill-only rows */
         int best = 0; float bv = logit[0];
         for (int i = 1; i < c->vocab; i++) if (logit[i] > bv) { bv = logit[i]; best = i; }
         if (s == 0 && g_ttft < 0) g_ttft = now_s() - g_gen_t0;   /* record TTFT */
@@ -2617,6 +2793,7 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out) {
           logit = step(m, &one, 1, len - 1);
           if (tm_on()) g_tm_step += tm_now()-_s0; }
     }
+    g_trace_tok_base += (int64_t)(len - np);
 }
 
 static int tf_nll(Model *m, const int *full, int nfull, int np, double *nll_out) {
@@ -3357,9 +3534,17 @@ int main(int argc, char **argv) {
     mem_checkpoint("M4", "after expert cache population during inference");
     print_exact_memory_accounting(&m);
     fprintf(stderr, "\nPEAK RSS: %.2f GB | Current VmRSS: %.2f GB\n", peak_rss_gb(), current_rss_gb());
-    fprintf(stderr, "Expert cache hit rate: %.1f%% (hit=%llu miss=%llu)\n", tot?100.0*m.hits/tot:0.0,
-           (unsigned long long)m.hits, (unsigned long long)m.miss);
+    {   /* cumulative (whole process) vs decode-window hit rate: the window line
+         * is the A/B-comparable number; the cumulative one mixes prefill. */
+        uint64_t w_hit = g_win_hit_ms, w_mis = g_win_miss_ms;
+        uint64_t w_tot = w_hit + w_mis;
+        fprintf(stderr, "Expert cache hit rate: %.1f%% (hit=%llu miss=%llu, cumulative incl. prefill)\n",
+                tot?100.0*m.hits/tot:0.0, (unsigned long long)m.hits, (unsigned long long)m.miss);
+        fprintf(stderr, "Expert cache hit rate (decode window): %.1f%% (hit=%llu miss=%llu)\n",
+                w_tot?100.0*w_hit/w_tot:100.0, (unsigned long long)w_hit, (unsigned long long)w_mis);
+    }
     fprintf(stderr, "Speed: %.2f tok/s (%.1fs for %d tokens)\n", n_new/dt, dt, n_new);
+    if (g_trace_fp) { fclose(g_trace_fp); g_trace_fp = NULL; fprintf(stderr, "[trace] closed\n"); }
     free(buf); free(arena);
     /* Oracle mode is a gate, not a report: a mismatch must fail the caller.
      * inkling.c does the same (`return (match == ngen) ? 0 : 1;`) and its CI
