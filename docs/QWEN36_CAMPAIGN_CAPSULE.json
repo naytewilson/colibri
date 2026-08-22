@@ -1,0 +1,218 @@
+{
+  "capsule_version": 1,
+  "campaign": "Qwen3.6-35B-A3B Colibri optimization",
+  "captured_at": "2026-08-22T00:28:00-04:00",
+  "snapshot_type": "COMPOSITE",
+  "repository": "naytewilson/colibri",
+  "live_branch_at_capture": "feat/qwen36-packed-int4-cpu-residency",
+  "live_head_at_capture": "3d55e925e89c42c60430ea41360a152011de6f1e",
+  "runtime_lock": "Colibri",
+  "preservation_policy": {
+    "history": "append_only",
+    "never_delete_superseded_measurements": true,
+    "require_comparability_statement": true,
+    "conversation_memory_is_proof": false
+  },
+  "model": {
+    "name": "Qwen3.6-35B-A3B",
+    "geometry": {
+      "layers": 40,
+      "hidden_size": 2048,
+      "vocab": 248320,
+      "routed_experts_per_layer": 256,
+      "shared_experts_per_layer": 1,
+      "top_k": 8,
+      "attention_layers": 10,
+      "gated_deltanet_layers": 30,
+      "approx_total_params_b": 34.66,
+      "approx_active_params_b": 3.455,
+      "routed_intermediate": 512,
+      "deltanet_vheads": 32,
+      "deltanet_kheads": 16,
+      "deltanet_kdim": 128,
+      "deltanet_vdim": 128
+    },
+    "mtp": {
+      "status": "UNKNOWN_ABSENT_IN_TENSORS",
+      "count": 0
+    }
+  },
+  "headline_anchor": {
+    "status": "RECEIPT_SUPPORTED",
+    "metric": "warm_median_tok_s",
+    "value": 5.33,
+    "protocol": "historical mixed-low four-turn run; cold 3.13, warm 5.38/5.33/5.15",
+    "comparison_rule": "Do not supersede unless protocol is shown comparable"
+  },
+  "targets_tok_s": {
+    "meaningful": 5.6,
+    "major": 6.0,
+    "stretch": 6.5
+  },
+  "historical_baselines": [
+    {
+      "name": "INT4 cap128",
+      "status": "HISTORICAL",
+      "tok_s_range": [2.23, 2.28],
+      "hit_rate_pct": 83.1,
+      "admission_ms_per_load": 4.6,
+      "moe_ms_per_token_range": [164, 166],
+      "step_ms_per_token_range": [221, 224],
+      "rss_gib": 11.17
+    },
+    {
+      "name": "clean INT3 cap128",
+      "status": "HISTORICAL",
+      "tok_s_range": [3.26, 3.33],
+      "hit_rate_pct": 83.7,
+      "admission_ms_per_load_range": [2.68, 2.79],
+      "moe_ms_per_token": 97,
+      "step_ms_per_token_range": [156, 157]
+    },
+    {
+      "name": "persistent uniform INT3",
+      "status": "HISTORICAL",
+      "cold_tok_s": 3.11,
+      "warm_tok_s": [4.46, 4.98, 5.58],
+      "warm_median_tok_s": 4.98,
+      "hit_rate_pct": 89.5,
+      "moe_ms_per_token": 89.83,
+      "deltanet_ms_per_token": 36.07,
+      "attention_ms_per_token": 8.23,
+      "lm_head_ms_per_token": 12.77,
+      "step_ms_per_token": 148.3,
+      "rss_gib": 9.52
+    },
+    {
+      "name": "uniform INT3 cap208",
+      "status": "REJECTED_NEGATIVE_RESULT",
+      "tok_s": 3.03,
+      "hit_rate_pct": 84.4,
+      "moe_ms_per_token": 101.59,
+      "step_ms_per_token": 161.1,
+      "rss_gib": 10.0,
+      "negative_knowledge": "Larger uniform cap alone did not help"
+    }
+  ],
+  "quality_history": {
+    "status": "PROVENANCE_UNRESOLVED",
+    "historical_443_token_8_domain_record": {
+      "int3": {"nll": 1.6873, "ppl": 5.41},
+      "mixed": {"nll": 1.6848, "ppl": 5.39},
+      "int4": {"nll": 1.6616, "ppl": 5.27}
+    },
+    "current_warning": "run_quality_gate.sh was observed using heldout_eval.json; historical promoted PPL corpus provenance must be verified before sealing"
+  },
+  "promoted_repairs": [
+    {
+      "name": "PILOT_DUPLICATE_RESIDENCY_CAUSAL_REPAIR",
+      "commit": "2abb9cf487fe4eb927f72022d677746672be06a6",
+      "evidence": "GITHUB_PROVEN plus receipt-supported A/B",
+      "mechanism": "per-expert loading registry coalesces demand/pilot admissions",
+      "ab": {
+        "duplicate_resident_inserts_before": 1523,
+        "duplicate_resident_inserts_after": 0,
+        "demand_load_reduction_pct": 15.9,
+        "demand_admission_ms_per_token_before": 89.72,
+        "demand_admission_ms_per_token_after": 66.03,
+        "moe_ms_per_token_before": 117.41,
+        "moe_ms_per_token_after": 104.68,
+        "decode_hit_rate_pct_before": 92.47,
+        "decode_hit_rate_pct_after": 94.48,
+        "peak_rss_gb_before": 11.31,
+        "peak_rss_gb_after": 10.84,
+        "demand_waits": 1164,
+        "pilot_skips": 203
+      },
+      "artifact_provenance": {
+        "promoted_runtime_sha256": "1cd25904379899bec46712ed5c50fe9d410f51f9ec7636917bee95776fe0aac3",
+        "census_fingerprint_prefix": "1e91ac53",
+        "decision_id": 54506,
+        "handoff_id": 54507
+      }
+    }
+  ],
+  "replay": {
+    "v3": {
+      "status": "TRACE_EVENT_STREAM_SELF_CONSISTENT",
+      "role": "baseline mutation/outcome audit oracle, not counterfactual policy replay"
+    },
+    "v4_lineage": [
+      "947fa30",
+      "03fd760",
+      "00d845d505a02c2c0332205064d2f31fcd266b2b",
+      "3d55e925e89c42c60430ea41360a152011de6f1e"
+    ],
+    "v4r_receipt": {
+      "status": "RECEIPT_SUPPORTED",
+      "demand_requests": 109120,
+      "sim_hits": 99307,
+      "oracle_hits": 99284,
+      "sim_misses": 9813,
+      "oracle_misses": 9836,
+      "sim_demand_admissions": 9813,
+      "oracle_demand_admissions": 9836,
+      "sim_pilot_admissions": 4098,
+      "oracle_pilot_admissions": 4076,
+      "residual_outcomes": 23,
+      "residual_pct": 0.021,
+      "unresolved_waiters_sim": 0,
+      "unresolved_waiters_oracle": 0
+    },
+    "independent_verdict_at_capture": "COUNTERFACTUAL_REPLAY_INVALID_NARROW_REPAIR",
+    "next_package": "COUNTERFACTUAL_REPLAY_V4R.1",
+    "blocking_issue": "service-opportunity clock is still outcome-conditioned because some C paths continue before the event/service ordinal advances; oracle comparison also needs a true executable pass/fail gate"
+  },
+  "candidate_archive": [
+    {
+      "name": "layer_adaptive_byte_budgets",
+      "state": "BANKED_UNTIL_REPLAY_READY",
+      "constraint": "same total byte budget"
+    },
+    {
+      "name": "pinned_hot_plus_layer_adaptive",
+      "state": "BANKED_UNTIL_REPLAY_READY",
+      "constraint": "same total byte budget"
+    },
+    {
+      "name": "top_k_batch_acquisition",
+      "state": "DISCRIMINATE_FIRST",
+      "gate": "existing lock+lookup+victim timing must be material relative to weight+scale work"
+    },
+    {
+      "name": "adjacent_expert_overlap_analysis",
+      "state": "OFFLINE_ELIGIBLE",
+      "restriction": "do not relabel as MTP/speculative decoding"
+    }
+  ],
+  "negative_knowledge": [
+    "uniform cap208 alone did not help",
+    "historical 433 acquisitions/token discrepancy is superseded",
+    "expert_admission is not pure storage latency",
+    "the old theoretical-bandwidth subtraction implying ~10 tok/s was invalid",
+    "v3 mutation replay is not counterfactual replay",
+    "baseline reconstruction accuracy alone does not prove policy independence",
+    "canonical artifact has no positive MTP tensor evidence",
+    "historical quality corpus provenance remains unresolved"
+  ],
+  "decision_inputs": {
+    "material_claim_ids": [
+      "live_head",
+      "v4r1_status",
+      "qwen36_runtime_owner",
+      "quality_corpus_provenance"
+    ],
+    "mutable_claim_ids": [
+      "live_head",
+      "v4r1_status",
+      "qwen36_runtime_owner",
+      "quality_corpus_provenance"
+    ],
+    "refresh_before_action": [
+      "current live branch HEAD",
+      "dirty/staged state and active owner of qwen36.c",
+      "whether V4R.1 landed and passed independent review",
+      "quality corpus hashes/provenance before promotion quality claims"
+    ]
+  }
+}
