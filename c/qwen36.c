@@ -597,7 +597,11 @@ typedef struct {
     float *gs, *us, *ds;
     uint64_t used;
 } Slot;
-typedef struct { Slot *slots; int n, cap; } LCache;
+typedef struct { Slot *slots; int n, cap; int16_t *loading; } LCache;
+/* loading[eid] = slot index of the ONE active admission for that expert, -1 none.
+ * Set under g_pilot_mx at reservation (s->eid=-1), cleared under g_pilot_mx at
+ * publish. Makes in-flight loads visible to both admission paths so a second
+ * loader for the same (layer,eid) can coalesce instead of duplicating. */
 
 typedef struct {
     Cfg c;
@@ -733,6 +737,9 @@ static double g_eg_lock_wait_ms = 0.0, g_eg_lookup_ms = 0.0, g_eg_victim_ms = 0.
  * m->miss at the single expert_get call site so tm_report (which has no Model
  * pointer) can compute the window delta and the acquisitions/token self-check. */
 static uint64_t g_acq_hits = 0, g_acq_miss = 0;
+/* duplicate-admission coalescing diagnostics (PILOT_DUPLICATE_RESIDENCY repair) */
+static long g_demand_coalesce_waits = 0;   /* demand acquisitions that waited on an in-flight load */
+static long g_pilot_coalesce_skips = 0;    /* pilot loads skipped because an admission was already active */
 static uint64_t g_win_hits0 = 0, g_win_miss0 = 0, g_prefill_acq = 0;
 static int g_rep_layers = 0, g_rep_topk = 0;
 /* decode-window baselines for the admission timers too: g_demand_* accumulate
@@ -1632,6 +1639,8 @@ static void model_init(Model *m, const char *snap, int cap, int bits) {
     for (int i = 0; i < c->n_layers; i++) {
         m->cache[i].cap = cap;
         m->cache[i].slots = calloc(cap, sizeof(Slot));
+        m->cache[i].loading = malloc((size_t)c->n_experts * sizeof(int16_t));
+        memset(m->cache[i].loading, 0xFF, (size_t)c->n_experts * sizeof(int16_t));   /* all -1 */
     }
     /* per-layer DeltaNet recurrent + conv state (only for linear_attention layers) */
     m->DN_rec = calloc(c->n_layers, sizeof(float*));
@@ -1885,10 +1894,45 @@ static void expert_get(Model *m, int layer, int eid, Slot **out) {
                    (int)(*out - lc->slots));
         pthread_mutex_unlock(&g_pilot_mx); return;
     }
-    m->miss++;
-    g_acq_miss++;
+    /* NOTE: miss accounting happens only when we actually proceed to load —
+     * a coalesced acquisition (waited for an in-flight load, then hit the
+     * published copy) must count exactly ONCE, as a hit. */
     Cfg *c = &m->c; Slot *s;
     if (_tp) { double _tn = tm_now(); g_eg_lookup_ms += _tn - _ts0; }   /* failed hit scan */
+    /* COALESCE: another admission (pilot worker) may already be loading this
+     * expert. Wait for its publish instead of launching a duplicate load.
+     * Lock is RELEASED while waiting so the publisher can take it. */
+    if (lc->loading[eid] >= 0) {
+        g_demand_coalesce_waits++;
+        while (lc->loading[eid] >= 0) {
+            pthread_mutex_unlock(&g_pilot_mx);
+            sleep_ms(1);
+            pthread_mutex_lock(&g_pilot_mx);
+            for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) {
+                /* the coalesced load published: serve as a resident hit */
+                m->hits++; g_acq_hits++; lc->slots[i].used = ++m->clock; *out = &lc->slots[i];
+                if ((*out)->is_int3) g_cache_hit_int3++;
+                else if ((*out)->is_int4) g_cache_hit_int4++;
+                trace_emit("DEMAND", "HIT", g_trace_tok, layer, eid,
+                           (*out)->is_int3 ? 3 : ((*out)->is_int4 ? 4 : 8), 0, 0.0, -1, i);
+                pthread_mutex_unlock(&g_pilot_mx); return;
+            }
+            if (lc->loading[eid] < 0 && lc->n < lc->cap) break;   /* loader vanished without publish (cannot happen today) — recover */
+        }
+        /* re-scan once more after the registry cleared; fall through to a
+         * normal miss only if still absent */
+        for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) {
+            m->hits++; g_acq_hits++; lc->slots[i].used = ++m->clock; *out = &lc->slots[i];
+            if ((*out)->is_int3) g_cache_hit_int3++;
+            else if ((*out)->is_int4) g_cache_hit_int4++;
+            trace_emit("DEMAND", "HIT", g_trace_tok, layer, eid,
+                       (*out)->is_int3 ? 3 : ((*out)->is_int4 ? 4 : 8), 0, 0.0, -1, i);
+            pthread_mutex_unlock(&g_pilot_mx); return;
+        }
+    }
+    /* proceeding to a real load: count the miss here (post-coalesce decision) */
+    m->miss++;
+    g_acq_miss++;
     int64_t _victim_eid = -1;   /* -1 = free capacity (no eviction) */
     if (lc->n < lc->cap) { s = &lc->slots[lc->n++]; slot_ensure_allocated(m, s); }
     else {
@@ -1933,12 +1977,14 @@ static void expert_get(Model *m, int layer, int eid, Slot **out) {
                    s->is_int3 ? 3 : (s->is_int4 ? 4 : 8), 0, 0.0, -1, lru);
     }
     s->eid = -1; s->used = ++m->clock;
+    lc->loading[eid] = (int16_t)(s - lc->slots);   /* reserve identity: one loader per (layer,eid) */
     pthread_mutex_unlock(&g_pilot_mx);
     ExpertLoadResult res;
     load_expert_merged(m, layer, eid, s, 0, &res);
     double _tl2 = _tp ? tm_now() : 0;
     pthread_mutex_lock(&g_pilot_mx);
     s->eid = eid; s->pinned = m->is_pinned[layer * c->n_experts + eid]; s->used = ++m->clock;
+    lc->loading[eid] = -1;   /* publish: exactly one resident slot now represents (layer,eid) */
     if (s->is_int3) g_cache_miss_int3++;
     else if (s->is_int4) g_cache_miss_int4++;
     if (_tp) g_eg_lock_wait_ms += tm_now() - _tl2;
@@ -2599,6 +2645,14 @@ static void pilot_realload(Model *m, int layer, int eid) {
     pthread_mutex_lock(&g_pilot_mx);
     if (!m->is_queued[layer * c->n_experts + eid]) { pthread_mutex_unlock(&g_pilot_mx); return; }
     for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) { m->is_queued[layer*c->n_experts+eid]=0; pthread_mutex_unlock(&g_pilot_mx); return; }
+    /* COALESCE: an admission (demand or pilot) is already loading this expert —
+     * skip; its publish will make it resident. Never launch a duplicate. */
+    if (lc->loading[eid] >= 0) {
+        m->is_queued[layer*c->n_experts+eid] = 0;
+        g_pilot_coalesce_skips++;
+        pthread_mutex_unlock(&g_pilot_mx);
+        return;
+    }
     Slot *s;
     int64_t victim_eid = -1;
     if (lc->n < lc->cap) { s = &lc->slots[lc->n++]; slot_ensure_allocated(m, s); }
@@ -2612,12 +2666,14 @@ static void pilot_realload(Model *m, int layer, int eid) {
                    s->is_int3 ? 3 : (s->is_int4 ? 4 : 8), 0, 0.0, -1, lru);
     }
     s->eid = -1; s->used = ++m->clock;
+    lc->loading[eid] = (int16_t)(s - lc->slots);   /* reserve identity */
     pthread_mutex_unlock(&g_pilot_mx);
     ExpertLoadResult res;
     load_expert_merged(m, layer, eid, s, 1, &res);
     pthread_mutex_lock(&g_pilot_mx);
     s->eid = eid; s->pinned = m->is_pinned[layer*c->n_experts+eid]; s->used = ++m->clock;
     m->is_queued[layer*c->n_experts+eid] = 0;
+    lc->loading[eid] = -1;   /* publish */
     trace_emit("PILOT", "INSERT", -1, layer, eid, res.fmt, res.bytes, res.ms, victim_eid,
                (int)(s - lc->slots));
     pthread_mutex_unlock(&g_pilot_mx);
@@ -3457,6 +3513,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "\nPEAK RSS: %.2f GB | Current VmRSS: %.2f GB\n", peak_rss_gb(), current_rss_gb());
         fprintf(stderr, "Expert cache hit rate: %.1f%% (hit=%llu miss=%llu)\n", tot?100.0*m.hits/tot:0.0,
                (unsigned long long)m.hits, (unsigned long long)m.miss);
+        fprintf(stderr, "Coalesce diagnostics: demand waits=%ld pilot skips=%ld | max loaders per (layer,eid)<=1 by construction (single loading registry)\n",
+                g_demand_coalesce_waits, g_pilot_coalesce_skips);
         return 0;
     }
 
@@ -3577,6 +3635,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Expert cache hit rate (decode window): %.1f%% (hit=%llu miss=%llu)\n",
                 w_tot?100.0*w_hit/w_tot:100.0, (unsigned long long)w_hit, (unsigned long long)w_mis);
     }
+    fprintf(stderr, "Coalesce diagnostics: demand waits=%ld pilot skips=%ld | max loaders per (layer,eid)<=1 by construction (single loading registry)\n",
+            g_demand_coalesce_waits, g_pilot_coalesce_skips);
     fprintf(stderr, "Speed: %.2f tok/s (%.1fs for %d tokens)\n", n_new/dt, dt, n_new);
     if (g_trace_fp) { fclose(g_trace_fp); g_trace_fp = NULL; fprintf(stderr, "[trace] closed\n"); }
     free(buf); free(arena);
