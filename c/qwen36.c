@@ -861,6 +861,122 @@ static void tm_add(int S, int idx, double ms){
         }
     } else g_tm_pre[idx]+=ms;
 }
+/* ---- B2 (PKG traces-profiler-bench-wrappers): ontology-named emission ----
+ * Inert unless COLI_FORGE_PROFILE=<path> / COLI_FORGE_TRACE=<path> is set.
+ * Every "forge.*" key emitted here EXISTS in the canonical ontology
+ * (tools/model-forge/Sources/ForgeCore/MetricOntology.swift). Kill-rule:
+ * never invent local names. Threading has NO ontology metric, so thread
+ * configuration is recorded as metadata only, never as a metric. */
+#include <sys/stat.h>
+
+static int g_forge_prof_st = -1;
+static int g_forge_trc_st = -1;
+static FILE *g_forge_trc_fp = NULL;
+
+static const char *forge_profile_path(void){
+    static const char *p = NULL;
+    if (g_forge_prof_st < 0) {
+        p = getenv("COLI_FORGE_PROFILE");
+        g_forge_prof_st = (p && *p) ? 1 : 0;
+        if (g_forge_prof_st == 0) p = NULL;
+    }
+    return (g_forge_prof_st == 1) ? p : NULL;
+}
+
+static FILE *forge_trace_fp(void){
+    if (g_forge_trc_st < 0) {
+        const char *e = getenv("COLI_FORGE_TRACE");
+        g_forge_trc_st = (e && *e) ? 1 : 0;
+        if (g_forge_trc_st == 1) g_forge_trc_fp = fopen(e, "w");
+    }
+    return g_forge_trc_fp;
+}
+
+/* token-boundary event, JSONL; metric id is ontology-canonical */
+static void forge_trace_token_boundary(long idx){
+    FILE *f = forge_trace_fp();
+    if (!f) return;
+    fprintf(f, "{\"ev\":\"token_boundary\",\"i\":%ld,\"metric\":\"forge.runtime.step_ms_per_token\",\"step_ms\":%.4f}\n",
+            idx, g_tm_dec_tokens ? g_tm_step / (double)g_tm_dec_tokens : 0.0);
+}
+
+static void forge_trace_finish(void){
+    if (g_forge_trc_fp) { fclose(g_forge_trc_fp); g_forge_trc_fp = NULL; }
+}
+
+/* step-time breakdown JSON: MoE / mixer(DeltaNet) / LM head / attention /
+ * admission / memory, every metric key ontology-named; device-of-record
+ * stamped from stat(2) of the model directory. */
+static void forge_profile_emit(void){
+    const char *out = forge_profile_path();
+    FILE *trc = forge_trace_fp();
+    long n = g_tm_dec_tokens;
+    if (!out || n <= 0) { if (trc) forge_trace_finish(); return; }
+    double moe_total = g_tm_dec[2];
+    double router    = g_moe_sub[0];
+    double slotacq   = g_moe_sub[1];
+    double compute_only = moe_total - router - slotacq; if (compute_only < 0) compute_only = 0;
+    uint64_t hits   = g_cache_hit_int3 + g_cache_hit_int4;
+    uint64_t misses = g_cache_miss_int3 + g_cache_miss_int4;
+    double demand_hr = (hits + misses) > 0 ? (double)hits / (double)(hits + misses) : 0.0;
+    double adm_ms = g_win_adm_ms > 0 ? g_win_adm_ms : g_demand_expert_admission_ms;
+    if (adm_ms < 0) adm_ms = 0;
+    uint64_t logical_bpt = (uint64_t)((double)g_routed_int3_count * 1376392.0 / (double)n
+                                    + (double)g_routed_int4_count * 1769608.0 / (double)n);
+    double comp_sum = g_tm_dec[0] + g_tm_dec[1] + g_tm_dec[2] + g_tm_dec[5];
+    (void)comp_sum;
+    double step_ms  = g_tm_step / (double)n;
+    struct stat st;
+    unsigned long long devno = 0;
+    const char *snapdir = getenv("SNAP");
+    const char *devpath = (snapdir && *snapdir) ? snapdir : g_model;
+    int have_dev = (stat(devpath, &st) == 0);
+    if (have_dev) devno = (unsigned long long)st.st_dev;
+    const char *omp = getenv("OMP_NUM_THREADS");
+    FILE *pf = fopen(out, "w");
+    if (!pf) { fprintf(stderr, "[forge] profile emit failed: %s\n", out); return; }
+    fprintf(pf,
+"{\n"
+"  \"schema\": \"forge_profile_v1\",\n"
+"  \"ontology_source\": \"tools/model-forge/Sources/ForgeCore/MetricOntology.swift\",\n"
+"  \"device_of_record\": {\"path\": \"%s\", \"st_dev\": %llu},\n"
+"  \"threading_metadata\": {\"omp_num_threads_env\": ", devpath, devno);
+    if (omp) fprintf(pf, "\"%s\"", omp); else fprintf(pf, "null");
+    fprintf(pf,
+", \"note\": \"no threading metric exists in the ontology; config recorded as metadata only (B2 kill-rule)\"},\n"
+"  \"decode_tokens\": %ld,\n"
+"  \"metrics\": {\n"
+"    \"forge.runtime.step_ms_per_token\": %.4f,\n"
+"    \"forge.mixer.deltanet_ms_per_token\": %.4f,\n"
+"    \"forge.attention.ms_per_token\": %.4f,\n"
+"    \"forge.moe.total_ms_per_token\": %.4f,\n"
+"    \"forge.moe.routed_compute_ms_per_token\": %.4f,\n"
+"    \"forge.moe.slot_lookup_ms_per_token\": %.4f,\n"
+"    \"forge.moe.admission_ms_per_token\": %.4f,\n"
+"    \"forge.moe.demand_hit_rate\": %.6f,\n"
+"    \"forge.lm_head.ms_per_token\": %.4f,\n"
+"    \"forge.memory.logical_weight_bytes_per_token\": %llu\n"
+"  }\n"
+"}\n",
+        n,
+        step_ms,
+        g_tm_dec[0] / (double)n,
+        g_tm_dec[1] / (double)n,
+        moe_total / (double)n,
+        compute_only / (double)n,
+        slotacq / (double)n,
+        adm_ms / (double)n,
+        demand_hr,
+        g_tm_dec[5] / (double)n,
+        (unsigned long long)logical_bpt);
+    fclose(pf);
+    if (trc) {
+        fprintf(trc, "{\"ev\":\"timing_summary\",\"profile\":\"%s\"}\n", out);
+        forge_trace_finish();
+    }
+    fprintf(stderr, "[forge] profile written: %s (device_of_record st_dev=%llu)\n", out, devno);
+}
+
 static void tm_report(void){
     if(!tm_on()) return;
     /* fold the FINAL decode stretch (after the last prefill) into the window
@@ -2697,7 +2813,9 @@ static float *step(Model *m, const int *ids, int S, int pos_base) {
     float *logit = falloc(c->vocab);
     double _th = tm_on() ? tm_now() : 0.0;
     matmul_d(logit, last, m->lm_head, 1, D, c->vocab);
-    if (tm_on()) { tm_add(S, 5, tm_now()-_th); if (S==1) g_tm_dec_tokens++; else g_tm_pre_tokens += S; }
+    if (tm_on()) { tm_add(S, 5, tm_now()-_th);
+        if (S==1) { g_tm_dec_tokens++; forge_trace_token_boundary(g_tm_dec_tokens); }
+        else g_tm_pre_tokens += S; }
     free(x); free(nrm); free(tmp); free(last);
     if (lf) fclose(lf);
     if (m->resident_collecting) {
@@ -3633,6 +3751,7 @@ int main(int argc, char **argv) {
         double tot = m.hits + m.miss;
         if (g_ttft >= 0) fprintf(stderr, "TTFT: %.2f s (time to first token)\n", g_ttft);
         tm_report();
+        forge_profile_emit();
         mem_checkpoint("M4", "after expert cache population during inference");
         print_exact_memory_accounting(&m);
         fprintf(stderr, "\nPEAK RSS: %.2f GB | Current VmRSS: %.2f GB\n", peak_rss_gb(), current_rss_gb());
@@ -3748,6 +3867,7 @@ int main(int argc, char **argv) {
     double tot = m.hits + m.miss;
     if (g_ttft >= 0) fprintf(stderr, "TTFT: %.2f s (time to first token)\n", g_ttft);
     tm_report();
+    forge_profile_emit();
     mem_checkpoint("M4", "after expert cache population during inference");
     print_exact_memory_accounting(&m);
     fprintf(stderr, "\nPEAK RSS: %.2f GB | Current VmRSS: %.2f GB\n", peak_rss_gb(), current_rss_gb());
