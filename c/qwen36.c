@@ -779,19 +779,33 @@ static uint64_t g_trace_seq = 0;
 static int64_t g_trace_tok = -1;
 static int64_t g_trace_tok_base = 0;   /* running decode index across corpus prompts */
 /* ---- v4 POLICY-INDEPENDENT REQUEST STREAM (COLI_TRACE_REQ=<path>) ----
- * Counterfactual replay input: every admission REQUEST in global order with
- * NO outcome fields (no HIT/EVICT/INSERT/victim/slot). The simulator owns all
- * cache decisions. The v3 outcome trace remains a separate ORACLE artifact.
- *   E  <layer> <eid> <fmt> <bytes>              static expert metadata
- *   B  GEN <np> <n_new> <tok_base> <arm>        prompt/window boundary
- *   R  DEMAND <tok> <layer> <eid> <router_mass> demand acquisition request
- *   C  PC <srctok> <layer> <eid> <rank> <conf>  pilot candidate enqueued
- *   Q  PQ <layer> <eid>                         worker dequeued candidate
- *   P  DP|PP <layer> <eid>                      demand/pilot load published
- * seq is a per-stream monotonic counter assigned under g_pilot_mx where the
+ * Counterfactual replay INPUT: intents and static facts only. The simulator
+ * owns residency, enqueue/drop, dequeue selection, hit/miss, admission,
+ * publish and wait resolution. Baseline OUTCOMES (HIT/EVICT/INSERT, victims,
+ * slots) live only in the separate v3 ORACLE stream.
+ *   E  <layer> <eid> <fmt> <bytes>                     static expert metadata
+ *   B  GEN <np> <n_new> <tok_base> <arm>               prompt boundary (mutex-ordered)
+ *   R  DEMAND <tok> <layer> <eid> <router_mass>        demand acquisition intent
+ *   C  PC <srctok> <layer> <eid> <score_rank> <enqueue_order> <conf> <fmt> <bytes>
+ *                                                      pilot candidate INTENT,
+ *                                                      emitted BEFORE the
+ *                                                      baseline resident /
+ *                                                      queued / ring checks
+ * All events are generated under g_pilot_mx: the stream is a true total order
+ * of admission-relevant events (B included). Dequeue timing, publish timing
+ * and wake timing are deliberately ABSENT — the simulator freezes its own
+ * exogenous service schedule (FROZEN_SCHEDULE semantics).
  * event is generated on a locked path. */
 static FILE *g_req_fp = NULL;
 static uint64_t g_req_seq = 0;
+/* static expert metadata (fmt / total bytes per layer,eid) — container
+ * constants used to enrich C intents; NOT cache outcomes. Bounded by the
+ * model's own ceiling: layers are validated <= 128 at config parse. */
+#define QWEN36_REQ_MAX_LAYERS 128
+#define QWEN36_REQ_MAX_EXPERTS 512
+static int g_emeta_fmt[QWEN36_REQ_MAX_LAYERS][QWEN36_REQ_MAX_EXPERTS];
+static long long g_emeta_bytes[QWEN36_REQ_MAX_LAYERS][QWEN36_REQ_MAX_EXPERTS];
+static int g_req_meta_ready = 0;
 static void req_emit(const char *kind, const char *body) {
     if (!g_req_fp) return;
     unsigned long long seq = ++g_req_seq;
@@ -1906,9 +1920,9 @@ static void req_emit_expert_meta(Model *m) {
     int64_t want_w = ng + ng + nd;
     int64_t want_w3 = (want_w / 64) * 24;
     int64_t want_s = 2 * scale_count_gu(cc) + scale_count_d(cc);
-    for (int layer = 0; layer < cc->n_layers; layer++) {
+    for (int layer = 0; layer < cc->n_layers && layer < QWEN36_REQ_MAX_LAYERS; layer++) {
         int la = m->active_of[layer];
-        for (int eid = 0; eid < cc->n_experts; eid++) {
+        for (int eid = 0; eid < cc->n_experts && eid < QWEN36_REQ_MAX_EXPERTS; eid++) {
             char nm[256], qsnm[256];
             snprintf(nm, sizeof nm, "model.layers.%d.mlp.experts.%d.merged_weight", la, eid);
             snprintf(qsnm, sizeof qsnm, "model.layers.%d.mlp.experts.%d.qs", la, eid);
@@ -1919,11 +1933,15 @@ static void req_emit_expert_meta(Model *m) {
                 else if (tw->nbytes == want_w / 2) fmt = 4;
                 else if (tw->nbytes == want_w) fmt = 8;
                 bytes = tw->nbytes + ts->nbytes;
+                if (layer < QWEN36_REQ_MAX_LAYERS && eid < QWEN36_REQ_MAX_EXPERTS) {
+                    g_emeta_fmt[layer][eid] = fmt; g_emeta_bytes[layer][eid] = bytes;
+                }
             }
             if (g_req_fp) { unsigned long long s_ = ++g_req_seq;
                 fprintf(g_req_fp, "%llu E %d %d %d %lld\n", s_, layer, eid, fmt, (long long)bytes); }
         }
     }
+    g_req_meta_ready = 1;
 }
 
 static void expert_get(Model *m, int layer, int eid, Slot **out, float router_mass) {
@@ -1964,8 +1982,6 @@ static void expert_get(Model *m, int layer, int eid, Slot **out, float router_ma
             pthread_mutex_lock(&g_pilot_mx);
             for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) {
                 /* the coalesced load published: serve as a resident hit */
-                if (g_req_fp) { unsigned long long s_ = ++g_req_seq;
-                    fprintf(g_req_fp, "%llu W WAKE %d %d\n", s_, layer, eid); }
                 m->hits++; g_acq_hits++; lc->slots[i].used = ++m->clock; *out = &lc->slots[i];
                 if ((*out)->is_int3) g_cache_hit_int3++;
                 else if ((*out)->is_int4) g_cache_hit_int4++;
@@ -1978,8 +1994,6 @@ static void expert_get(Model *m, int layer, int eid, Slot **out, float router_ma
         /* re-scan once more after the registry cleared; fall through to a
          * normal miss only if still absent */
         for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) {
-            if (g_req_fp) { unsigned long long s_ = ++g_req_seq;
-                fprintf(g_req_fp, "%llu W WAKE %d %d\n", s_, layer, eid); }
             m->hits++; g_acq_hits++; lc->slots[i].used = ++m->clock; *out = &lc->slots[i];
             if ((*out)->is_int3) g_cache_hit_int3++;
             else if ((*out)->is_int4) g_cache_hit_int4++;
@@ -2046,8 +2060,6 @@ static void expert_get(Model *m, int layer, int eid, Slot **out, float router_ma
     if (s->is_int3) g_cache_miss_int3++;
     else if (s->is_int4) g_cache_miss_int4++;
     if (_tp) g_eg_lock_wait_ms += tm_now() - _tl2;
-    if (g_req_fp) { unsigned long long s_ = ++g_req_seq;
-        fprintf(g_req_fp, "%llu P DP %d %d\n", s_, layer, eid); }   /* demand publish marker */
     trace_emit("DEMAND", "INSERT", g_trace_tok, layer, eid,
                res.fmt, res.bytes, res.ms, _victim_eid, (int)(s - lc->slots));
     *out = s; pthread_mutex_unlock(&g_pilot_mx);
@@ -2704,8 +2716,6 @@ static void pilot_realload(Model *m, int layer, int eid) {
     LCache *lc = &m->cache[layer]; Cfg *c = &m->c;
     pthread_mutex_lock(&g_pilot_mx);
     /* Q event under the cache lock: shares the total order with R/C/P */
-    if (g_req_fp) { unsigned long long s_ = ++g_req_seq;
-        fprintf(g_req_fp, "%llu Q PQ %d %d\n", s_, layer, eid); }
     if (!m->is_queued[layer * c->n_experts + eid]) { pthread_mutex_unlock(&g_pilot_mx); return; }
     for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) { m->is_queued[layer*c->n_experts+eid]=0; pthread_mutex_unlock(&g_pilot_mx); return; }
     /* COALESCE: an admission (demand or pilot) is already loading this expert —
@@ -2737,8 +2747,6 @@ static void pilot_realload(Model *m, int layer, int eid) {
     s->eid = eid; s->pinned = m->is_pinned[layer*c->n_experts+eid]; s->used = ++m->clock;
     m->is_queued[layer*c->n_experts+eid] = 0;
     lc->loading[eid] = -1;   /* publish */
-    if (g_req_fp) { unsigned long long s_ = ++g_req_seq;
-        fprintf(g_req_fp, "%llu P PP %d %d\n", s_, layer, eid); }
     trace_emit("PILOT", "INSERT", -1, layer, eid, res.fmt, res.bytes, res.ms, victim_eid,
                (int)(s - lc->slots));
     pthread_mutex_unlock(&g_pilot_mx);
@@ -2777,7 +2785,7 @@ static void pilot_prefetch(Model *m, int lnext, const float *x, int S) {
             if (is_zero) { for (int e = 0; e < E; e++) { ema[e] = pr[e]; blended[e] = pr[e]; } }
             else { for (int e = 0; e < E; e++) { blended[e] = (1.f-m->pilot_smooth)*pr[e] + m->pilot_smooth*ema[e]; ema[e] = blended[e]; } }
         }
-        int cand = 0; int idx[128];
+        int cand = 0; int idx[128]; int score_rank[128]; float cand_conf[128];
         float max_logit = -1e30f; for (int e = 0; e < E; e++) if (blended[e] > max_logit) max_logit = blended[e];
         float *exps = falloc(E); float sum_exps = 0.f;
         for (int e = 0; e < E; e++) { exps[e] = expf(blended[e] - max_logit); sum_exps += exps[e]; }
@@ -2787,23 +2795,36 @@ static void pilot_prefetch(Model *m, int lnext, const float *x, int S) {
             int best = -1; float bv = -1.f;
             for (int e = 0; e < E; e++) { int taken = 0; for (int j = 0; j < kk; j++) if (idx[j]==e){taken=1;break;} if (!taken && exps[e] > bv) { bv = exps[e]; best = e; } }
             if (best < 0) break;
-            idx[kk] = best; cum_sum += bv; cand++;
+            idx[kk] = best; score_rank[kk] = kk; cand_conf[kk] = sum_exps > 0.f ? exps[best] / sum_exps : 0.f;
+            cum_sum += bv; cand++;
             if (cum_sum >= m->pilot_conf_limit * sum_exps && cand >= min_cand) break;
         }
-        free(exps);
+        free(exps);   /* cand_conf[] captured above — no reads of exps past this point */
         if (blended != pr) free(blended);
+        /* sort candidates by eid for deterministic enqueue order, carrying
+         * their ORIGINAL confidence rank with them (Defect D) */
         for (int a = 0; a < cand-1; a++) for (int b = a+1; b < cand; b++)
-            if (idx[b] >= 0 && (idx[a] < 0 || idx[a] > idx[b])) { int t = idx[a]; idx[a] = idx[b]; idx[b] = t; }
+            if (idx[b] >= 0 && (idx[a] < 0 || idx[a] > idx[b])) {
+                int t = idx[a]; idx[a] = idx[b]; idx[b] = t;
+                t = score_rank[a]; score_rank[a] = score_rank[b]; score_rank[b] = t;
+                float tf = cand_conf[a]; cand_conf[a] = cand_conf[b]; cand_conf[b] = tf;
+            }
         for (int kk = 0; kk < cand; kk++) {
             int eid = idx[kk]; if (eid < 0) continue;
+            /* v4 INTENT event: emitted UNCONDITIONALLY before residency /
+             * queue-gating / ring-capacity decisions, so alternative policies
+             * can recover prefetch opportunities the baseline suppressed */
+            if (g_req_fp) { unsigned long long s_ = ++g_req_seq;
+                fprintf(g_req_fp, "%llu C PC %lld %d %d %d %d %.6f %d %lld\n", s_,
+                        (long long)g_trace_tok, lnext, eid,
+                        score_rank[kk], kk, (double)cand_conf[kk],
+                        (g_req_meta_ready ? g_emeta_fmt[lnext][eid] : -1),
+                        (long long)(g_req_meta_ready ? g_emeta_bytes[lnext][eid] : -1)); }
             int found = 0; pthread_mutex_lock(&g_pilot_mx); LCache *lc = &m->cache[lnext];
             for (int z = 0; z < lc->n; z++) if (lc->slots[z].eid == eid) { found = 1; break; }
             pthread_mutex_unlock(&g_pilot_mx);
             if (!found) {
                 int gidx = lnext*E + eid;
-                /* enqueue entirely under g_pilot_mx so the C event shares the
-                 * same lock order as R/Q/P — the v4 stream is a true total
-                 * order of admission events */
                 pthread_mutex_lock(&g_pilot_mx);
                 int already_queued = m->is_queued[gidx];
                 unsigned w2 = __atomic_load_n(&pilot_w, __ATOMIC_RELAXED);
@@ -2812,10 +2833,6 @@ static void pilot_prefetch(Model *m, int lnext, const float *x, int S) {
                     pilot_q[w2 & 4095].l = lnext; pilot_q[w2 & 4095].e = eid;
                     __atomic_store_n(&pilot_w, w2 + 1, __ATOMIC_RELEASE);
                     m->is_queued[gidx] = 1;
-                    if (g_req_fp) { unsigned long long s_ = ++g_req_seq;
-                        fprintf(g_req_fp, "%llu C PC %lld %d %d %d %.6f\n", s_,
-                                (long long)g_trace_tok, lnext, eid, kk,
-                                (double)(sum_exps > 0.f ? exps[eid] / sum_exps : 0.f)); }
                 }
                 pthread_mutex_unlock(&g_pilot_mx);
             }
@@ -2942,9 +2959,15 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out) {
             }
         }
         g_trace_tok = -1;   /* prefill acquisitions trace with tok=-1 */
-        if (g_req_fp) { unsigned long long s_ = ++g_req_seq;
+        if (g_req_fp) {
+            /* B is mutex-ordered against all other admission events (Defect F
+             * fix: option A — the total-order claim now holds for B too) */
+            pthread_mutex_lock(&g_pilot_mx);
+            unsigned long long s_ = ++g_req_seq;
             fprintf(g_req_fp, "%llu B GEN %d %d %lld %s\n", s_, np, n_new,
-                    (long long)g_trace_tok_base, expert_parallel_on() ? "EP" : "REF"); }
+                    (long long)g_trace_tok_base, expert_parallel_on() ? "EP" : "REF");
+            pthread_mutex_unlock(&g_pilot_mx);
+        }
     }
     for (int i = 0; i < np; i++) out[i] = prompt[i];
     float *logit = step(m, prompt, np, 0);
