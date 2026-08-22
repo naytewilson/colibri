@@ -643,16 +643,22 @@ static void pilot_prefetch(Model *m, int lnext, const float *x, int S);
 static void *pilot_worker(void *arg);
 static void ensure_pilot_worker_started(Model *m);
 static void slot_ensure_allocated(Model *m, Slot *s);
+static int expert_drop_flag(void);
 
 static void ensure_pilot_worker_started(Model *m) {
     if (!pilot_m) {
         pilot_m = m;
-        pthread_t t;
-        if (pthread_create(&t, NULL, pilot_worker, NULL) != 0) {
-            fprintf(stderr, "Error: Failed to create pilot prefetch worker thread\n");
-            exit(1);
+        int W = 1;
+        const char *e = getenv("COLI_PILOT_W");
+        if (e) { W = atoi(e); if (W < 1) W = 1; if (W > 8) W = 8; }
+        for (int i = 0; i < W; i++) {
+            pthread_t t;
+            if (pthread_create(&t, NULL, pilot_worker, NULL) != 0) {
+                fprintf(stderr, "Error: Failed to create pilot prefetch worker thread\n");
+                exit(1);
+            }
+            pthread_detach(t);
         }
-        pthread_detach(t);
     }
 }
 
@@ -1845,18 +1851,19 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pil
         fprintf(stderr, "%s: scale array is %lld elems — expected %lld (refusing)\n",
                 qsnm, (long long)(ts ? ts->numel : -1), (long long)want_s); exit(1); }
     double _t_io0 = tm_now();
+    int dropf = expert_drop_flag();
     if (tw->nbytes == want_w3) {
         static int noted_3 = 0;
         if (!noted_3) { fprintf(stderr, "[qwen36] packed INT3-g64 expert CPU residency active (1.38 MB/slot)\n"); noted_3 = 1; }
         slot_ensure_format(m, s, 5);
-        st_read_raw(&m->S, nm, s->w3, 1);
+        st_read_raw(&m->S, nm, s->w3, dropf);
         s->is_int3 = 1; s->is_int4 = 0;
     } else if (tw->nbytes == want_w / 2) {
         if (!unpack_int8_mode()) {
             static int noted_p = 0;
             if (!noted_p) { fprintf(stderr, "[qwen36] packed INT4 expert CPU residency active (1.77 MB/slot)\n"); noted_p = 1; }
             slot_ensure_format(m, s, 4);
-            st_read_raw(&m->S, nm, s->w4, 1);
+            st_read_raw(&m->S, nm, s->w4, dropf);
             s->is_int4 = 1; s->is_int3 = 0;
         } else {
             static int noted_u = 0;
@@ -1864,7 +1871,7 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pil
             slot_ensure_format(m, s, 1);
             uint8_t *raw = (uint8_t *)malloc((size_t)(want_w / 2));
             if (!raw) { fprintf(stderr, "OOM reading int4 expert %s\n", nm); exit(1); }
-            st_read_raw(&m->S, nm, raw, 1);
+            st_read_raw(&m->S, nm, raw, dropf);
             for (int64_t i = 0; i < want_w; i++) {
                 uint8_t byte = raw[i >> 1];
                 int8_t v = (int8_t)((i & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF));
@@ -1878,7 +1885,7 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pil
         slot_ensure_format(m, s, 1);
         s->is_int3 = 0;
         s->is_int4 = 0;
-        st_read_raw(&m->S, nm, s->g, 1);
+        st_read_raw(&m->S, nm, s->g, dropf);
     }
     double _t_io_w = tm_now();                       /* weight read (+ optional unpack) done */
     st_read_f32(&m->S, qsnm, s->gs, 0);
@@ -1944,7 +1951,24 @@ static void req_emit_expert_meta(Model *m) {
     g_req_meta_ready = 1;
 }
 
-static void expert_get(Model *m, int layer, int eid, Slot **out, float router_mass) {
+/* ---- Demand-side expert acquisition, split into a locked acquire phase and
+ * an unlocked finish phase. Sequential composition (expert_get) is behavior-
+ * identical to the former monolithic function: same events, same counters,
+ * same timer accumulation points. The split exists so moe() can overlap the
+ * unlocked pread/unpack phases of several misses concurrently behind
+ * COLI_EXPERT_ASYNC=1 without changing routing, bytes or arithmetic. ---- */
+typedef enum { ACQ_HIT = 0, ACQ_LOAD = 1 } AcqKind;
+typedef struct { AcqKind kind; Slot *s; int64_t victim_eid; } AcqRes;
+
+static int expert_async_on(void){ static int v=-1; if(v<0){ const char *e=getenv("COLI_EXPERT_ASYNC"); v=(e&&*e=='1')?1:0; } return v; }
+static int async_w_threads(void){ static int v=-1; if(v<0){ const char *e=getenv("COLI_ASYNC_W"); v=e?atoi(e):4; if(v<1)v=1; if(v>8)v=8; } return v; }
+/* COLI_EXPERT_PAGECACHE=1 keeps streamed expert pages in the Linux page cache
+ * (drop=0) instead of posix_fadvise(DONTNEED) after every pread. Reclaimed
+ * pages are clean and cost no swap; the worst case degenerates to the
+ * historical cold-read behavior minus the fadvise syscalls. */
+static int expert_drop_flag(void){ static int v=-1; if(v<0){ const char *e=getenv("COLI_EXPERT_PAGECACHE"); v=(e&&*e=='1')?0:1; } return v; }
+
+static void expert_acquire(Model *m, int layer, int eid, float router_mass, Slot **out, AcqRes *ar) {
     LCache *lc = &m->cache[layer];
     int _tp = tm_on();
     double _tl0 = _tp ? tm_now() : 0;
@@ -1964,6 +1988,7 @@ static void expert_get(Model *m, int layer, int eid, Slot **out, float router_ma
         trace_emit("DEMAND", "HIT", g_trace_tok, layer, eid,
                    (*out)->is_int3 ? 3 : ((*out)->is_int4 ? 4 : 8), 0, 0.0, -1,
                    (int)(*out - lc->slots));
+        ar->kind = ACQ_HIT;
         pthread_mutex_unlock(&g_pilot_mx); return;
     }
     /* NOTE: miss accounting happens only when we actually proceed to load —
@@ -1987,6 +2012,7 @@ static void expert_get(Model *m, int layer, int eid, Slot **out, float router_ma
                 else if ((*out)->is_int4) g_cache_hit_int4++;
                 trace_emit("DEMAND", "HIT", g_trace_tok, layer, eid,
                            (*out)->is_int3 ? 3 : ((*out)->is_int4 ? 4 : 8), 0, 0.0, -1, i);
+                ar->kind = ACQ_HIT;
                 pthread_mutex_unlock(&g_pilot_mx); return;
             }
             if (lc->loading[eid] < 0 && lc->n < lc->cap) break;   /* loader vanished without publish (cannot happen today) — recover */
@@ -1999,6 +2025,7 @@ static void expert_get(Model *m, int layer, int eid, Slot **out, float router_ma
             else if ((*out)->is_int4) g_cache_hit_int4++;
             trace_emit("DEMAND", "HIT", g_trace_tok, layer, eid,
                        (*out)->is_int3 ? 3 : ((*out)->is_int4 ? 4 : 8), 0, 0.0, -1, i);
+            ar->kind = ACQ_HIT;
             pthread_mutex_unlock(&g_pilot_mx); return;
         }
     }
@@ -2051,6 +2078,14 @@ static void expert_get(Model *m, int layer, int eid, Slot **out, float router_ma
     s->eid = -1; s->used = ++m->clock;
     lc->loading[eid] = (int16_t)(s - lc->slots);   /* reserve identity: one loader per (layer,eid) */
     pthread_mutex_unlock(&g_pilot_mx);
+    ar->kind = ACQ_LOAD; ar->s = s; ar->victim_eid = _victim_eid;
+}
+
+static void expert_finish(Model *m, int layer, int eid, AcqRes *ar, Slot **out) {
+    LCache *lc = &m->cache[layer];
+    Cfg *c = &m->c;
+    Slot *s = ar->s;
+    int _tp = tm_on();
     ExpertLoadResult res;
     load_expert_merged(m, layer, eid, s, 0, &res);
     double _tl2 = _tp ? tm_now() : 0;
@@ -2061,8 +2096,14 @@ static void expert_get(Model *m, int layer, int eid, Slot **out, float router_ma
     else if (s->is_int4) g_cache_miss_int4++;
     if (_tp) g_eg_lock_wait_ms += tm_now() - _tl2;
     trace_emit("DEMAND", "INSERT", g_trace_tok, layer, eid,
-               res.fmt, res.bytes, res.ms, _victim_eid, (int)(s - lc->slots));
+               res.fmt, res.bytes, res.ms, ar->victim_eid, (int)(s - lc->slots));
     *out = s; pthread_mutex_unlock(&g_pilot_mx);
+}
+
+static void expert_get(Model *m, int layer, int eid, Slot **out, float router_mass) {
+    AcqRes ar;
+    expert_acquire(m, layer, eid, router_mass, out, &ar);
+    if (ar.kind == ACQ_LOAD) expert_finish(m, layer, eid, &ar, out);
 }
 
 static void pin_hot_experts(Model *m) {
@@ -2336,11 +2377,43 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
         /* Expert slot acquisition */
         double _t_lk = tm_on() ? tm_now() : 0.0;
         Slot *e_slots[256];
-        for (int kk = 0; kk < K; kk++) {
-            expert_get(m, layer, idx[kk], &e_slots[kk], val[kk]);
+        if (S == 1 && expert_async_on() && K >= 2 && K <= 8 && m->cache[layer].cap >= 2*K) {
+            /* ASYNC BATCH ACQUISITION: locked acquire phases run up front in
+             * the same per-kk order as sequential mode (identical R DEMAND
+             * intent stream, hit/miss/coalesce accounting), then the unlocked
+             * load+publish phases of the misses run concurrently and are
+             * joined before any expert consumes a slot. */
+            AcqRes ars[256]; int loadkk[8]; int nload = 0;
+            for (int kk = 0; kk < K; kk++) {
+                expert_acquire(m, layer, idx[kk], val[kk], &e_slots[kk], &ars[kk]);
+                if (ars[kk].kind == ACQ_LOAD) loadkk[nload++] = kk;
+            }
+            if (nload > 1) {
+                int W = nload < async_w_threads() ? nload : async_w_threads();
+                #pragma omp parallel for schedule(static) num_threads(W)
+                for (int ii = 0; ii < nload; ii++) {
+                    int k2 = loadkk[ii];
+                    expert_finish(m, layer, idx[k2], &ars[k2], &e_slots[k2]);
+                }
+            } else {
+                for (int ii = 0; ii < nload; ii++) {
+                    int k2 = loadkk[ii];
+                    expert_finish(m, layer, idx[k2], &ars[k2], &e_slots[k2]);
+                }
+            }
             if (S == 1) {
-                if (e_slots[kk]->is_int3) g_routed_int3_count++;
-                else if (e_slots[kk]->is_int4) g_routed_int4_count++;
+                for (int kk = 0; kk < K; kk++) {
+                    if (e_slots[kk]->is_int3) g_routed_int3_count++;
+                    else if (e_slots[kk]->is_int4) g_routed_int4_count++;
+                }
+            }
+        } else {
+            for (int kk = 0; kk < K; kk++) {
+                expert_get(m, layer, idx[kk], &e_slots[kk], val[kk]);
+                if (S == 1) {
+                    if (e_slots[kk]->is_int3) g_routed_int3_count++;
+                    else if (e_slots[kk]->is_int4) g_routed_int4_count++;
+                }
             }
         }
         if (tm_on() && S == 1) g_moe_sub[1] += tm_now() - _t_lk;
@@ -2755,12 +2828,17 @@ static void pilot_realload(Model *m, int layer, int eid) {
 static void *pilot_worker(void *arg) {
     (void)arg;
     while (1) {
-        unsigned r = __atomic_load_n(&pilot_r, __ATOMIC_ACQUIRE);
         unsigned w = __atomic_load_n(&pilot_w, __ATOMIC_ACQUIRE);
-        if (r == w) { sleep_ms(1); continue; }
-        int layer = pilot_q[r & 4095].l, eid = pilot_q[r & 4095].e;
+        unsigned my = __atomic_load_n(&pilot_r, __ATOMIC_ACQUIRE);
+        if (my >= w) { sleep_ms(1); continue; }
+        /* CAS-claim one slot so multiple pilot workers never take the same job */
+        while (!__atomic_compare_exchange_n(&pilot_r, &my, my + 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            w = __atomic_load_n(&pilot_w, __ATOMIC_ACQUIRE);
+            if (my >= w) break;
+        }
+        if (my >= w) continue;
+        int layer = pilot_q[my & 4095].l, eid = pilot_q[my & 4095].e;
         pilot_realload(pilot_m, layer, eid);
-        __atomic_store_n(&pilot_r, r + 1, __ATOMIC_RELEASE);
     }
     return NULL;
 }
