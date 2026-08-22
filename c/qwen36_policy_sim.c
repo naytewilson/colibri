@@ -90,7 +90,9 @@ static Pending pw; static int pw_busy = 0;
 typedef struct { int layer, eid; } QCand;
 static QCand g_queue[4096]; static int g_q_head = 0, g_q_len = 0;
 
-static int g_ar_layer = -1, g_ar_eid = -1;   /* --assume-resident fixture knob */
+static int g_ar_layer = -1, g_ar_eid = -1;   /* --fixture-force-candidate-resident */
+static int g_fa_layer = -1, g_fa_eid = -1;   /* --fixture-force-candidate-absent  */
+static int g_pq_layer = -1, g_pq_eid = -1;   /* --fixture-prequeue                */
 
 static int find_resident(Sim *c, int eid) {
     for (int i = 0; i < c->nslots; i++)
@@ -198,9 +200,15 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--dump-derived") && i + 1 < argc) g_dump_fp = fopen(argv[++i], "w");
         else if (!strcmp(argv[i], "--dump-ordinal") && i + 1 < argc) g_ord_fp = fopen(argv[++i], "w");
         else if (!strcmp(argv[i], "--check-meta")) check_meta = 1;
-        else if (!strcmp(argv[i], "--assume-resident") && i + 1 < argc && sscanf(argv[++i], "%d:%d", &g_ar_layer, &g_ar_eid) == 2) { /* fixture knob */ }
+        else if (!strcmp(argv[i], "--fixture-force-candidate-resident") && i + 1 < argc && sscanf(argv[++i], "%d:%d", &g_ar_layer, &g_ar_eid) == 2) { /* TEST-ONLY: C path treats this candidate as resident */ }
+        else if (!strcmp(argv[i], "--fixture-force-candidate-absent") && i + 1 < argc && sscanf(argv[++i], "%d:%d", &g_fa_layer, &g_fa_eid) == 2) { /* TEST-ONLY: C path skips the residency gate for this candidate */ }
+        else if (!strcmp(argv[i], "--fixture-prequeue") && i + 1 < argc && sscanf(argv[++i], "%d:%d", &g_pq_layer, &g_pq_eid) == 2) { /* TEST-ONLY: pre-seed is_queued before the stream */ }
         else if (!path) path = argv[i];
         else { fprintf(stderr, "unexpected arg %s\n", argv[i]); return 2; }
+    }
+    if (g_pq_layer >= 0 && g_pq_eid >= 0) {   /* TEST-ONLY: pre-seed is_queued */
+        ensure_sim(g_pq_layer, cap);
+        g_is_queued[g_pq_layer][g_pq_eid] = 1;
     }
     FILE *f = fopen(path, "r");
     if (!f) { perror(path); return 2; }
@@ -238,8 +246,7 @@ int main(int argc, char **argv) {
                 total_R++;
                 if (!g_meta_valid[layer][eid]) { fprintf(stderr, "CONTRACT: missing/invalid E metadata for l%d e%d\n", layer, eid); contract_errors++; }
                 Sim *c = ensure_sim(layer, cap);
-                int forced = (g_ar_layer == layer && g_ar_eid == eid);
-                int r = forced ? -1 : find_resident(c, eid);
+                int r = find_resident(c, eid);
                 if (r >= 0) { c->used[r] = ++g_clock; d_hits++; if (tok >= 0) w_dhits++; if (g_dump_fp) fprintf(g_dump_fp, "%ld R %lld %d %d HIT\n", g_req_no++, (long long)tok, layer, eid); }
                 else if (c->loading[eid] >= 0) {
                     if (g_n_waiters < 65536) { g_waiters[g_n_waiters].layer = layer; g_waiters[g_n_waiters].eid = eid; g_waiters[g_n_waiters].tok = (int)tok; g_n_waiters++; }
@@ -255,8 +262,12 @@ int main(int argc, char **argv) {
             else {
                 c_intent_total++;
                 Sim *c = ensure_sim(layer, cap);
-                int forced = (g_ar_layer == layer && g_ar_eid == eid);
-                if (forced || find_resident(c, eid) >= 0) { c_drop_resident++; }
+                /* TEST-ONLY controls (never in ordinary simulation):
+                 * force-resident: residency gate reports resident regardless
+                 * force-absent:   residency gate skipped entirely          */
+                int f_res = (g_ar_layer == layer && g_ar_eid == eid);
+                int f_abs = (g_fa_layer == layer && g_fa_eid == eid);
+                if (f_res || (!f_abs && find_resident(c, eid) >= 0)) { c_drop_resident++; }
                 else if (g_is_queued[layer][eid]) { c_drop_queued++; }
                 else if (g_q_len < 4096) {
                     g_queue[(g_q_head + g_q_len) % 4096].layer = layer; g_queue[(g_q_head + g_q_len) % 4096].eid = eid;
@@ -273,8 +284,42 @@ int main(int argc, char **argv) {
     }
     fclose(f);
 
-    /* drain: finish in-flight pilot load, serve remaining queue, retry
-     * deferred demand reservations after each state change */
+    /* ---- R2: SCORE AT EOF ----
+     * The screening result is frozen at the exact end of the policy-
+     * independent input stream. Anything served later is cleanup/audit and
+     * MUST NOT modify the scored metrics. Ordinal recording also stops here:
+     * the dump covers exactly the input window. */
+    if (g_ord_fp) {
+        /* input-window ordinal series ends here; cleanup-drain steps are
+         * intentionally NOT recorded (they are not schedule coordinates) */
+        fprintf(g_ord_fp, "service_opportunities=%ld last_service_ordinal=%ld\n", service_opportunities, last_service_ordinal);
+        fclose(g_ord_fp); g_ord_fp = NULL;
+    }
+    long s_d_hits = d_hits, s_d_misses = d_misses, s_w_dhits = w_dhits, s_w_dmisses = w_dmisses; (void)s_w_dhits; (void)s_w_dmisses;
+    long s_d_ins = d_ins, s_p_ins = p_ins, s_d_evicts = d_evicts, s_p_evicts = p_evicts;
+    unsigned long long s_d_bytes = d_bytes, s_p_bytes = p_bytes;
+    int eof_queue_depth = g_q_len, eof_pilot_inflight = pw_busy ? 1 : 0;
+    int eof_waiters = g_n_waiters, eof_deferred = g_n_deferred;
+    unsigned long long s_fp = 1469598103934665603ULL;
+    for (int l = 0; l < MAX_LAYERS; l++) {
+        if (!g_sim[l].cap) continue;
+        int se[512]; int sn = 0;
+        for (int s = 0; s < g_sim[l].nslots; s++) if (g_sim[l].slot_eid[s] >= 0) se[sn++] = g_sim[l].slot_eid[s];
+        unsigned long long hs = 0;
+        for (int i = 0; i < sn; i++) { for (int j = i + 1; j < sn; j++) if (se[j] < se[i]) { int t = se[i]; se[i] = se[j]; se[j] = t; } hs = hs * 1000003u + (unsigned)se[i]; }
+        s_fp = (s_fp ^ (unsigned)(hs & 0xFFFFFFFFu) ^ (unsigned)l) * 1099511628211ULL;
+    }
+    printf("== EOF SCREENING METRICS (frozen at end of input stream) ==\n");
+    printf("eof demand hits=%ld misses=%ld | admissions demand=%ld pilot=%ld\n", s_d_hits, s_d_misses, s_d_ins, s_p_ins);
+    printf("eof evictions: demand=%ld pilot=%ld | bytes: demand=%llu pilot=%llu\n", s_d_evicts, s_p_evicts, s_d_bytes, s_p_bytes);
+    printf("eof_queue_depth=%d eof_pilot_inflight=%d eof_waiters=%d eof_deferred=%d\n",
+           eof_queue_depth, eof_pilot_inflight, eof_waiters, eof_deferred);
+    printf("eof resident multiset fingerprint=%llx\n", s_fp);
+
+    /* CLEANUP DRAIN (audit only): runs AFTER the screening metrics were
+     * frozen; its purpose is to resolve every waiter/deferred request so the
+     * gate can assert zero unresolved work. It must not be used for policy
+     * comparisons. */
     while (pw_busy || g_q_len > 0 || g_n_deferred > 0) {
         int progressed = 0;
         if (pw_busy) { Pending p = pw; pw_busy = 0; sim_publish(&p); progressed = 1; }
@@ -293,10 +338,11 @@ int main(int argc, char **argv) {
         if (!progressed) break;
     }
 
-    printf("== SIMULATOR DERIVED (request stream only; svc_k=%d) ==\n", svc_k);
+    printf("== DRAINED AUDIT METRICS (cleanup only; not for policy comparisons) ==\n");
     printf("demand requests=%ld accounted=%ld unresolved_waiters=%d unresolved_deferred=%d\n",
            total_R, d_hits + d_misses, g_n_waiters, g_n_deferred);
-    printf("demand hits=%ld (window %ld) misses=%ld (window %ld)\n", d_hits, w_dhits, d_misses, w_dmisses);
+    printf("drained totals: demand hits=%ld misses=%ld | admissions demand=%ld pilot=%ld\n", d_hits, d_misses, d_ins, p_ins);
+    printf("drained evictions: demand=%ld pilot=%ld | bytes: demand=%llu pilot=%llu\n", d_evicts, p_evicts, d_bytes, p_bytes);
     printf("hit rate: %.2f%% cumulative | %.2f%% decode-window\n",
            (d_hits + d_misses) ? 100.0 * d_hits / (d_hits + d_misses) : 0.0,
            (w_dhits + w_dmisses) ? 100.0 * w_dhits / (w_dhits + w_dmisses) : 0.0);
@@ -306,7 +352,6 @@ int main(int argc, char **argv) {
            c_intent_total, c_enqueue, c_drop_resident, c_drop_queued, c_drop_ring);
     printf("service_opportunities=%ld last_service_ordinal=%ld\n", service_opportunities, last_service_ordinal);
     if (check_meta) printf("meta records consumed: %d\n", g_meta_seen);
-    if (g_ord_fp) { fprintf(g_ord_fp, "service_opportunities=%ld last_service_ordinal=%ld\n", service_opportunities, last_service_ordinal); fclose(g_ord_fp); }
     if (g_dump_fp) fclose(g_dump_fp);
 
     /* -------- R2: oracle gate (post-hoc; decisions never read it) -------- */
@@ -375,8 +420,10 @@ int main(int argc, char **argv) {
     long tol_adm  = (long)(tol_frac * (o_dins + o_pins > 0 ? o_dins + o_pins : 1)) + 1;
     long tol_ev   = (long)(tol_frac * (o_dev + o_pev > 0 ? o_dev + o_pev : 1)) + 1;
     unsigned long long tol_b = (unsigned long long)(tol_frac * (o_dbytes + o_pbytes > 0 ? o_dbytes + o_pbytes : 1)) + 1;
-    printf("== GATE (tolerance frac=%.4f -> hits<=%ld adm<=%ld evict<=%ld bytes<=%llu) ==\n",
+    printf("== GATE on DRAINED AUDIT view (tolerance frac=%.4f -> hits<=%ld adm<=%ld evict<=%ld bytes<=%llu) ==\n",
            tol_frac, tol_hits, tol_adm, tol_ev, tol_b);
+    printf("  (EOF screening deltas vs oracle, informational: hits %ld, misses %ld)\n",
+           s_d_hits - o_dhits, s_d_misses - o_dmiss);
     int fail = 0;
     #define GATE_INT(name, a, b, tol) do { \
         long da_ = (long)(a) - (long)(b); \
