@@ -890,6 +890,11 @@ qwen36$(EXE): qwen36.c st.h json.h compat.h
 qwen36_trace_replay$(EXE): qwen36_trace_replay.c
 	$(CC) $(NOCUDA_CFLAGS) qwen36_trace_replay.c -o qwen36_trace_replay$(EXE) $(NOCUDA_LDFLAGS)
 
+# Counterfactual cache-policy simulator: decides from the v4 request stream
+# only; v3 outcome trace is a post-hoc oracle, never a decision input.
+qwen36_policy_sim$(EXE): qwen36_policy_sim.c
+	$(CC) $(NOCUDA_CFLAGS) qwen36_policy_sim.c -o qwen36_policy_sim$(EXE) $(NOCUDA_LDFLAGS)
+
 # Context-size gates: KV layout, growth across requests, and the attention
 # capacity. Includes qwen36.c directly, so no model file is needed.
 tests/test_qwen36_i4_kernel$(EXE): tests/test_qwen36_i4_kernel.c
