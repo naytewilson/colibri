@@ -61,6 +61,33 @@ static uint8_t g_meta_valid[MAX_LAYERS][MAX_EXPERTS];
 static int   g_meta_fmt[MAX_LAYERS][MAX_EXPERTS];
 static long long g_meta_bytes[MAX_LAYERS][MAX_EXPERTS];
 
+/* ---------------- policy layer (P1 tournament) ----------------
+ * Policies receive the same intents, metadata, service ordinal and budget;
+ * they differ ONLY in retention/victim decisions. All signals are causal
+ * (derived from already-processed requests); no future knowledge exists in
+ * the simulator. Decisions are fully deterministic. */
+typedef struct {
+    int  id;              /* 0=P0 uniform LRU, 1=P1 pinned-hot, 2=P2 layer-adaptive,
+                             3=P3 segmented LRU, 4=P4 LFU-lite */
+    double pin_frac;      /* P1: reservable fraction of each layer cap */
+    double seg_ratio;     /* P3: protected fraction of each layer cap */
+    long   lfu_decay;     /* P4: halve frequencies every N demand requests */
+    int    rebalance_every; /* P2: recompute per-layer caps every N demand reqs */
+} Policy;
+
+typedef struct { int kind; int layer, eid; } EvRec2;   /* alias guard */
+static Policy POL;
+/* per-layer policy state */
+static uint32_t g_hits[MAX_LAYERS][MAX_EXPERTS];       /* P1/P4 frequency (causal) */
+static uint8_t  g_pinned[MAX_LAYERS][MAX_EXPERTS];     /* P1 pin flag */
+static int      g_pinned_count[MAX_LAYERS];
+static uint8_t  g_segprot[512];                        /* P3 per-slot: 1=protected */
+static int      g_prot_count[MAX_LAYERS];              /* P3 protected occupancy */
+static long     g_layer_miss[MAX_LAYERS];              /* P2 pressure (causal) */
+static int      g_lay_cap[MAX_LAYERS];                 /* P2 current per-layer cap */
+static long     g_dem_since_rebalance = 0, g_dem_total = 0;
+;
+
 typedef struct { int kind; int layer, eid; } EvRec;
 static EvRec *g_evicts = NULL; static size_t g_n_evicts = 0, g_cap_evicts = 0;
 static void rec_evict(int kind, int layer, int eid) {
@@ -104,20 +131,113 @@ static Sim *ensure_sim(int layer, int cap) {
     Sim *c = &g_sim[layer];
     if (!c->cap) {
         c->cap = cap;
+        g_lay_cap[layer] = cap;
         for (int e2 = 0; e2 < MAX_EXPERTS; e2++) c->loading[e2] = -1;
     }
     return c;
 }
 
-static int pick_victim(Sim *c, int *all_inflight) {
+/* policy hooks ---------------------------------------------------------- */
+static void policy_on_hit(int layer, int eid, int slot) {
+    if (POL.id == 1 || POL.id == 4) {
+        if (g_hits[layer][eid] < UINT32_MAX) g_hits[layer][eid]++;
+    }
+    if (POL.id == 1 && g_pinned_count[layer] < (int)(POL.pin_frac * g_lay_cap[layer])
+        && !g_pinned[layer][eid] && g_hits[layer][eid] >= 2) {
+        g_pinned[layer][eid] = 1; g_pinned_count[layer]++;
+    }
+    if (POL.id == 3) {
+        /* SLRU promotion: probationary hit moves to protected while the
+         * protected segment has room; else the protected LRU is demoted */
+        if (!g_segprot[slot] && g_prot_count[layer] < (int)(POL.seg_ratio * g_lay_cap[layer])) {
+            g_segprot[slot] = 1; g_prot_count[layer]++;
+        }
+    }
+}
+static void policy_on_insert(int layer, int slot) {
+    if (POL.id == 3) { g_segprot[slot] = 0; }   /* new arrivals enter probationary */
+}
+
+/* victim selection per policy; returns slot index or -1 (all in flight) */
+static int policy_pick_victim(Sim *c, int layer) {
     int lru = -1;
+    if (POL.id == 4) {
+        long bestf = -1;
+        for (int i = 0; i < c->nslots; i++) {
+            if (c->slot_eid[i] < 0) continue;
+            long f = c->slot_eid[i] < MAX_EXPERTS ? (long)g_hits[layer][c->slot_eid[i]] : 0;
+            if (bestf < 0 || f < bestf || (f == bestf && c->used[i] < c->used[lru])) { bestf = f; lru = i; }
+        }
+        return lru;
+    }
+    if (POL.id == 3) {
+        lru = -1;
+        for (int i = 0; i < c->nslots; i++) {
+            if (c->slot_eid[i] < 0 || g_segprot[i]) continue;
+            if (lru < 0 || c->used[i] < c->used[lru]) lru = i;
+        }
+        if (lru >= 0) return lru;
+        for (int i = 0; i < c->nslots; i++) {   /* probationary empty -> protected */
+            if (c->slot_eid[i] < 0) continue;
+            if (lru < 0 || c->used[i] < c->used[lru]) lru = i;
+        }
+        return lru;
+    }
+    /* P0/P2: pure LRU; P1: LRU skipping pinned (fallback: all) */
+    lru = -1;
+    for (int i = 0; i < c->nslots; i++) {
+        if (c->slot_eid[i] < 0) continue;
+        if (POL.id == 1 && g_pinned[layer][c->slot_eid[i]]) continue;
+        if (lru < 0 || c->used[i] < c->used[lru]) lru = i;
+    }
+    if (lru >= 0) return lru;
     for (int i = 0; i < c->nslots; i++) {
         if (c->slot_eid[i] < 0) continue;
         if (lru < 0 || c->used[i] < c->used[lru]) lru = i;
     }
-    if (lru >= 0) { *all_inflight = 0; return lru; }
-    *all_inflight = 1;
-    return -1;
+    return lru;
+}
+
+/* P2: redistribute per-layer caps proportionally to observed cumulative
+ * miss pressure; TOTAL slot count is conserved (= baseline byte budget,
+ * since the format mix is uniform across layers). Causal only. */
+static void p2_rebalance(void) {
+    int n = 0; long total = 0;
+    for (int l = 0; l < MAX_LAYERS; l++) if (g_lay_cap[l]) { n++; total += g_lay_cap[l]; }
+    if (!n) return;
+    long press_sum = 0;
+    for (int l = 0; l < MAX_LAYERS; l++) if (g_lay_cap[l]) press_sum += g_layer_miss[l] + 16; /* epsilon floor */
+    int assigned = 0;
+    int newcap[MAX_LAYERS];
+    for (int l = 0; l < MAX_LAYERS; l++) {
+        if (!g_lay_cap[l]) { newcap[l] = 0; continue; }
+        double share = (double)(g_layer_miss[l] + 16) / (double)press_sum;
+        newcap[l] = (int)(share * total);
+        if (newcap[l] < 8) newcap[l] = 8;
+        assigned += newcap[l];
+    }
+    /* distribute rounding remainder deterministically */
+    while (assigned < total)
+        for (int l = 0; l < MAX_LAYERS && assigned < total; l++)
+            if (g_lay_cap[l]) { newcap[l]++; assigned++; }
+    while (assigned > total)
+        for (int l = MAX_LAYERS - 1; l >= 0 && assigned > total; l--)
+            if (g_lay_cap[l] && newcap[l] > 8) { newcap[l]--; assigned--; }
+    /* apply: shrink layers evict LRU residents down to the new cap */
+    for (int l = 0; l < MAX_LAYERS; l++) {
+        if (!g_lay_cap[l]) continue;
+        Sim *c = &g_sim[l];
+        g_lay_cap[l] = newcap[l];
+        int guard = 0;
+        while (guard++ < 4096) {
+            int occ = 0; for (int i = 0; i < c->nslots; i++) if (c->slot_eid[i] >= 0) occ++;
+            if (occ <= g_lay_cap[l]) break;
+            int v = policy_pick_victim(c, l);
+            if (v < 0) break;
+            if (c->slot_eid[v] >= 0) { d_evicts++; rec_evict(0, l, c->slot_eid[v]); c->slot_eid[v] = -1; }
+        }
+    }
+    g_dem_since_rebalance = 0;
 }
 
 static void sim_publish(Pending *p) {
@@ -137,23 +257,23 @@ static void sim_publish(Pending *p) {
     }
 }
 
+
 static void sim_reserve_demand(int layer, int eid, int tok) {
     Sim *c = &g_sim[layer];
     int v;
     if (c->nslots < c->cap) v = c->nslots++;
     else {
-        int all_inflight = 0;
-        v = pick_victim(c, &all_inflight);
+        /* full: current policy evicts per the selected retention policy */
+        v = policy_pick_victim(c, layer);
         if (v < 0) {
+            /* every slot in flight: retry after later events (runtime spins) */
             if (g_n_deferred < 65536) { g_deferred[g_n_deferred].layer = layer; g_deferred[g_n_deferred].eid = eid; g_deferred[g_n_deferred].tok = tok; g_n_deferred++; }
             return;
         }
         if (c->slot_eid[v] >= 0) { d_evicts++; rec_evict(0, layer, c->slot_eid[v]); }
-        c->slot_eid[v] = -1;
     }
-    c->loading[eid] = (int16_t)v;
     c->slot_eid[v] = eid; c->slot_fmt[v] = g_meta_fmt[layer][eid]; c->used[v] = ++g_clock;
-    c->loading[eid] = -1;
+    policy_on_insert(layer, v);
     d_ins++; d_bytes += (unsigned long long)g_meta_bytes[layer][eid];
     d_misses++; if (tok >= 0) w_dmisses++;
     if (g_dump_fp) fprintf(g_dump_fp, "%ld R %lld %d %d MISS\n", g_req_no++, (long long)tok, layer, eid);
@@ -177,12 +297,12 @@ static void sim_worker_step(long ordinal) {
     int v;
     if (c->nslots < c->cap) v = c->nslots++;
     else {
-        int all_inflight = 0;
-        v = pick_victim(c, &all_inflight);
-        if (v < 0) return;
+        /* full: pilot admission evicts per the selected retention policy */
+        v = policy_pick_victim(c, job.layer);
+        if (v < 0) return;                                            /* give up (runtime parity) */
         if (c->slot_eid[v] >= 0) { p_evicts++; rec_evict(1, job.layer, c->slot_eid[v]); }
-        c->slot_eid[v] = -1;
     }
+    c->slot_eid[v] = -1;                                          /* in-flight: not resident */
     c->loading[job.eid] = (int16_t)v;
     pw.layer = job.layer; pw.eid = job.eid; pw.slot = v;
     pw_busy = 1;
@@ -192,10 +312,25 @@ int main(int argc, char **argv) {
     const char *path = NULL, *oracle = NULL;
     int cap = 128, svc_k = 5, check_meta = 0;   /* svc_k calibrated on the oracle gate (measured-latency input) */
     double tol_frac = 0.01;
+    const char *pol_name = "P0";
+    POL.id = 0; POL.pin_frac = 0.0; POL.seg_ratio = 0.5; POL.lfu_decay = 4096; POL.rebalance_every = 3200;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--oracle") && i + 1 < argc) oracle = argv[++i];
         else if (!strcmp(argv[i], "--cap") && i + 1 < argc) cap = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--svc-k") && i + 1 < argc) svc_k = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--policy") && i + 1 < argc) {
+            pol_name = argv[++i];
+            if      (!strcmp(pol_name, "P0")) POL.id = 0;
+            else if (!strcmp(pol_name, "P1")) POL.id = 1;
+            else if (!strcmp(pol_name, "P2")) POL.id = 2;
+            else if (!strcmp(pol_name, "P3")) POL.id = 3;
+            else if (!strcmp(pol_name, "P4")) POL.id = 4;
+            else { fprintf(stderr, "unknown policy '%s' (known: P0 P1 P2 P3 P4)\n", pol_name); return 2; }
+        }
+        else if (!strcmp(argv[i], "--pin-frac") && i + 1 < argc) POL.pin_frac = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--seg-ratio") && i + 1 < argc) POL.seg_ratio = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--lfu-decay") && i + 1 < argc) POL.lfu_decay = atol(argv[++i]);
+        else if (!strcmp(argv[i], "--rebalance-every") && i + 1 < argc) POL.rebalance_every = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--tol-frac") && i + 1 < argc) tol_frac = atof(argv[++i]);
         else if (!strcmp(argv[i], "--dump-derived") && i + 1 < argc) g_dump_fp = fopen(argv[++i], "w");
         else if (!strcmp(argv[i], "--dump-ordinal") && i + 1 < argc) g_ord_fp = fopen(argv[++i], "w");
@@ -247,12 +382,26 @@ int main(int argc, char **argv) {
                 if (!g_meta_valid[layer][eid]) { fprintf(stderr, "CONTRACT: missing/invalid E metadata for l%d e%d\n", layer, eid); contract_errors++; }
                 Sim *c = ensure_sim(layer, cap);
                 int r = find_resident(c, eid);
-                if (r >= 0) { c->used[r] = ++g_clock; d_hits++; if (tok >= 0) w_dhits++; if (g_dump_fp) fprintf(g_dump_fp, "%ld R %lld %d %d HIT\n", g_req_no++, (long long)tok, layer, eid); }
-                else if (c->loading[eid] >= 0) {
+                if (r >= 0) {
+                    c->used[r] = ++g_clock; d_hits++; if (tok >= 0) w_dhits++;
+                    policy_on_hit(layer, eid, r);
+                    if (g_dump_fp) fprintf(g_dump_fp, "%ld R %lld %d %d HIT\n", g_req_no++, (long long)tok, layer, eid);
+                } else if (c->loading[eid] >= 0) {
                     if (g_n_waiters < 65536) { g_waiters[g_n_waiters].layer = layer; g_waiters[g_n_waiters].eid = eid; g_waiters[g_n_waiters].tok = (int)tok; g_n_waiters++; }
                     d_waits++;
                     if (g_dump_fp) fprintf(g_dump_fp, "%ld W %d %d COALESCE\n", g_req_no++, layer, eid);
-                } else sim_reserve_demand(layer, eid, (int)tok);
+                } else {
+                    g_layer_miss[layer]++;
+                    sim_reserve_demand(layer, eid, (int)tok);
+                }
+                /* policy clocks tick on demand requests (causal only) */
+                g_dem_total++; g_dem_since_rebalance++;
+                if (POL.id == 4 && POL.lfu_decay > 0 && g_dem_total % POL.lfu_decay == 0)
+                    for (int l = 0; l < MAX_LAYERS; l++)
+                        for (int e2 = 0; e2 < MAX_EXPERTS; e2++)
+                            if (g_hits[l][e2]) g_hits[l][e2] >>= 1;
+                if (POL.id == 2 && POL.rebalance_every > 0 && g_dem_since_rebalance >= POL.rebalance_every)
+                    p2_rebalance();
             }
         } else if (!strcmp(tag, "C")) {
             sched_relevant = 1;
@@ -331,8 +480,11 @@ int main(int argc, char **argv) {
                 g_deferred[i] = g_deferred[--g_n_deferred]; i--;
                 Sim *c = ensure_sim(d.layer, cap);
                 if (find_resident(c, d.eid) >= 0 || c->loading[d.eid] >= 0) continue;
+                long before_d_ins = d_ins;
                 sim_reserve_demand(d.layer, d.eid, d.tok);
-                progressed = 1;
+                /* a failed retry re-queued itself inside sim_reserve_demand
+                 * (all slots in flight) — that is NOT progress */
+                if (d_ins != before_d_ins || find_resident(c, d.eid) >= 0) progressed = 1;
             }
         }
         if (!progressed) break;
@@ -351,6 +503,32 @@ int main(int argc, char **argv) {
     printf("candidate intents=%ld -> enqueue=%ld drop(resident)=%ld drop(queued)=%ld drop(ring)=%ld\n",
            c_intent_total, c_enqueue, c_drop_resident, c_drop_queued, c_drop_ring);
     printf("service_opportunities=%ld last_service_ordinal=%ld\n", service_opportunities, last_service_ordinal);
+    printf("policy=%s (id=%d pin_frac=%.2f seg_ratio=%.2f lfu_decay=%ld rebalance_every=%d)\n",
+           pol_name, POL.id, POL.pin_frac, POL.seg_ratio, POL.lfu_decay, POL.rebalance_every);
+    /* total resident cache bytes + per-layer allocation at EOF */
+    {
+        unsigned long long total_bytes = 0;
+        for (int l = 0; l < MAX_LAYERS; l++)
+            for (int s = 0; s < g_sim[l].nslots; s++)
+                if (g_sim[l].slot_eid[s] >= 0) total_bytes += (unsigned long long)g_meta_bytes[l][g_sim[l].slot_eid[s]];
+        printf("total_resident_bytes=%llu\n", total_bytes);
+        {
+            long occ_total = 0; int occ_max = 0, cap_viol = 0;
+            for (int l = 0; l < MAX_LAYERS; l++) {
+                if (!g_sim[l].cap) continue;
+                int occ = 0;
+                for (int s = 0; s < g_sim[l].nslots && s < 512; s++) if (g_sim[l].slot_eid[s] >= 0) occ++;
+                if (occ > g_sim[l].cap) cap_viol++;
+                occ_total += occ; if (occ > occ_max) occ_max = occ;
+            }
+            printf("occupancy: total=%ld max_per_layer=%d cap_violations=%d\n", occ_total, occ_max, cap_viol);
+        }
+        if (POL.id == 2) {
+            long t = 0; printf("p2_layer_caps:");
+            for (int l = 0; l < MAX_LAYERS; l++) if (g_lay_cap[l]) { printf(" %d:%d", l, g_lay_cap[l]); t += g_lay_cap[l]; }
+            printf(" | total_slots=%ld (baseline 5120)\n", t);
+        }
+    }
     if (check_meta) printf("meta records consumed: %d\n", g_meta_seen);
     if (g_dump_fp) fclose(g_dump_fp);
 

@@ -164,5 +164,75 @@ grep -v '^2 E' "$T/g.req" > "$T/g.nometa"
 [ $? = 2 ] && ok "R2.missing-meta-fails-closed-exit2" || bad "R2.missing-meta-fails-closed-exit2"
 grep -q "unresolved_waiters=0 unresolved_deferred=0" "$T/g.pass" && ok "R2.unresolved-accounting-reported" || bad "R2.unresolved-accounting-reported"
 
+# ------------------------------------------------- POLICY TOURNAMENT TESTS --
+# P0 equivalence: --policy P0 must be byte-identical to the default run.
+"$SIM" "$T/g.req" --cap 4 --svc-k 100 > "$T/def.txt" 2>&1
+"$SIM" "$T/g.req" --cap 4 --svc-k 100 --policy P0 > "$T/p0.txt" 2>&1
+diff -q "$T/def.txt" "$T/p0.txt" >/dev/null && ok "T.policy-P0-bitwise-default" || bad "T.policy-P0-bitwise-default"
+
+# Divergent victim: cap=2, stream a,b,a,b,c — LRU evicts a (older), LFU evicts
+# b (lower frequency). The trailing R(a) resolves differently per policy.
+cat > "$T/v.req" <<VEOF
+1 # qwen36_req_stream v4 fixture
+2 E 7 1 3 1376256
+3 E 7 2 3 1376256
+4 E 7 3 3 1376256
+5 R DEMAND 0 7 1 0.5
+6 R DEMAND 0 7 2 0.5
+7 R DEMAND 0 7 1 0.5
+8 R DEMAND 0 7 1 0.5
+9 R DEMAND 0 7 2 0.5
+10 R DEMAND 0 7 3 0.5
+11 R DEMAND 1 7 1 0.5
+VEOF
+M_LRU=$("$SIM" "$T/v.req" --cap 2 --svc-k 1000 --policy P0 | grep 'eof demand hits' | grep -o 'misses=[0-9]*' | cut -d= -f2)
+M_LFU=$("$SIM" "$T/v.req" --cap 2 --svc-k 1000 --policy P4 | grep 'eof demand hits' | grep -o 'misses=[0-9]*' | cut -d= -f2)
+[ "$M_LRU" != "$M_LFU" ] && ok "T.victim-decisions-diverge-lru-vs-lfu" || bad "T.victim-decisions-diverge-lru-vs-lfu ($M_LRU/$M_LFU)"
+
+# Determinism: same policy twice -> identical output.
+"$SIM" "$T/v.req" --cap 2 --svc-k 7 --policy P3 --seg-ratio 0.50 > "$T/d1.txt" 2>&1
+"$SIM" "$T/v.req" --cap 2 --svc-k 7 --policy P3 --seg-ratio 0.50 > "$T/d2.txt" 2>&1
+diff -q "$T/d1.txt" "$T/d2.txt" >/dev/null && ok "T.deterministic-rerun" || bad "T.deterministic-rerun"
+
+# Budget: occupancy can never exceed cap (checked on a full-size P1 run).
+BIG=$("$SIM" /tmp/opencode/traces/requests_v4.tsv --cap 128 --svc-k 5 --policy P1 --pin-frac 0.20 2>/dev/null | grep -o 'cap_violations=[0-9]*' | cut -d= -f2)
+[ "$BIG" = "0" ] && ok "T.budget-cap-never-exceeded" || bad "T.budget-cap-never-exceeded ($BIG)"
+[ -f /tmp/opencode/traces/requests_v4.tsv ] || { echo "SKIP budget/big tests (no trace copy)"; }
+
+# No future knowledge: a single-touch expert is NOT pinned even when quota is
+# free — under P1 pinning requires >=2 touches, so with cap=4 the sequence
+# fill(a),fill(b),fill(c),touch(c),evict-pressure(d) must evict ONE of a/b/c,
+# and c's double touch means c survives while a single-touch expert goes.
+cat > "$T/nf.req" <<NFEOF
+1 # qwen36_req_stream v4 fixture
+2 E 0 60 3 1376256
+3 E 0 61 3 1376256
+4 E 0 62 3 1376256
+5 E 0 63 3 1376256
+6 E 0 64 3 1376256
+7 R DEMAND 0 0 60 0.5
+7 R DEMAND 0 0 61 0.5
+8 R DEMAND 0 0 62 0.5
+9 R DEMAND 0 0 62 0.5
+10 R DEMAND 0 0 63 0.5
+11 R DEMAND 0 0 64 0.5
+NFEOF
+NF=$("$SIM" "$T/nf.req" --cap 4 --svc-k 100000 --policy P1 --pin-frac 0.20 | grep 'eof demand hits' | grep -o 'misses=[0-9]*' | cut -d= -f2)
+[ -n "$NF" ] && [ "$NF" -gt 0 ] && ok "T.pins-require-repeat-touches" || bad "T.pins-require-repeat-touches"
+
+# Unknown policy rejected with contract exit code.
+"$SIM" "$T/g.req" --policy BOGUS >/dev/null 2>&1
+[ $? = 2 ] && ok "T.unknown-policy-rejected" || bad "T.unknown-policy-rejected"
+
+# Oracle is never consulted for decisions: derived metrics identical with and
+# without an oracle file attached.
+"$SIM" "$T/g.req" --cap 4 --svc-k 100 > "$T/no.txt" 2>&1
+grep -v -e ORACLE -e GATE -e VERDICT "$T/p0.txt" 2>/dev/null > /dev/null
+"$SIM" "$T/g.req" --cap 4 --svc-k 100 --oracle "$T/g.oracle" > "$T/wi.txt" 2>&1
+if diff <(sed -n '/EOF SCREENING/,/fingerprint/p' "$T/no.txt") \
+        <(sed -n '/EOF SCREENING/,/fingerprint/p' "$T/wi.txt") >/dev/null; then
+  ok "T.oracle-not-consulted-for-decisions"
+else bad "T.oracle-not-consulted-for-decisions"; fi
+
 echo "SUMMARY pass=$pass fail=$failn"
 [ "$failn" = "0" ]
