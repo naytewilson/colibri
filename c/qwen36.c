@@ -2040,7 +2040,7 @@ static int spec_debug_on(void){ static int v=-1; if(v<0){ const char *e=getenv("
 static int spec_budget(void){ static int v=-1; if(v<0){ const char *e=getenv("COLI_SPEC_BUDGET"); v=(e&&atoi(e)>0)?atoi(e):12; if(v>16)v=16; } return v; }
 static unsigned long long g_spec_issued=0, g_spec_hit=0, g_spec_wasted=0, g_spec_late=0;
 /* prefill-batch residual decomposition (COLI_TIMERS) */
-static double g_pb_wall_ms = 0.0;            /* sum of batch pre-pass walls */
+static double g_pb_wall_ms = 0.0, g_pb_rowacq_ms = 0.0, g_pb_rowcompute_ms = 0.0;            /* sum of batch pre-pass walls */
 static unsigned long long g_pb_io_us = 0;    /* sum of preload load durations (us, atomic) */
 
 static void *spec_loader(void *arg){
@@ -2796,6 +2796,7 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
             }
         }
         if (tm_on() && S == 1) g_moe_sub[1] += tm_now() - _t_lk;
+        else if (tm_on() && S > 1) g_pb_rowacq_ms += tm_now() - _t_lk;
 
         if (expert_parallel_on() && K <= 8) {
             /* TOP-K EXPERT-PARALLEL TOPOLOGY (Gate 4) */
@@ -2827,6 +2828,7 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
                 g_moe_sub[2] += dt_ep; /* record into routed expert compute */
                 g_expert_gemv_parallel_invocations += 1; /* 1 parallel region per layer */
             }
+            else if (tm_on() && S > 1) g_pb_rowcompute_ms += tm_now() - _t_ep;
 
             /* Deterministic reduction in exact k order */
             double _t_acc = tm_on() ? tm_now() : 0.0;
@@ -4111,6 +4113,7 @@ int main(int argc, char **argv) {
         if (tm_on() && (g_pb_wall_ms > 0 || g_pb_io_us > 0))
         fprintf(stderr, "[prefillbatch] batch_wall=%.0fms preload_io_sum=%.0fms (sum>>wall => concurrency effective; residual=compute+serial)\n",
                 g_pb_wall_ms, g_pb_io_us / 1000.0);
+        fprintf(stderr, "[prefillsplit] rowloop_acq=%.0fms rowcompute=%.0fms\n", g_pb_rowacq_ms, g_pb_rowcompute_ms);
 fprintf(stderr, "Coalesce diagnostics: demand waits=%ld pilot skips=%ld | max loaders per (layer,eid)<=1 by construction (single loading registry)\n",                g_demand_coalesce_waits, g_pilot_coalesce_skips);
         return 0;
     }
