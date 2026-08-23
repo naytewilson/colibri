@@ -2039,6 +2039,9 @@ static int spec_depth(void){ static int v=-1; if(v<0){ const char *e=getenv("COL
 static int spec_debug_on(void){ static int v=-1; if(v<0){ const char *e=getenv("COLI_SPEC_DEBUG"); v=(e&&*e=='1')?1:0; } return v; }
 static int spec_budget(void){ static int v=-1; if(v<0){ const char *e=getenv("COLI_SPEC_BUDGET"); v=(e&&atoi(e)>0)?atoi(e):12; if(v>16)v=16; } return v; }
 static unsigned long long g_spec_issued=0, g_spec_hit=0, g_spec_wasted=0, g_spec_late=0;
+/* prefill-batch residual decomposition (COLI_TIMERS) */
+static double g_pb_wall_ms = 0.0;            /* sum of batch pre-pass walls */
+static unsigned long long g_pb_io_us = 0;    /* sum of preload load durations (us, atomic) */
 
 static void *spec_loader(void *arg){
     (void)arg;
@@ -2325,6 +2328,8 @@ static void expert_finish(Model *m, int layer, int eid, AcqRes *ar, Slot **out) 
     double _lio0 = tm_now();
     load_expert_merged(m, layer, eid, s, (ar->mode == ACQ_MODE_PRELOAD ? 1 : 0), &res);
     double _lio1 = tm_now();
+    if (ar->mode == ACQ_MODE_PRELOAD && res.ms > 0)
+        __atomic_fetch_add(&g_pb_io_us, (unsigned long long)(res.ms * 1000.0), __ATOMIC_RELAXED);
     if (g_lead_fp && ar->mode == ACQ_MODE_DEMAND) fprintf(g_lead_fp, "M %lld %d %d %.3f %.4f %.4f\n",
                            (long long)g_trace_tok, layer, eid, res.ms, _lio0, _lio1);
     double _tl2 = _tp ? tm_now() : 0;
@@ -2608,6 +2613,7 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
      * loads run concurrently. The unchanged per-row pass then hits published
      * slots or coalesces. Routing semantics untouched; default off. */
     if (S > 1 && getenv("COLI_BATCH_ACQ") && getenv("COLI_BATCH_ACQ")[0] == '1' && S <= 512 && K <= 8) {
+        double _pb0 = tm_on() ? tm_now() : 0;
         float *scr = falloc((int64_t)S * E);
         memcpy(scr, logits, (size_t)S * E * sizeof(float));
         int(*bidx)[8] = malloc((size_t)S * sizeof(*bidx));
@@ -2675,6 +2681,7 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
             }
         }
         free(ars2); free(bsl); free(ld); free(bidx); free(bval); free(scr);
+        if (tm_on()) g_pb_wall_ms += tm_now() - _pb0;
     }
 
     for (int s = 0; s < S; s++) {
@@ -4101,7 +4108,10 @@ int main(int argc, char **argv) {
         fprintf(stderr, "\nPEAK RSS: %.2f GB | Current VmRSS: %.2f GB\n", peak_rss_gb(), current_rss_gb());
         fprintf(stderr, "Expert cache hit rate: %.1f%% (hit=%llu miss=%llu)\n", tot?100.0*m.hits/tot:0.0,
                (unsigned long long)m.hits, (unsigned long long)m.miss);
-        fprintf(stderr, "Coalesce diagnostics: demand waits=%ld pilot skips=%ld | max loaders per (layer,eid)<=1 by construction (single loading registry)\n",                g_demand_coalesce_waits, g_pilot_coalesce_skips);
+        if (tm_on() && (g_pb_wall_ms > 0 || g_pb_io_us > 0))
+        fprintf(stderr, "[prefillbatch] batch_wall=%.0fms preload_io_sum=%.0fms (sum>>wall => concurrency effective; residual=compute+serial)\n",
+                g_pb_wall_ms, g_pb_io_us / 1000.0);
+fprintf(stderr, "Coalesce diagnostics: demand waits=%ld pilot skips=%ld | max loaders per (layer,eid)<=1 by construction (single loading registry)\n",                g_demand_coalesce_waits, g_pilot_coalesce_skips);
         return 0;
     }
 
