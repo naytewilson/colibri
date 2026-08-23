@@ -892,12 +892,33 @@ static FILE *forge_trace_fp(void){
     return g_forge_trc_fp;
 }
 
-/* token-boundary event, JSONL; metric id is ontology-canonical */
+/* B2R/R1 token-boundary event, JSONL. Two explicitly distinct concepts:
+ *   wall_delta_ms                — raw observation (metadata-class, NOT an
+ *                                  ontology metric): actual wall interval
+ *                                  between consecutive decode-step completions.
+ *                                  null on the first boundary (no prior
+ *                                  boundary exists — never fabricated).
+ *   cumulative_step_ms_per_token — cumulative mean of COMPLETED boundary
+ *                                  intervals, associated with the canonical
+ *                                  aggregate metric id below; recomputes as
+ *                                  mean(wall_delta_ms[2..i]). null on the
+ *                                  first boundary (zero completed intervals). */
+static double g_forge_prev_boundary = 0.0;
+static double g_forge_t0_boundary   = 0.0;
+
 static void forge_trace_token_boundary(long idx){
     FILE *f = forge_trace_fp();
     if (!f) return;
-    fprintf(f, "{\"ev\":\"token_boundary\",\"i\":%ld,\"metric\":\"forge.runtime.step_ms_per_token\",\"step_ms\":%.4f}\n",
-            idx, g_tm_dec_tokens ? g_tm_step / (double)g_tm_dec_tokens : 0.0);
+    double now = tm_now();
+    int have_prev = (g_forge_prev_boundary > 0.0);
+    if (g_forge_t0_boundary <= 0.0) g_forge_t0_boundary = now;
+    fprintf(f, "{\"ev\":\"token_boundary\",\"i\":%ld,\"metric\":\"forge.runtime.step_ms_per_token\",\"wall_delta_ms\":", idx);
+    if (have_prev) fprintf(f, "%.4f", now - g_forge_prev_boundary); else fprintf(f, "null");
+    fprintf(f, ",\"cumulative_step_ms_per_token\":");
+    if (have_prev) fprintf(f, "%.4f", (now - g_forge_t0_boundary) / (double)(idx - 1));
+    else fprintf(f, "null");
+    fprintf(f, "}\n");
+    g_forge_prev_boundary = now;
 }
 
 static void forge_trace_finish(void){
@@ -923,8 +944,6 @@ static void forge_profile_emit(void){
     if (adm_ms < 0) adm_ms = 0;
     uint64_t logical_bpt = (uint64_t)((double)g_routed_int3_count * 1376392.0 / (double)n
                                     + (double)g_routed_int4_count * 1769608.0 / (double)n);
-    double comp_sum = g_tm_dec[0] + g_tm_dec[1] + g_tm_dec[2] + g_tm_dec[5];
-    (void)comp_sum;
     double step_ms  = g_tm_step / (double)n;
     struct stat st;
     unsigned long long devno = 0;
