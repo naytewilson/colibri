@@ -2125,12 +2125,11 @@ static int spec_serve(Model *m, int layer, int eid, Slot **out) {
                 char qn[256]; snprintf(qn, sizeof qn, "model.layers.%d.mlp.experts.%d.qs", la, eid);
                 st_tensor *tq = st_find(&m->S, qn);
                 unsigned long long hs = 1469598103934665603ULL, hq = hs;
-                if (tq && L->gs) {
-                    for (size_t z = 0; z < sb / 4; z++) { float lv = L->gs[z], rv; /* ring scales */ }
+                if (tq && L->gs && tq->nbytes == (int64_t)sb) {
                     for (size_t z = 0; z < sb; z++) hs ^= ((uint8_t*)L->gs)[z], hs *= 1099511628211ULL;
                     uint8_t *tb2 = (uint8_t*)malloc(sb);
                     if (tb2) {
-                        st_pread_full(tq->fd, tb2, tq->nbytes < (int64_t)sb ? tq->nbytes : (int64_t)sb, tq->off, "spechash_s");
+                        st_pread_full(tq->fd, tb2, sb, tq->off, "spechash_s");
                         for (size_t z = 0; z < sb; z++) hq ^= tb2[z], hq *= 1099511628211ULL;
                         free(tb2);
                     }
