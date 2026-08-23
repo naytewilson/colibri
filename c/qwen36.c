@@ -1854,18 +1854,45 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pil
                 qsnm, (long long)(ts ? ts->numel : -1), (long long)want_s); exit(1); }
     double _t_io0 = tm_now();
     int dropf = expert_drop_flag();
+    /* COLI_FUSED_LOAD=1: the container interleaves [qs][merged_weight] with
+     * zero gap (verified per-tensor below), so one pread covering both
+     * replaces two device commands. Identical bytes, split after transfer. */
+    int fused = 0;
+    {
+        static int fv = -1;
+        if (fv < 0) { const char *e = getenv("COLI_FUSED_LOAD"); fv = (e && *e == '1') ? 1 : 0; }
+        fused = fv && ts->fd == tw->fd && ts->off + ts->nbytes == tw->off && ts->nbytes > 0;
+    }
     if (tw->nbytes == want_w3) {
         static int noted_3 = 0;
         if (!noted_3) { fprintf(stderr, "[qwen36] packed INT3-g64 expert CPU residency active (1.38 MB/slot)\n"); noted_3 = 1; }
         slot_ensure_format(m, s, 5);
-        st_read_raw(&m->S, nm, s->w3, dropf);
+        if (fused) {
+            int64_t tot = ts->nbytes + tw->nbytes;
+            uint8_t *stg = (uint8_t *)malloc((size_t)tot);
+            if (!stg) { fprintf(stderr, "OOM fused read %s\n", nm); exit(1); }
+            st_pread_full(tw->fd, stg, tot, ts->off, "fused3");
+            if (dropf) posix_fadvise(tw->fd, ts->off, tot, POSIX_FADV_DONTNEED);
+            memcpy(s->gs, stg, (size_t)ts->nbytes);
+            memcpy(s->w3, stg + ts->nbytes, (size_t)tw->nbytes);
+            free(stg);
+        } else st_read_raw(&m->S, nm, s->w3, dropf);
         s->is_int3 = 1; s->is_int4 = 0;
     } else if (tw->nbytes == want_w / 2) {
         if (!unpack_int8_mode()) {
             static int noted_p = 0;
             if (!noted_p) { fprintf(stderr, "[qwen36] packed INT4 expert CPU residency active (1.77 MB/slot)\n"); noted_p = 1; }
             slot_ensure_format(m, s, 4);
-            st_read_raw(&m->S, nm, s->w4, dropf);
+            if (fused) {
+                int64_t tot = ts->nbytes + tw->nbytes;
+                uint8_t *stg = (uint8_t *)malloc((size_t)tot);
+                if (!stg) { fprintf(stderr, "OOM fused read %s\n", nm); exit(1); }
+                st_pread_full(tw->fd, stg, tot, ts->off, "fused4");
+                if (dropf) posix_fadvise(tw->fd, ts->off, tot, POSIX_FADV_DONTNEED);
+                memcpy(s->gs, stg, (size_t)ts->nbytes);
+                memcpy(s->w4, stg + ts->nbytes, (size_t)tw->nbytes);
+                free(stg);
+            } else st_read_raw(&m->S, nm, s->w4, dropf);
             s->is_int4 = 1; s->is_int3 = 0;
         } else {
             static int noted_u = 0;
@@ -1881,16 +1908,18 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pil
                 s->g[i] = v;
             }
             s->is_int4 = 0; s->is_int3 = 0;
+            fused = 0;
             free(raw);
         }
     } else {
         slot_ensure_format(m, s, 1);
         s->is_int3 = 0;
         s->is_int4 = 0;
+        fused = 0;
         st_read_raw(&m->S, nm, s->g, dropf);
     }
     double _t_io_w = tm_now();                       /* weight read (+ optional unpack) done */
-    st_read_f32(&m->S, qsnm, s->gs, 0);
+    if (!fused) st_read_f32(&m->S, qsnm, s->gs, 0);
     double _t_io1 = tm_now();
     double _io_dt = _t_io1 - _t_io0;
     double _io_w  = _t_io_w - _t_io0;                /* weights segment */
@@ -2563,6 +2592,82 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
     memset(out, 0, (int64_t)S*D*sizeof(float));
     float *g = falloc(I), *u = falloc(I), *hh = falloc(D);
     float *sh = falloc(I), *shu = falloc(I), *shd = falloc(D);  /* shared expert scratch */
+
+    /* ---- PREFILL BATCH ACQUISITION (COLI_BATCH_ACQ=1, S>1) ----
+     * The router logits for ALL rows already exist (one matmul above), so
+     * every unique missing expert of this layer is known simultaneously.
+     * A routing pre-pass on a scratch copy (bit-identical selection; the
+     * original loop re-derives the same values) reserves them in first-touch
+     * order — same events, same accounting as sequential mode — and their
+     * loads run concurrently. The unchanged per-row pass then hits published
+     * slots or coalesces. Routing semantics untouched; default off. */
+    if (S > 1 && getenv("COLI_BATCH_ACQ") && getenv("COLI_BATCH_ACQ")[0] == '1' && S <= 512) {
+        float *scr = falloc((int64_t)S * E);
+        memcpy(scr, logits, (size_t)S * E * sizeof(float));
+        int(*bidx)[8] = malloc((size_t)S * sizeof(*bidx));
+        float *bval = malloc((size_t)S * 8 * sizeof(float));
+        for (int s = 0; s < S; s++) {
+            float *pr = scr + (int64_t)s * E;
+            softmax_row(pr, E);
+            uint8_t keep[1024]; int Ec = E < 1024 ? E : 1024;
+            if (c->n_group > 1 && c->n_group <= Ec) {
+                int per = E / c->n_group; float gs2[1024];
+                for (int gi = 0; gi < c->n_group; gi++) {
+                    float b1 = -1e30f, b2 = -1e30f;
+                    for (int e = gi*per; e < gi*per+per; e++) { float v = pr[e]; if (v > b1) { b2=b1; b1=v; } else if (v > b2) b2=v; }
+                    gs2[gi] = b1 + b2;
+                }
+                uint8_t gkeep[1024] = {0};
+                for (int kk = 0; kk < c->topk_group; kk++) {
+                    int bg = -1; float bv = -1e30f;
+                    for (int gi = 0; gi < c->n_group; gi++) { if (!gkeep[gi] && gs2[gi] > bv) { bv = gs2[gi]; bg = gi; } }
+                    if (bg < 0) break; gkeep[bg] = 1;
+                }
+                for (int e = 0; e < Ec; e++) keep[e] = 0;
+                for (int gi = 0; gi < c->n_group; gi++) if (gkeep[gi]) for (int e = gi*per; e < gi*per+per; e++) keep[e] = 1;
+            } else { for (int e = 0; e < Ec; e++) keep[e] = 1; }
+            for (int kk = 0; kk < K; kk++) {
+                int best = -1; float bv = -1e30f;
+                for (int e = 0; e < E; e++) {
+                    if (!keep[e]) continue;
+                    int taken = 0; for (int j = 0; j < kk; j++) if (bidx[s][j]==e){taken=1;break;}
+                    if (!taken && pr[e] > bv) { bv = pr[e]; best = e; }
+                }
+                bidx[s][kk] = best; bval[s*8+kk] = bv;
+            }
+        }
+        /* reserve unique misses in first-touch order; collect ACQ_LOAD list */
+        AcqRes *ars2 = malloc((size_t)S * 8 * sizeof(AcqRes));
+        Slot **bsl = malloc((size_t)S * 8 * sizeof(Slot*));
+        int *ld = malloc((size_t)S * 8 * sizeof(int)); int nl = 0;
+        for (int s = 0; s < S; s++)
+            for (int kk = 0; kk < K; kk++) {
+                if (bidx[s][kk] < 0) continue;
+                int dup = 0;
+                for (int p = 0; p < s; p++)
+                    for (int j = 0; j < K; j++) if (bidx[p][j] == bidx[s][kk]) { dup = 1; break; }
+                if (!dup) for (int j = 0; j < kk; j++) if (bidx[s][j] == bidx[s][kk]) dup = 1;
+                if (dup) continue;
+                Slot *tmpo = NULL;
+                expert_acquire(m, layer, bidx[s][kk], bval[s*8+kk], &tmpo, &ars2[s*8+kk]);
+                if (ars2[s*8+kk].kind == ACQ_LOAD) ld[nl++] = s*8+kk;
+                bsl[s*8+kk] = tmpo;
+            }
+        if (nl > 1) {
+            int W = nl < 8 ? nl : 8;
+            #pragma omp parallel for schedule(static) num_threads(W)
+            for (int ii = 0; ii < nl; ii++) {
+                int cell = ld[ii];
+                expert_finish(m, layer, bidx[cell / 8][cell % 8], &ars2[cell], &bsl[cell]);
+            }
+        } else {
+            for (int ii = 0; ii < nl; ii++) {
+                int cell = ld[ii];
+                expert_finish(m, layer, bidx[cell / 8][cell % 8], &ars2[cell], &bsl[cell]);
+            }
+        }
+        free(ars2); free(bsl); free(ld); free(bidx); free(bval); free(scr);
+    }
 
     for (int s = 0; s < S; s++) {
         float *pr = logits + (int64_t)s*E;
