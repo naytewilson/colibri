@@ -2612,6 +2612,8 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
      * order — same events, same accounting as sequential mode — and their
      * loads run concurrently. The unchanged per-row pass then hits published
      * slots or coalesces. Routing semantics untouched; default off. */
+    int pb_did = 0;                          /* W3a: pre-pass selections handed to the row pass */
+    int (*pb_bidx)[8] = NULL; float *pb_bval = NULL;
     if (S > 1 && getenv("COLI_BATCH_ACQ") && getenv("COLI_BATCH_ACQ")[0] == '1' && S <= 512 && K <= 8) {
         double _pb0 = tm_on() ? tm_now() : 0;
         float *scr = falloc((int64_t)S * E);
@@ -2680,7 +2682,8 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
                 expert_finish(m, layer, bidx[cell / 8][cell % 8], &ars2[cell], &bsl[cell]);
             }
         }
-        free(ars2); free(bsl); free(ld); free(bidx); free(bval); free(scr);
+        pb_did = 1; pb_bidx = bidx; pb_bval = bval;   /* W3a: row pass consumes these bit-identical selections */
+        free(ars2); free(bsl); free(ld); free(scr);
         if (tm_on()) g_pb_wall_ms += tm_now() - _pb0;
     }
 
@@ -2692,6 +2695,14 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
             if (is_zero) { for (int e = 0; e < E; e++) ema[e] = pr[e]; }
             else { for (int e = 0; e < E; e++) ema[e] = (1.f - m->pilot_smooth)*pr[e] + m->pilot_smooth*ema[e]; }
         }
+        int idx[256]; float val[256];
+        if (pb_did) {
+            /* W3a ROUTING REUSE: the BATCH pre-pass already derived these
+             * selections via the identical softmax_row on identical input
+             * bits (scratch memcpy), so consuming them here is bit-exact and
+             * removes the per-row softmax + top-k re-derivation entirely. */
+            for (int kk = 0; kk < K; kk++) { idx[kk] = pb_bidx[s][kk]; val[kk] = pb_bval[s*8+kk]; }
+        } else {
         softmax_row(pr, E);
         /* group-limited top-k selection */
         uint8_t keep[1024]; int Ec = E < 1024 ? E : 1024;
@@ -2714,7 +2725,6 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
         } else {
             for (int e = 0; e < Ec; e++) keep[e] = 1;
         }
-        int idx[256]; float val[256];
         for (int kk = 0; kk < K; kk++) {
             int best = -1; float bv = -1e30f;
             for (int e = 0; e < E; e++) {
@@ -2724,6 +2734,7 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
             }
             idx[kk] = best; val[kk] = bv;
         }
+        } /* W3a: end of legacy re-derivation branch */
         if (m->resident_collecting) {
             for (int kk = 0; kk < K; kk++) if (idx[kk] >= 0) m->seen[(int64_t)layer * E + idx[kk]] = 1;
         }
@@ -2909,6 +2920,7 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
             if (S == 1) g_moe_sub[8] += dt_sh;
         }
     }
+    if (pb_did) { free(pb_bidx); free(pb_bval); }
     free(logits); free(g); free(u); free(hh); free(sh); free(shu); free(shd);
 }
 
