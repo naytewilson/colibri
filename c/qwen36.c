@@ -2001,6 +2001,7 @@ typedef struct { int layer, eid, state; size_t wb, sb; Slot s; } SpecEnt;   /* s
 static SpecEnt spec_ring[SPEC_RING_N];
 static int spec_ring_on = 0, spec_cursor = 0;
 static int spec_depth(void){ static int v=-1; if(v<0){ const char *e=getenv("COLI_SPEC_DEPTH"); v=(e&&atoi(e)>0)?atoi(e):0; if(v>4)v=4; } return v; }
+static int spec_debug_on(void){ static int v=-1; if(v<0){ const char *e=getenv("COLI_SPEC_DEBUG"); v=(e&&*e=='1')?1:0; } return v; }
 static int spec_budget(void){ static int v=-1; if(v<0){ const char *e=getenv("COLI_SPEC_BUDGET"); v=(e&&atoi(e)>0)?atoi(e):12; if(v>16)v=16; } return v; }
 static unsigned long long g_spec_issued=0, g_spec_hit=0, g_spec_wasted=0, g_spec_late=0;
 
@@ -2084,6 +2085,8 @@ static int spec_serve(Model *m, int layer, int eid, Slot **out) {
     static Slot lease[8]; static int lease_i = 0; static int lease_init = 0;
     for (int r = 0; r < SPEC_RING_N; r++) {
         int st = __atomic_load_n(&spec_ring[r].state, __ATOMIC_ACQUIRE);
+        int i3only = getenv("COLI_SPEC_I3ONLY") && *getenv("COLI_SPEC_I3ONLY") == '1';
+        if (i3only && !spec_ring[r].s.is_int3) continue;
         if ((st == 1 || st == 2) && spec_ring[r].layer == layer && spec_ring[r].eid == eid) {
             if (st == 1) { while (__atomic_load_n(&spec_ring[r].state, __ATOMIC_ACQUIRE) == 1) sleep_ms(0); }
             /* re-read post-wait: loader finished; copy out under our ownership */
@@ -2098,6 +2101,43 @@ static int spec_serve(Model *m, int layer, int eid, Slot **out) {
             else { if (L->w4 && wb) memcpy(L->w4, spec_ring[r].s.w4, wb); }
             if (L->gs && sb) memcpy(L->gs, spec_ring[r].s.gs, sb);
             L->eid = eid; L->pinned = 0;
+            if (spec_debug_on()) {
+                /* WAVE4 bisection: hash lease vs ring vs direct container read */
+                unsigned long long hl = 1469598103934665603ULL, hr = hl, hd = hl;
+                const uint8_t *lb = spec_ring[r].s.is_int3 ? L->w3 : L->w4;
+                const uint8_t *rb = spec_ring[r].s.is_int3 ? spec_ring[r].s.w3 : spec_ring[r].s.w4;
+                for (size_t z = 0; z < wb; z++) { hl ^= lb[z]; hl *= 1099511628211ULL; hr ^= rb[z]; hr *= 1099511628211ULL; }
+                int la = m->active_of[layer];
+                char nm[256]; snprintf(nm, sizeof nm, "model.layers.%d.mlp.experts.%d.merged_weight", la, eid);
+                st_tensor *tw = st_find(&m->S, nm);
+                if (tw && tw->nbytes == (int64_t)wb) {
+                    uint8_t *tmpb = (uint8_t*)malloc(wb);
+                    if (tmpb) {
+                        st_pread_full(tw->fd, tmpb, tw->nbytes, tw->off, "spechash");
+                        for (size_t z = 0; z < wb; z++) { hd ^= tmpb[z]; hd *= 1099511628211ULL; }
+                        free(tmpb);
+                    }
+                } else hd = 0xDEAD;
+                fprintf(stderr, "[spechash] L%d eid%d wb=%zu lease=%016llx ring=%016llx disk=%016llx %s\n",
+                        layer, eid, wb, hl, hr, hd,
+                        (hl == hr && hl == hd) ? "OK" : (hl == hr ? "RING_VS_DISK" : "LEASE_VS_RING"));
+                /* scale blob identity: lease gs vs direct container qs read */
+                char qn[256]; snprintf(qn, sizeof qn, "model.layers.%d.mlp.experts.%d.qs", la, eid);
+                st_tensor *tq = st_find(&m->S, qn);
+                unsigned long long hs = 1469598103934665603ULL, hq = hs;
+                if (tq && L->gs) {
+                    for (size_t z = 0; z < sb / 4; z++) { float lv = L->gs[z], rv; /* ring scales */ }
+                    for (size_t z = 0; z < sb; z++) hs ^= ((uint8_t*)L->gs)[z], hs *= 1099511628211ULL;
+                    uint8_t *tb2 = (uint8_t*)malloc(sb);
+                    if (tb2) {
+                        st_pread_full(tq->fd, tb2, tq->nbytes < (int64_t)sb ? tq->nbytes : (int64_t)sb, tq->off, "spechash_s");
+                        for (size_t z = 0; z < sb; z++) hq ^= tb2[z], hq *= 1099511628211ULL;
+                        free(tb2);
+                    }
+                    fprintf(stderr, "[spechash] scales sb=%zu lease=%016llx disk=%016llx %s\n",
+                            sb, hs, hq, hs == hq ? "OK" : "SCALE_MISMATCH");
+                }
+            }
             spec_ring[r].state = 0;   /* release ring entry */
             g_spec_hit++;
             *out = L;
@@ -2177,6 +2217,12 @@ static void expert_acquire(Model *m, int layer, int eid, float router_mass, Slot
             m->hits++; g_acq_hits++;
             if (ss->is_int3) g_cache_hit_int3++;
             else if (ss->is_int4) g_cache_hit_int4++;
+            if (spec_debug_on())
+                fprintf(stderr, "[specdbg] serve tok=%lld L%d eid=%d slot=%p eid_field=%d i3=%d i4=%d w=%p gs=%p\n",
+                        (long long)g_trace_tok, layer, eid, (void*)ss, ss->eid,
+                        ss->is_int3, ss->is_int4,
+                        ss->is_int3 ? (void*)ss->w3 : (void*)ss->w4, (void*)ss->gs);
+            *out = ss;   /* PROPAGATE: caller computes from the lease copy */
             trace_emit("DEMAND", "HIT", g_trace_tok, layer, eid,
                        ss->is_int3 ? 3 : (ss->is_int4 ? 4 : 8), 0, 0.0, -1, -1);
             ar->kind = ACQ_HIT;
