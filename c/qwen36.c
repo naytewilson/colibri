@@ -892,33 +892,61 @@ static FILE *forge_trace_fp(void){
     return g_forge_trc_fp;
 }
 
-/* B2R/R1 token-boundary event, JSONL. Two explicitly distinct concepts:
- *   wall_delta_ms                — raw observation (metadata-class, NOT an
- *                                  ontology metric): actual wall interval
- *                                  between consecutive decode-step completions.
- *                                  null on the first boundary (no prior
- *                                  boundary exists — never fabricated).
- *   cumulative_step_ms_per_token — cumulative mean of COMPLETED boundary
- *                                  intervals, associated with the canonical
- *                                  aggregate metric id below; recomputes as
- *                                  mean(wall_delta_ms[2..i]). null on the
- *                                  first boundary (zero completed intervals). */
+/* ---- B2R2/R3 generation identity -----------------------------------------
+ * One generation == one generate() invocation (one serving turn). Wall
+ * boundary state is reset per generation so no wall interval can span
+ * previous-decode -> next-request-prefill -> next-decode. Process-wide
+ * profiling counters (g_tm_dec_tokens etc.) are untouched. */
+static long g_forge_gen = 0;             /* generation id (per generate())  */
+static long g_forge_gen_bidx = 0;        /* boundary index within generation*/
 static double g_forge_prev_boundary = 0.0;
-static double g_forge_t0_boundary   = 0.0;
+static double g_forge_t0_boundary = 0.0;
 
+static void forge_begin_generation(void){
+    g_forge_gen++;
+    g_forge_prev_boundary = 0.0;
+    g_forge_t0_boundary = 0.0;
+    g_forge_gen_bidx = 0;
+}
+
+/* TOKEN-BOUNDARY event — metadata-class wall observation ONLY.
+ * Carries NO metric field: wall_delta_ms is raw evidence, never an ontology
+ * metric (canonical forge.runtime.step_ms_per_token is engine-internal and is
+ * emitted exclusively on engine_step events below).
+ * wall_delta_ms: actual interval to the previous boundary IN THE SAME
+ * generation; null on the first boundary of every generation (never spans a
+ * prefill gap, never fabricated). */
 static void forge_trace_token_boundary(long idx){
     FILE *f = forge_trace_fp();
     if (!f) return;
     double now = tm_now();
     int have_prev = (g_forge_prev_boundary > 0.0);
-    if (g_forge_t0_boundary <= 0.0) g_forge_t0_boundary = now;
-    fprintf(f, "{\"ev\":\"token_boundary\",\"i\":%ld,\"metric\":\"forge.runtime.step_ms_per_token\",\"wall_delta_ms\":", idx);
+    if (!have_prev) g_forge_t0_boundary = now;
+    g_forge_gen_bidx++;
+    fprintf(f, "{\"ev\":\"token_boundary\",\"i\":%ld,\"gen\":%ld,\"gi\":%ld,\"first_in_generation\":%s,\"wall_delta_ms\":",
+            idx, g_forge_gen, g_forge_gen_bidx, have_prev ? "false" : "true");
     if (have_prev) fprintf(f, "%.4f", now - g_forge_prev_boundary); else fprintf(f, "null");
-    fprintf(f, ",\"cumulative_step_ms_per_token\":");
-    if (have_prev) fprintf(f, "%.4f", (now - g_forge_t0_boundary) / (double)(idx - 1));
-    else fprintf(f, "null");
     fprintf(f, "}\n");
     g_forge_prev_boundary = now;
+}
+
+/* ENGINE STEP event — the canonical clock domain.
+ * Called from the OUTER decode loop immediately after the completed
+ * step(...) whose duration defines g_tm_step, so:
+ *   i            == g_tm_dec_tokens == completed decode-step identity
+ *   engine_step_ms == exact duration of THAT completed step()
+ *   cumulative_engine_step_ms_per_token == g_tm_step / g_tm_dec_tokens,
+ *       recomputable exactly as mean(engine_step_ms[1..i]).
+ * forge.runtime.step_ms_per_token is attached HERE and nowhere else. */
+static void forge_trace_engine_step(double started_at){
+    double dt = tm_now() - started_at;
+    g_tm_step += dt;
+    long n = g_tm_dec_tokens;
+    if (n <= 0 || dt <= 0.0) return;
+    FILE *f = forge_trace_fp();
+    if (!f) return;
+    fprintf(f, "{\"ev\":\"engine_step\",\"i\":%ld,\"gen\":%ld,\"metric\":\"forge.runtime.step_ms_per_token\",\"engine_step_ms\":%.4f,\"cumulative_engine_step_ms_per_token\":%.4f}\n",
+            n, g_forge_gen, dt, g_tm_step / (double)n);
 }
 
 static void forge_trace_finish(void){
@@ -3125,6 +3153,7 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out) {
     if (g_trace_fp)
         fprintf(g_trace_fp, "# window_begin layers=%d topk=%d prefill_tokens=%d arm=%s\n",
                 c->n_layers, c->topk, np, expert_parallel_on() ? "EXPERT_PARALLEL" : "REF_GEMV");
+    forge_begin_generation(); /* B2R2/R3.1 */
     int len = np;
     for (int s = 0; s < n_new; s++) {
         g_trace_tok = g_trace_tok_base + s;   /* process-wide decode index; -1 marks prefill-only rows */
@@ -3143,7 +3172,7 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out) {
         int one = best;
         { extern double g_tm_step; double _s0 = tm_on()? tm_now():0;
           logit = step(m, &one, 1, len - 1);
-          if (tm_on()) g_tm_step += tm_now()-_s0; }
+          if (tm_on()) forge_trace_engine_step(_s0); }
     }
     g_trace_tok_base += (int64_t)(len - np);
 }
