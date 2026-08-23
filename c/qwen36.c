@@ -769,6 +769,8 @@ typedef struct ExpertLoadResult {
     double ms;
     int64_t bytes;
     int fmt;   /* 3=INT3, 4=INT4, 8=INT8, 0=unknown */
+    int64_t wbytes;  /* weights blob bytes (shadow-lease copy sizing) */
+    int64_t sbytes;  /* scales blob bytes */
 } ExpertLoadResult;
 /* offline cache-replay trace (Phase 5): COLI_MOE_TRACE=<path> enables one TSV
  * row per cache-mutating event. seq is assigned while holding g_pilot_mx — the
@@ -1898,6 +1900,8 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pil
     if (out) {
         out->ms = _io_dt;
         out->bytes = total_loaded_bytes;
+        out->wbytes = tw->nbytes;
+        out->sbytes = ts->nbytes;
         out->fmt = s->is_int3 ? 3 : (s->is_int4 ? 4 : 8);
     }
     if (is_pilot) {
@@ -1986,6 +1990,123 @@ static void lead_open(void){
     if (e && *e) { g_lead_fp = fopen(e, "w"); if (g_lead_fp) fprintf(g_lead_fp, "# qwen36 leadtime/spec harvest v1\n"); }
 }
 
+/* ---- WAVE C: shadow-ring speculative staging (COLI_SPEC_DEPTH) ----
+ * Predictions are issued as REAL loads into transient shadow slots that are
+ * NEVER inserted into the LRU caches, so speculation cannot evict valuable
+ * residents (the pollution failure mode). Demand acquisition checks the ring
+ * before the miss path; a completed shadow load serves compute directly and
+ * is accounted as a hit. Routing untouched; default off. */
+#define SPEC_RING_N 24
+typedef struct { int layer, eid, state; size_t wb, sb; Slot s; } SpecEnt;   /* state 0 empty 1 loading 2 ready */
+static SpecEnt spec_ring[SPEC_RING_N];
+static int spec_ring_on = 0, spec_cursor = 0;
+static int spec_depth(void){ static int v=-1; if(v<0){ const char *e=getenv("COLI_SPEC_DEPTH"); v=(e&&atoi(e)>0)?atoi(e):0; if(v>4)v=4; } return v; }
+static int spec_budget(void){ static int v=-1; if(v<0){ const char *e=getenv("COLI_SPEC_BUDGET"); v=(e&&atoi(e)>0)?atoi(e):12; if(v>16)v=16; } return v; }
+static unsigned long long g_spec_issued=0, g_spec_hit=0, g_spec_wasted=0, g_spec_late=0;
+
+static void *spec_loader(void *arg){
+    (void)arg;
+    while (1) {
+        int busy = 0;
+        for (int i = 0; i < SPEC_RING_N; i++)
+            if (spec_ring[i].state == 1) {
+                busy = 1;
+                ExpertLoadResult res;
+                load_expert_merged(pilot_m, spec_ring[i].layer, spec_ring[i].eid, &spec_ring[i].s, 1, &res);
+                spec_ring[i].wb = (size_t)res.wbytes; spec_ring[i].sb = (size_t)res.sbytes;
+                __atomic_store_n(&spec_ring[i].state, 2, __ATOMIC_RELEASE);
+            }
+        if (!busy) sleep_ms(1);
+    }
+    return NULL;
+}
+static void ensure_spec_loader_started(void){
+    if (spec_ring_on) return;
+    spec_ring_on = 1;
+    memset(spec_ring, 0, sizeof spec_ring);
+    pthread_t t; pthread_create(&t, NULL, spec_loader, NULL); pthread_detach(t);
+}
+/* issue speculative loads for layers i+1..i+depth from post-moe anchor x */
+static void spec_issue(Model *m, int i, const float *x) {
+    int D2 = spec_depth(); if (!D2) return;
+    ensure_pilot_worker_started(m); ensure_spec_loader_started();
+    Cfg *c = &m->c; int D = c->hidden, E = c->n_experts;
+    float *nrm = falloc(D), *lg = falloc(E);
+    for (int d = 1; d <= D2; d++) {
+        int j = i + d; if (j >= c->n_layers) break;
+        rmsnorm_row(nrm, x, m->L[j].post_ln, D, c->eps);
+        matmul_d(lg, nrm, m->L[j].gate, 1, D, E);
+        int B = spec_budget();
+        int pick[16]; int np = 0;
+        for (int n = 0; n < B; n++) {
+            int best = -1; float bv = -1e30f;
+            for (int e = 0; e < E; e++) {
+                int skip = 0;
+                for (int q = 0; q < np; q++) if (pick[q] == e) { skip = 1; break; }
+                if (!skip && lg[e] > bv) { bv = lg[e]; best = e; }
+            }
+            if (best < 0) break;
+            pick[np++] = best;
+        }
+        LCache *lc = &m->cache[j];
+        pthread_mutex_lock(&g_pilot_mx);
+        for (int n = 0; n < np; n++) {
+            int eid = pick[n];
+            int resident = lc->loading[eid] >= 0;
+            if (!resident) for (int t = 0; t < lc->n; t++) if (lc->slots[t].eid == eid) { resident = 1; break; }
+            if (resident) continue;
+            int dup = 0;
+            for (int r = 0; r < SPEC_RING_N; r++)
+                if (spec_ring[r].state && spec_ring[r].layer == j && spec_ring[r].eid == eid) { dup = 1; break; }
+            if (dup) continue;
+            int r = -1;
+            for (int t = 0; t < SPEC_RING_N; t++) { int idx = (spec_cursor + t) % SPEC_RING_N; if (spec_ring[idx].state != 1) { r = idx; break; } } /* steal oldest non-loading */
+            if (r < 0) break; /* ring saturated by in-flight loads */
+            spec_cursor = (r + 1) % SPEC_RING_N;
+            if (spec_ring[r].state == 2) g_spec_wasted++;   /* replaced unread */
+            /* do NOT memset: s keeps its allocated buffers; ensure_format
+             * reallocates when the target format/size differs. */
+            spec_ring[r].s.eid = -1; spec_ring[r].layer = j; spec_ring[r].eid = eid;
+            slot_ensure_allocated(m, &spec_ring[r].s);
+            __atomic_store_n(&spec_ring[r].state, 1, __ATOMIC_RELEASE);
+            g_spec_issued++;
+        }
+        pthread_mutex_unlock(&g_pilot_mx);
+    }
+    free(nrm); free(lg);
+}
+/* returns 1 and sets *out when a shadow copy satisfies (layer,eid).
+ * Serves through rotating LEASE copies so compute never aliases ring memory
+ * the loader may reuse. */
+static int spec_serve(Model *m, int layer, int eid, Slot **out) {
+    (void)m;
+    if (!spec_ring_on) return 0;
+    static Slot lease[8]; static int lease_i = 0; static int lease_init = 0;
+    for (int r = 0; r < SPEC_RING_N; r++) {
+        int st = __atomic_load_n(&spec_ring[r].state, __ATOMIC_ACQUIRE);
+        if ((st == 1 || st == 2) && spec_ring[r].layer == layer && spec_ring[r].eid == eid) {
+            if (st == 1) { while (__atomic_load_n(&spec_ring[r].state, __ATOMIC_ACQUIRE) == 1) sleep_ms(0); }
+            /* re-read post-wait: loader finished; copy out under our ownership */
+            if (!lease_init) { memset(lease, 0, sizeof lease); lease_init = 1; }
+            Slot *L = &lease[lease_i++ & 7];
+            /* rebuild lease through the engine's own format allocator so all
+             * format-derived pointers/sizes are valid, then deep-copy blobs */
+            slot_ensure_allocated(m, L);
+            slot_ensure_format(m, L, spec_ring[r].s.is_int3 ? 5 : 4);
+            size_t wb = spec_ring[r].wb, sb = spec_ring[r].sb;
+            if (spec_ring[r].s.is_int3) { if (L->w3 && wb) memcpy(L->w3, spec_ring[r].s.w3, wb); }
+            else { if (L->w4 && wb) memcpy(L->w4, spec_ring[r].s.w4, wb); }
+            if (L->gs && sb) memcpy(L->gs, spec_ring[r].s.gs, sb);
+            L->eid = eid; L->pinned = 0;
+            spec_ring[r].state = 0;   /* release ring entry */
+            g_spec_hit++;
+            *out = L;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void expert_acquire(Model *m, int layer, int eid, float router_mass, Slot **out, AcqRes *ar) {
     LCache *lc = &m->cache[layer];
     int _tp = tm_on();
@@ -2045,6 +2166,22 @@ static void expert_acquire(Model *m, int layer, int eid, float router_mass, Slot
                        (*out)->is_int3 ? 3 : ((*out)->is_int4 ? 4 : 8), 0, 0.0, -1, i);
             ar->kind = ACQ_HIT;
             pthread_mutex_unlock(&g_pilot_mx); return;
+        }
+    }
+    /* SPECULATIVE SHADOW SERVE: a completed/landing speculative staging load
+     * satisfies this acquisition without entering the LRU and without NVMe.
+     * Accounted as a hit; trace slot -1 marks shadow provenance. */
+    {
+        Slot *ss = NULL;
+        if (spec_serve(m, layer, eid, &ss)) {
+            m->hits++; g_acq_hits++;
+            if (ss->is_int3) g_cache_hit_int3++;
+            else if (ss->is_int4) g_cache_hit_int4++;
+            trace_emit("DEMAND", "HIT", g_trace_tok, layer, eid,
+                       ss->is_int3 ? 3 : (ss->is_int4 ? 4 : 8), 0, 0.0, -1, -1);
+            ar->kind = ACQ_HIT;
+            pthread_mutex_unlock(&g_pilot_mx);
+            return;
         }
     }
     /* proceeding to a real load: count the miss here (post-coalesce decision) */
@@ -2845,6 +2982,8 @@ static float *step(Model *m, const int *ids, int S, int pos_base) {
             for (int j = i+1; j <= i+4 && j < c->n_layers; j++)
                 spec_predict(m, x, (int)g_trace_tok, i, 1, j);
         }
+        if (spec_depth() && S == 1)
+            spec_issue(m, i, x);
         if (g_pilot >= 2 && S <= 8 && i + 2 < c->n_layers)
             pilot_prefetch(m, i + 2, x, S);
         if (g_pilot >= 3 && S <= 8 && i + 3 < c->n_layers)
@@ -3804,8 +3943,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "\nPEAK RSS: %.2f GB | Current VmRSS: %.2f GB\n", peak_rss_gb(), current_rss_gb());
         fprintf(stderr, "Expert cache hit rate: %.1f%% (hit=%llu miss=%llu)\n", tot?100.0*m.hits/tot:0.0,
                (unsigned long long)m.hits, (unsigned long long)m.miss);
-        fprintf(stderr, "Coalesce diagnostics: demand waits=%ld pilot skips=%ld | max loaders per (layer,eid)<=1 by construction (single loading registry)\n",
-                g_demand_coalesce_waits, g_pilot_coalesce_skips);
+        fprintf(stderr, "Coalesce diagnostics: demand waits=%ld pilot skips=%ld | max loaders per (layer,eid)<=1 by construction (single loading registry)\n",                g_demand_coalesce_waits, g_pilot_coalesce_skips);
         return 0;
     }
 
@@ -3929,6 +4067,9 @@ int main(int argc, char **argv) {
     fprintf(stderr, "Coalesce diagnostics: demand waits=%ld pilot skips=%ld | max loaders per (layer,eid)<=1 by construction (single loading registry)\n",
             g_demand_coalesce_waits, g_pilot_coalesce_skips);
     fprintf(stderr, "Speed: %.2f tok/s (%.1fs for %d tokens)\n", n_new/dt, dt, n_new);
+    if (spec_depth())
+        fprintf(stderr, "[spec] issued=%llu shadow_hits=%llu wasted_replaced=%llu (depth=%d budget=%d)\n",
+                g_spec_issued, g_spec_hit, g_spec_wasted, spec_depth(), spec_budget());
     if (g_trace_fp) { fclose(g_trace_fp); g_trace_fp = NULL; fprintf(stderr, "[trace] closed\n"); }
     free(buf); free(arena);
     /* Oracle mode is a gate, not a report: a mismatch must fail the caller.
