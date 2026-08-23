@@ -1968,6 +1968,24 @@ static int async_w_threads(void){ static int v=-1; if(v<0){ const char *e=getenv
  * historical cold-read behavior minus the fadvise syscalls. */
 static int expert_drop_flag(void){ static int v=-1; if(v<0){ const char *e=getenv("COLI_EXPERT_PAGECACHE"); v=(e&&*e=='1')?0:1; } return v; }
 
+/* ---- WAVE A/B/K lead-time + speculation harvest (COLI_LEADFILE=<path>) ----
+ * Default-off instrumentation. Emits one TSV:
+ *   T <tok> <t0>                     decode-token start (ms, CLOCK_MONOTONIC)
+ *   K <tok> <layer> <t>              post-mixer anchor (x after mixer residual)
+ *   G <tok> <layer> <t>              post-moe anchor (x after moe residual)
+ *   R <tok> <layer> <t>              authoritative router topk done (=T_NEED)
+ *   A <tok> <layer> e0..e7           actual native top-k expert ids
+ *   P <tok> <srclayer> <anchor 0|1> <target> id0..id15   speculative top-16
+ *   M <tok> <layer> <eid> <io_ms> <t_start> <t_done>     demand miss load
+ * Predictions apply target layer's own post_ln + gate weights to an anchor
+ * hidden state (native-router speculation). Authoritative routing untouched. */
+static FILE *g_lead_fp = NULL;
+static void lead_open(void){
+    if (g_lead_fp) return;
+    const char *e = getenv("COLI_LEADFILE");
+    if (e && *e) { g_lead_fp = fopen(e, "w"); if (g_lead_fp) fprintf(g_lead_fp, "# qwen36 leadtime/spec harvest v1\n"); }
+}
+
 static void expert_acquire(Model *m, int layer, int eid, float router_mass, Slot **out, AcqRes *ar) {
     LCache *lc = &m->cache[layer];
     int _tp = tm_on();
@@ -2087,7 +2105,11 @@ static void expert_finish(Model *m, int layer, int eid, AcqRes *ar, Slot **out) 
     Slot *s = ar->s;
     int _tp = tm_on();
     ExpertLoadResult res;
+    double _lio0 = tm_now();
     load_expert_merged(m, layer, eid, s, 0, &res);
+    double _lio1 = tm_now();
+    if (g_lead_fp) fprintf(g_lead_fp, "M %lld %d %d %.3f %.4f %.4f\n",
+                           (long long)g_trace_tok, layer, eid, res.ms, _lio0, _lio1);
     double _tl2 = _tp ? tm_now() : 0;
     pthread_mutex_lock(&g_pilot_mx);
     s->eid = eid; s->pinned = m->is_pinned[layer * c->n_experts + eid]; s->used = ++m->clock;
@@ -2104,6 +2126,54 @@ static void expert_get(Model *m, int layer, int eid, Slot **out, float router_ma
     AcqRes ar;
     expert_acquire(m, layer, eid, router_mass, out, &ar);
     if (ar.kind == ACQ_LOAD) expert_finish(m, layer, eid, &ar, out);
+}
+
+/* Native-router speculation for one target layer from an anchor hidden state:
+ * rmsnorm with the TARGET layer's post_ln, then the target gate matmul, then
+ * plain top-N. Mirrors moe()'s selection (group mask included) but never
+ * influences execution — output is a TSV record only. */
+static void spec_predict(Model *m, const float *x, int tok, int src_layer, int anchor_id, int target_layer) {
+    Cfg *c = &m->c; int D = c->hidden, E = c->n_experts;
+    if (!g_lead_fp || target_layer < 0 || target_layer >= c->n_layers) return;
+    float *nrm = falloc(D), *lg = falloc(E);
+    rmsnorm_row(nrm, x, m->L[target_layer].post_ln, D, c->eps);
+    matmul_d(lg, nrm, m->L[target_layer].gate, 1, D, E);
+    uint8_t keep[1024]; int Ec = E < 1024 ? E : 1024;
+    if (c->n_group > 1 && c->n_group <= Ec) {
+        int per = E / c->n_group; float gs[1024];
+        for (int gi = 0; gi < c->n_group; gi++) {
+            float b1 = -1e30f, b2 = -1e30f;
+            for (int e = gi*per; e < gi*per+per; e++) { float v = lg[e]; if (v > b1) { b2=b1; b1=v; } else if (v > b2) b2=v; }
+            gs[gi] = b1 + b2;
+        }
+        uint8_t gkeep[1024] = {0};
+        for (int kk = 0; kk < c->topk_group; kk++) {
+            int bg = -1; float bv = -1e30f;
+            for (int gi = 0; gi < c->n_group; gi++) { if (!gkeep[gi] && gs[gi] > bv) { bv = gs[gi]; bg = gi; } }
+            if (bg < 0) break; gkeep[bg] = 1;
+        }
+        for (int e = 0; e < Ec; e++) keep[e] = 0;
+        for (int gi = 0; gi < c->n_group; gi++) if (gkeep[gi]) for (int e = gi*per; e < gi*per+per; e++) keep[e] = 1;
+    } else { for (int e = 0; e < Ec; e++) keep[e] = 1; }
+    fprintf(g_lead_fp, "P %lld %d %d %d", (long long)tok, src_layer, anchor_id, target_layer);
+    /* top-16 by repeated max with exclusion list */
+    {
+        int pick[16]; float pv[16]; int np = 0;
+        for (int n = 0; n < 16; n++) {
+            int best = -1; float bv = -1e30f;
+            for (int e = 0; e < E; e++) {
+                if (!keep[e]) continue;
+                int skip = 0;
+                for (int j = 0; j < np; j++) if (pick[j] == e) { skip = 1; break; }
+                if (!skip && lg[e] > bv) { bv = lg[e]; best = e; }
+            }
+            if (best < 0) break;
+            pick[np] = best; pv[np] = bv; np++;
+        }
+        for (int n = 0; n < np; n++) fprintf(g_lead_fp, " %d:%.4f", pick[n], pv[n]);
+    }
+    fprintf(g_lead_fp, "\n");
+    free(nrm); free(lg);
 }
 
 static void pin_hot_experts(Model *m) {
@@ -2357,6 +2427,13 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
         }
         /* HF renormalizes the top-k router weights unconditionally */
         { float sm=0; for (int kk=0;kk<K;kk++) sm+=val[kk]; if (sm>0) for (int kk=0;kk<K;kk++) val[kk]/=sm; }
+
+        if (g_lead_fp && S == 1) {
+            fprintf(g_lead_fp, "R %lld %d %.4f\n", (long long)g_trace_tok, layer, tm_now());
+            fprintf(g_lead_fp, "A %lld %d", (long long)g_trace_tok, layer);
+            for (int kk = 0; kk < K; kk++) fprintf(g_lead_fp, " %d", idx[kk]);
+            fprintf(g_lead_fp, "\n");
+        }
 
         if (tm_on()) {
             double dt_r = tm_now() - _tr0;
@@ -2735,6 +2812,7 @@ static float *step(Model *m, const int *ids, int S, int pos_base) {
         }
     }
     float *nrm = falloc((int64_t)S*D), *tmp = falloc((int64_t)S*D);
+    if (S == 1) { lead_open(); if (g_lead_fp) fprintf(g_lead_fp, "T %lld %.4f\n", (long long)g_trace_tok, tm_now()); }
     for (int i = 0; i < c->n_layers; i++) {
         Layer *l = &m->L[i];
         for (int s = 0; s < S; s++) rmsnorm_row(nrm + (int64_t)s*D, x + (int64_t)s*D, l->in_ln, D, c->eps);
@@ -2749,6 +2827,11 @@ static float *step(Model *m, const int *ids, int S, int pos_base) {
         if (lf) fwrite(tmp + (int64_t)(S-1)*D, sizeof(float), D, lf);   /* sublayer output */
         for (int64_t j = 0; j < (int64_t)S*D; j++) x[j] += tmp[j];
         if (lf) fwrite(x + (int64_t)(S-1)*D, sizeof(float), D, lf);   /* post-deltanet residual */
+        if (g_lead_fp && S == 1) {
+            fprintf(g_lead_fp, "K %lld %d %.4f\n", (long long)g_trace_tok, i, tm_now());
+            for (int j = i+1; j <= i+4 && j < c->n_layers; j++)
+                spec_predict(m, x, (int)g_trace_tok, i, 0, j);
+        }
         if (g_pilot >= 1 && S <= 8 && i + 1 < c->n_layers)
             pilot_prefetch(m, i + 1, x, S);
         for (int s = 0; s < S; s++) rmsnorm_row(nrm + (int64_t)s*D, x + (int64_t)s*D, l->post_ln, D, c->eps);
@@ -2757,6 +2840,11 @@ static float *step(Model *m, const int *ids, int S, int pos_base) {
         if (tm_on()) tm_add(S, 2, tm_now()-_t0);
         for (int64_t j = 0; j < (int64_t)S*D; j++) x[j] += tmp[j];
         if (lf) fwrite(x + (int64_t)(S-1)*D, sizeof(float), D, lf);
+        if (g_lead_fp && S == 1) {
+            fprintf(g_lead_fp, "G %lld %d %.4f\n", (long long)g_trace_tok, i, tm_now());
+            for (int j = i+1; j <= i+4 && j < c->n_layers; j++)
+                spec_predict(m, x, (int)g_trace_tok, i, 1, j);
+        }
         if (g_pilot >= 2 && S <= 8 && i + 2 < c->n_layers)
             pilot_prefetch(m, i + 2, x, S);
         if (g_pilot >= 3 && S <= 8 && i + 3 < c->n_layers)
