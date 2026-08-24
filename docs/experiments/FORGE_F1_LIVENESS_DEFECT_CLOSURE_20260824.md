@@ -138,6 +138,24 @@ self-consistency, accounting conservation, sanitizers, defaults-off arm.
 OLMoE real E2E remains BLOCKED-by-scope (no canonical container) — not part
 of this lane's completion criteria.
 
+## 13. Real-container paired A/B (node-02, this wave)
+
+Canonical container `/home/nayte/models/qwen36_mixed_low` available and
+re-pinned: `config.json` sha256 `7606939241b64e82…` (matches the 2026-08-23
+pin), corpus `831b27539e462cf8…` (matches). Node gcc 15.2, `-O3 -march=native
+-fopenmp -pthread`.
+
+| Item | Value |
+|---|---|
+| baseline binary sha256 | `6387cfe6acfd9e4110bdcafc31d7418dbedf8eabd27e75cc187a547dddbc4421` — IDENTICAL to the verifier's recorded baseline build |
+| candidate binary sha256 | `057ff93237f529c35c0f5f24cf0ee7278238796e3df320990b78b1f0fb94ff23` (differs from verifier's `0d43a2e6…` because source moved 486f557→this branch's closure commits) |
+| token-exact parity | 2 paired runs/side, greedy TEMP=0 N_NEW=64, streamed generated text captured on stdout: all four sha256 = `4a8af33f7c0a27b27d00a1b9df24570629a06d702f989a81247a0a12e58e4ae1` — BYTE-IDENTICAL base vs cand |
+| protocol corpus run (cap128 ebits4 EP=1 PILOT=1 DENSE_I8 OMP=8, 4×64 tok) | rc=0 ×4; per-run hit/miss counters differ slightly BETWEEN RUNS OF THE SAME BINARY (base_1 hit=99239 vs base_2 hit=99258) → confirms physical-admission-order nondeterminism is inherent to threaded PILOT, not a candidate regression (verifier's PHYSICAL_ADMISSION_ORDER_DIFFERENCE class) |
+| same-window perf sanity | warm medians turns 2–4: base {3.80, 3.58} vs cand {3.84, 4.55} tok/s — candidate within-window ≥ baseline; NO regression; historical 4.98 tok/s remains the idle-node anchor |
+
+Node scratch (`/tmp/forge_f1_lane_a`, 1.3 MB) created for this wave was
+removed after hashing.
+
 ## Verdict
 
 `FORGE_F1_LIVENESS_AND_LEASE_DEFECTS_FIXED_READY_FOR_TARGETED_REVERIFICATION`
