@@ -29,7 +29,7 @@ typedef struct {
     int     fd;
     int64_t off;       /* offset assoluto del dato dentro al file */
     int64_t nbytes;
-    int     dtype;     /* 0=BF16 1=F16 2=F32 */
+    int     dtype;     /* ST_BF16/ST_F16/ST_F32/ST_U8/ST_I8/ST_I16/ST_I32/ST_I64 */
     int64_t numel;
 } st_tensor;
 
@@ -56,19 +56,47 @@ static uint64_t st_hash(const char *s){
     return h;
 }
 
+/* Dtype identity, FAIL-CLOSED. Float codes keep their historical values
+ * (0/1/2) so every existing engine's `dtype==0/1/2` checks stay valid; raw
+ * integer dtypes each get their OWN code (>=3) so a consumer can never confuse,
+ * say, an I32 packed-expert tensor with an I64 metadata tensor that happens to
+ * span the same bytes. Before this split every raw dtype collapsed to code 3:
+ * sufficient to index compressed-tensors metadata by byte count, but it lost
+ * the exact identity — ling3.c "proved" I32 [O,I/8] from nbytes alone, and a
+ * generic float reader could silently reinterpret an I16 tensor through its
+ * F16 branch. Consumers: ling3.c native compressed-tensors intake requires
+ * ST_I32/ST_BF16 explicitly; everyone else reads floats or U8 as before. */
+enum { ST_BF16 = 0, ST_F16 = 1, ST_F32 = 2, ST_U8 = 3, ST_I8 = 4,
+       ST_I16 = 5, ST_I32 = 6, ST_I64 = 7 };
+
 static int st_dtype_code(const char *s) {
-    if (!strcmp(s, "BF16")) return 0;
-    if (!strcmp(s, "F16"))  return 1;
-    if (!strcmp(s, "F32"))  return 2;
-    if (!strcmp(s, "U8"))   return 3;   /* dati quantizzati (int4 packed / int8) */
-    if (!strcmp(s, "I8"))   return 3;
-    /* integer dtypes found in compressed-tensors containers (weight_shape I64,
-     * packed int32 words): indexed as RAW BYTES (dtype 3, byte-count reads).
-     * Consumers must know the real width; nothing auto-converts these.
-     * Affects: ling3.c native compressed-tensors intake only. */
-    if (!strcmp(s, "I64") || !strcmp(s, "I32") || !strcmp(s, "I16")) return 3;
+    if (!strcmp(s, "BF16")) return ST_BF16;
+    if (!strcmp(s, "F16"))  return ST_F16;
+    if (!strcmp(s, "F32"))  return ST_F32;
+    /* dati quantizzati (int4 packed / int8) e metadati interi dei container
+     * compressed-tensors: letti SOLO come byte grezzi dal consumatore che ne
+     * conosce il layout; nessuna conversione automatica. */
+    if (!strcmp(s, "U8"))   return ST_U8;
+    if (!strcmp(s, "I8"))   return ST_I8;
+    if (!strcmp(s, "I16"))  return ST_I16;
+    if (!strcmp(s, "I32"))  return ST_I32;
+    if (!strcmp(s, "I64"))  return ST_I64;
     fprintf(stderr, "unsupported dtype: %s\n", s); exit(1);
 }
+/* element size implied by the declared safetensors dtype (0 = unknown code) */
+static int st_dtype_esz(int d) {
+    switch (d) {
+        case ST_BF16: case ST_F16: return 2;
+        case ST_F32:               return 4;
+        case ST_U8: case ST_I8:    return 1;
+        case ST_I16:               return 2;
+        case ST_I32:               return 4;
+        case ST_I64:               return 8;
+    }
+    return 0;
+}
+/* true only for dtypes the float readers may touch */
+static int st_is_float_dtype(int d) { return d == ST_BF16 || d == ST_F16 || d == ST_F32; }
 
 static inline float bf16_to_f32(uint16_t h) {
     uint32_t u = (uint32_t)h << 16; float f; memcpy(&f, &u, 4); return f;
@@ -348,10 +376,12 @@ static void st_init_multi(shards *S, const char *snap_dir, const char *extra_dir
             /* cross-check the declared element count against the byte span for FLOAT
              * dtypes: st_read_f32 writes `numel` floats (BF16/F16 loop or F32 memcpy)
              * into a caller-sized buffer, so a header with numel != nbytes/esz is an
-             * OOB write primitive. U8/I8 (raw quant bytes) are read by byte count, so
-             * their numel is unused by the read path and legitimately may differ. */
-            { int esz = t->dtype==2 ? 4 : (t->dtype==3 ? 1 : 2);
-              if (t->dtype != 3 && t->nbytes != numel * (int64_t)esz) {
+             * OOB write primitive. Raw integer dtypes are consumed by byte count via
+             * st_read_raw, whose destination is sized by the consumer's own layout
+             * knowledge — enforcing numel*esz here would REJECT containers that load
+             * fine today, so their span stays validated at read time instead. */
+            { int esz = st_dtype_esz(t->dtype);
+              if (st_is_float_dtype(t->dtype) && t->nbytes != numel * (int64_t)esz) {
                   fprintf(stderr, "%s: tensor '%s' numel %lld disagrees with byte span %lld (esz %d)\n",
                           files[fi], name, (long long)numel, (long long)t->nbytes, esz); exit(1); } }
         }
@@ -476,6 +506,13 @@ static void st_prefetch_rep(shards *S, const char *name, int rep) {
 static int64_t st_read_f32(shards *S, const char *name, float *out, int drop) {
     st_tensor *t = st_find(S, name);
     if (!t) { fprintf(stderr, "missing tensor: %s\n", name); exit(1); }
+    /* FAIL-CLOSED: only actual float dtypes may enter the conversion paths.
+     * The old else-branch treated every non-F32 dtype as F16, so a raw I16
+     * tensor whose byte span satisfied the 2-byte width relation would have
+     * been silently reinterpreted as half floats. */
+    if (!st_is_float_dtype(t->dtype)) {
+        fprintf(stderr, "%s: raw dtype %d — st_read_f32 accepts only BF16/F16/F32; use st_read_raw for integer tensors\n",
+                name, t->dtype); exit(1); }
     /* SEC: numel viene dallo shape, nbytes dagli offset — due campi indipendenti
      * del file. Se non concordano, la memcpy F32 (nbytes) o i loop BF16/F16
      * (numel elementi da un raw di soli nbytes) sforano il buffer del chiamante,
@@ -521,11 +558,18 @@ static int64_t st_nbytes(shards *S, const char *name) {
     st_tensor *t = st_find(S, name); return t ? t->nbytes : -1;
 }
 
-/* legge i byte GREZZI di un tensore (nessuna conversione di dtype): per i pesi gia'
- * quantizzati int4/int8 del nostro container (dtype U8). drop=1 -> fadvise DONTNEED. */
+/* legge i byte GREZZI di un tensore (nessuna conversione di dtype): per i pesi
+ * gia' quantizzati int4/int8 del nostro container (U8/I8) e per i tensori interi
+ * dei container compressed-tensors (I16/I32/I64, es. ling3 weight_packed /
+ * weight_shape). FAIL-CLOSED: rifiuta i dtype float — per quelli esistono i
+ * reader tipizzati (st_read_f32/st_read_slice_f32), e leggerli "grezzi" senza
+ * conversione e' sempre un bug del chiamante. drop=1 -> fadvise DONTNEED. */
 static void st_read_raw(shards *S, const char *name, void *out, int drop) {
     st_tensor *t = st_find(S, name);
     if (!t) { fprintf(stderr, "missing tensor: %s\n", name); exit(1); }
+    if (st_is_float_dtype(t->dtype)) {
+        fprintf(stderr, "%s: float dtype %d — st_read_raw accepts only raw integer tensors (U8/I8/I16/I32/I64)\n",
+                name, t->dtype); exit(1); }
     st_pread_full(t->fd, out, t->nbytes, t->off, "pread raw");
     if (drop) posix_fadvise(t->fd, t->off, t->nbytes, POSIX_FADV_DONTNEED);
 }
@@ -536,6 +580,9 @@ static void st_read_raw(shards *S, const char *name, void *out, int drop) {
 static void st_read_slice_f32(shards *S, const char *name, int64_t elem_off, int64_t n_elems, float *out, int drop) {
     st_tensor *t = st_find(S, name);
     if (!t) { fprintf(stderr, "missing tensor: %s\n", name); exit(1); }
+    if (!st_is_float_dtype(t->dtype)) {
+        fprintf(stderr, "%s: raw dtype %d — st_read_slice_f32 accepts only BF16/F16/F32; use st_read_raw for integer tensors\n",
+                name, t->dtype); exit(1); }
     int esz = (t->dtype == 2) ? 4 : 2;
     if (elem_off < 0 || n_elems < 0 || elem_off > t->numel || n_elems > t->numel - elem_off) {   /* keep the slice inside the tensor; subtraction avoids overflow (#1) */
         fprintf(stderr, "slice %s [%lld,+%lld) out of tensor bounds (numel %lld)\n",

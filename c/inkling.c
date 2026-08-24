@@ -649,7 +649,7 @@ static void wt_row_f32(Wt w, int64_t off, float *out, int n) {
 static void read_f32_slice(shards *S, const char *name, float *out, int64_t off, int64_t cnt) {
     st_tensor *t = st_find(S, name);
     if (!t) { fprintf(stderr, "missing tensor: %s\n", name); exit(1); }
-    if (t->dtype == 3) { fprintf(stderr, "%s: U8 container has no f32 view\n", name); exit(1); }
+    if (!st_is_float_dtype(t->dtype)) { fprintf(stderr, "%s: raw dtype %d has no f32 view\n", name, t->dtype); exit(1); }
     int esz = (t->dtype == 2) ? 4 : 2;
     void *raw = malloc((size_t)cnt * esz);
     if (!raw) { fprintf(stderr,"OOM slice %s\n",name); exit(1); }

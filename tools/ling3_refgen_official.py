@@ -19,12 +19,19 @@ materialized (meta-init then partial state_dict load).
 import argparse
 import hashlib
 import json
+import os
 import sys
 
 import numpy as np
 import torch
 
-sys.path.insert(0, "/data/ANVIL/ling3")
+# Repo-relative import of the fla CPU shim: resolve from THIS script's location
+# inside the colibri checkout, so fixture generation is reproducible from any
+# clone. Override only via LING3_SHIM_DIR when the shim lives elsewhere (the
+# old hardcoded /data/ANVIL/ling3 broke every non-Dell checkout).
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SHIM_DIR = os.environ.get("LING3_SHIM_DIR") or _HERE
+sys.path.insert(0, _SHIM_DIR)
 import ling3_flacpu_shim  # noqa: E402  (installs the fake `fla` modules)
 
 ling3_flacpu_shim.install()
@@ -32,7 +39,9 @@ ling3_flacpu_shim.install()
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="/data/ANVIL/ling3/hf_tiny")
+    ap.add_argument("--model", default="/data/ANVIL/ling3/hf_tiny",
+                    help="official BF16 snapshot dir; every receipt must "
+                         "record the exact explicit path + revision used")
     ap.add_argument("--out", required=True)
     ap.add_argument("--layers", type=int, default=4)
     ap.add_argument("--ids", required=True, help="comma-separated token ids")

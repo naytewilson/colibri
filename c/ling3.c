@@ -50,7 +50,11 @@
  * FULL RESIDENCY: every expert matrix of every layer is loaded once at startup
  * into resident buffers behind a direct [layer][expert][matrix] pointer table.
  * Steady-state decode performs zero model-weight file reads, zero tensor-name
- * lookups, zero allocation, zero locking.
+ * lookups, zero locking. NOT yet zero-allocation: the Wave-1 AVX2 exp_matvec
+ * allocates/frees its x-even/x-odd scratch on every call and moe_forward /
+ * attention keep small per-call temporaries. A persistent scratch/workspace
+ * pool is the next exact optimization wave; do not claim a zero-alloc hot
+ * path until that lands.
  *
  * ENV:
  *   L3_BITS=4|8|32        load-time quant of attention/dense/shared/embed (def 32)
@@ -61,7 +65,12 @@
  *   L3_ROUTE=path         dump router decisions (layer,t,idx[topk],w[topk])
  *   L3_X0=path            inject f32 hidden states as layer inputs (validation)
  *   L3_CHUNK=N            prefill chunk size (default 32)
- *   L3_THREADS=N          OpenMP thread count
+ *   L3_THREADS=N          generic thread count (prefill AND decode unless the
+ *                         specific var below overrides)
+ *   L3_THREADS_PREF=N     prefill threads only (default: omp_get_max_threads())
+ *   L3_THREADS_DEC=N      decode threads only  (default: min(8, max_threads);
+ *                         8 = measured Dell i7-11700 knee, NOT a universal
+ *                         constant). Invalid values (<=0) are rejected.
  *   L3_PHASES=0|1         phase decomposition timers to stderr (default 0)
  *   L3_MAXT=N             KV/context capacity (default prompt+ngen+8)
  *   COLI_TEMP=F           0 = greedy (default)
@@ -165,6 +174,16 @@ static double rss_gb(void){ struct rusage r; getrusage(RUSAGE_SELF,&r);
 #endif
 }
 static double peak_rss_gb(void){ return rss_gb(); }
+/* read one L3_THREADS* env var: unset/empty -> -1 (caller applies its default);
+ * set-but-invalid (<=0 or non-numeric) -> reject explicitly, never clamp. */
+static int l3_thread_count(const char *name){
+    const char *v=getenv(name);
+    if(!v||!*v) return -1;
+    char *end=NULL; long n=strtol(v,&end,10);
+    if(n<=0||!end||*end){
+        fprintf(stderr,"[L3] %s=%s rejected: must be a positive integer thread count\n",name,v); exit(1); }
+    return (int)n;
+}
 static float *falloc(int64_t n){ float *p=malloc((size_t)n*sizeof(float)); if(!p){fprintf(stderr,"OOM %lld floats\n",(long long)n);exit(1);} return p; }
 static float *fcalloc(int64_t n){ float *p=calloc((size_t)n,sizeof(float)); if(!p){fprintf(stderr,"OOM %lld floats\n",(long long)n);exit(1);} return p; }
 static inline float sigmoidf_(float x){ return 1.f/(1.f+expf(-x)); }
@@ -269,8 +288,11 @@ static void exp_load(Model *m, Exp *e, const char *base, int O, int I){
     st_tensor *t=st_find(&m->S,nm);
     if(!t) st_die_missing(&m->S,nm);
     int64_t want=(int64_t)O*e->nw*4;
-    if(t->dtype!=3 || t->nbytes!=want){
-        fprintf(stderr,"%s: dtype %d nbytes %lld != expected %lld (I32 [%d,%d])\n",
+    /* FAIL-CLOSED on the exact declared dtype: ST_I32 is required, not "any raw
+     * tensor with the right byte span" — the old dtype==3 check could not tell
+     * an I32 [O,I/8] payload from an I64/I16 tensor of the same size. */
+    if(t->dtype!=ST_I32 || t->nbytes!=want){
+        fprintf(stderr,"%s: dtype %d nbytes %lld != expected ST_I32 %lld (I32 [%d,%d])\n",
                 nm,t->dtype,(long long)t->nbytes,(long long)want,O,e->nw); exit(1); }
     e->packed=malloc((size_t)want);
     if(!e->packed){fprintf(stderr,"OOM expert packed %s\n",nm);exit(1);}
@@ -280,6 +302,11 @@ static void exp_load(Model *m, Exp *e, const char *base, int O, int I){
     if(!ts) st_die_missing(&m->S,nm);
     if(ts->numel!=(int64_t)O*e->ng){
         fprintf(stderr,"%s: numel %lld != %dx%d\n",nm,(long long)ts->numel,O,e->ng); exit(1); }
+    /* official compressed-tensors scales are BF16 [O, I/32]: require that exact
+     * float dtype instead of trusting st_read_f32's generic conversion. */
+    if(ts->dtype!=ST_BF16){
+        fprintf(stderr,"%s: scale dtype %d != ST_BF16 (official weight_scale is BF16 [O,I/32])\n",
+                nm,ts->dtype); exit(1); }
     e->scl=falloc((int64_t)O*e->ng);
     st_read_f32(&m->S,nm,e->scl,0);            /* bf16 -> f32 once, at load */
     m->wbytes += want + (int64_t)O*e->ng*4;
@@ -1083,14 +1110,28 @@ int main(int argc, char **argv){
 #ifdef _OPENMP
     /* measured knee (bench_v1 sweep): prefill scales to all cores, decode
      * regresses past 8 (OMP barrier cost on small per-layer regions).
-     * Hybrid policy: wide during multi-token chunks, narrow for C==1. */
-    int th_pref=getenv("L3_THREADS_PREF")?atoi(getenv("L3_THREADS_PREF")):
-                (getenv("L3_THREADS")?atoi(getenv("L3_THREADS")):omp_get_max_threads());
-    int th_dec =getenv("L3_THREADS_DEC")?atoi(getenv("L3_THREADS_DEC")):8;
+     * Hybrid policy: wide during multi-token chunks, narrow for C==1.
+     *
+     * Thread contract (Wave-1 closeout):
+     *   th_pref = L3_THREADS_PREF > L3_THREADS > omp_get_max_threads()
+     *   th_dec  = L3_THREADS_DEC  > L3_THREADS > min(8, max_threads)
+     * min(8,...) keeps hosts with fewer useful workers from being
+     * oversubscribed by a hardcoded 8; the 8 itself is the MEASURED DELL
+     * DEFAULT KNEE (i7-11700), not a universal architecture constant.
+     * Set-but-invalid values (<=0) are rejected explicitly instead of being
+     * silently clamped or ignored. */
+    int omp_maxt=omp_get_max_threads();
+    int th_pref=l3_thread_count("L3_THREADS_PREF");
+    if(th_pref<=0) th_pref=l3_thread_count("L3_THREADS");
+    if(th_pref<=0) th_pref=omp_maxt;
+    int th_dec =l3_thread_count("L3_THREADS_DEC");
+    if(th_dec<=0)  th_dec=l3_thread_count("L3_THREADS");
+    if(th_dec<=0)  th_dec=(8<omp_maxt?8:omp_maxt);
     omp_set_dynamic(0);
     omp_set_num_threads(th_pref);
     g_th_dec=th_dec;
     g_th_wide=th_pref;
+    fprintf(stderr,"[L3] threads: prefill=%d decode=%d (max=%d)\n",th_pref,th_dec,omp_maxt);
 #endif
     int cap=65536, *ids=malloc((size_t)cap*sizeof(int)), np=0;
     if(m->c.bos>=0) ids[np++]=m->c.bos;

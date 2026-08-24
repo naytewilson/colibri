@@ -214,7 +214,7 @@ else
 PYTHON    ?= python3
 endif
 CUDA_OBJ  =
-TEST_BINS = tests/test_json$(EXE) tests/test_st$(EXE) tests/test_st_mirror$(EXE) tests/test_st_pread$(EXE) tests/test_tier$(EXE) tests/test_grammar$(EXE) tests/test_schema_gbnf$(EXE) tests/test_decode_batch$(EXE) tests/test_idot$(EXE) tests/test_i4_grouped$(EXE) tests/test_stops$(EXE) tests/test_topp$(EXE) tests/test_sample_nan$(EXE) tests/test_temp_env$(EXE) tests/test_tok_o200k$(EXE) tests/test_kv_alloc$(EXE) tests/test_int3$(EXE) tests/test_int3_load$(EXE) tests/test_i4_acc512$(EXE) tests/test_compat_direct$(EXE) tests/test_dsa_select$(EXE) tests/test_logit_nan$(EXE) tests/test_router_nan$(EXE) tests/test_pipe_block$(EXE) tests/test_e8_kernel$(EXE) tests/test_rans$(EXE) tests/test_corpus_draft$(EXE)
+TEST_BINS = tests/test_json$(EXE) tests/test_st$(EXE) tests/test_st_dtypes$(EXE) tests/test_st_mirror$(EXE) tests/test_st_pread$(EXE) tests/test_tier$(EXE) tests/test_grammar$(EXE) tests/test_schema_gbnf$(EXE) tests/test_decode_batch$(EXE) tests/test_idot$(EXE) tests/test_i4_grouped$(EXE) tests/test_stops$(EXE) tests/test_topp$(EXE) tests/test_sample_nan$(EXE) tests/test_temp_env$(EXE) tests/test_tok_o200k$(EXE) tests/test_kv_alloc$(EXE) tests/test_int3$(EXE) tests/test_int3_load$(EXE) tests/test_i4_acc512$(EXE) tests/test_compat_direct$(EXE) tests/test_dsa_select$(EXE) tests/test_logit_nan$(EXE) tests/test_router_nan$(EXE) tests/test_pipe_block$(EXE) tests/test_e8_kernel$(EXE) tests/test_rans$(EXE) tests/test_corpus_draft$(EXE)
 ifneq (,$(LINUX))
 TEST_BINS += tests/test_uring$(EXE)
 endif
@@ -422,6 +422,12 @@ ling3$(EXE): ling3.c st.h json.h tok.h tok_unicode.h tok_unicode_o200k.h compat.
 ling3_check$(EXE): ling3_check.c json.h
 	$(CC) $(CFLAGS) ling3_check.c -o ling3_check$(EXE) $(LDFLAGS)
 
+# l3_tracecmp: kernel A/B discriminator for two ling3 L3_TRACE dumps (e.g.
+# scalar vs AVX2 expert matvec, L3_NO_AVX2 fallback). Needs trace files, so it
+# is NOT a test gate -- build on demand: make l3_tracecmp
+l3_tracecmp$(EXE): l3_tracecmp.c
+	$(CC) $(CFLAGS) l3_tracecmp.c -o l3_tracecmp$(EXE) -lm
+
 # Use a baseline that matches the compiler target. macOS already targets a
 # portable baseline when ARCH is empty; forcing the x86 value there breaks
 # Apple Silicon. Unknown targets use native rather than an invalid x86 flag.
@@ -453,6 +459,9 @@ tests/test_st_pread$(EXE): tests/test_st_pread.c st.h json.h compat.h
 	$(CC) $(CFLAGS) -DST_PREAD_CHUNK=7 $< -o $@ $(LDFLAGS)
 
 tests/test_st$(EXE): tests/test_st.c st.h json.h compat.h
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+
+tests/test_st_dtypes$(EXE): tests/test_st_dtypes.c st.h json.h compat.h
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
 tests/test_st_mirror$(EXE): tests/test_st_mirror.c st.h json.h compat.h
