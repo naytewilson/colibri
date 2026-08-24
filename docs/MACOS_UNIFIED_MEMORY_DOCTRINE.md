@@ -66,11 +66,44 @@ But for latency-sensitive inference, classify **behavior**, not ideology:
 
 Do not call a model resident-fit merely because macOS prevented OOM by compressing or swapping it.
 
-## 5. Admission decision for a model/runtime configuration
+## 5. Project swap-headroom admission law
 
-Prefer a **measured pressure envelope** over a fixed Windows-style free-RAM threshold.
+For the current ANVIL / Colibri / ANE Mac campaigns, **internal-disk free space is an independent preflight gate because it is the practical headroom for macOS swap and other temporary system allocations under memory pressure.**
 
-For each candidate, test at minimum:
+Established operational rule:
+
+`internal free disk < 50 GB -> block memory-aggressive live runs`
+
+`internal free disk >= 50 GB -> storage/swap admission satisfied; memory health must still be measured during the run`
+
+This 50 GB rule is **not** a RAM-sizing formula and does not imply that macOS will consume 50 GB of swap. It is a conservative campaign admission law derived from the failure mode repeatedly encountered in practice: memory-heavy model/ANE runs become unsafe or non-reproducible when the internal system volume lacks enough room for swap growth and system working headroom.
+
+Do not bypass, lower, or reinterpret this guard merely because:
+
+- Activity Monitor shows nominally available memory;
+- the model fits at launch;
+- compression is currently low;
+- an external volume has ample free space;
+- the expected steady-state RSS appears below physical RAM.
+
+macOS swap is system-managed on the internal/system volume; external model-storage capacity is not a substitute for internal swap headroom.
+
+Conversely, satisfying the 50 GB gate does **not** prove the model/runtime configuration is healthy. It only admits the experiment. Sustained pressure, compression, swap activity, paging, latency, context growth, and accelerator sharing still determine whether the configuration is viable.
+
+If a future campaign has strong repeated evidence supporting a different threshold on a different machine/OS/toolchain, record that as a new platform-specific law with provenance rather than silently weakening this one.
+
+## 6. Admission decision for a model/runtime configuration
+
+Use two separate gates:
+
+### Gate A — storage/swap admission
+
+- require the established project-specific internal-free-space threshold (currently 50 GB on the relevant Mac campaigns);
+- fail closed before a heavy live run if the threshold is not met.
+
+### Gate B — measured unified-memory health
+
+For an admitted candidate, test at minimum:
 
 1. cold launch;
 2. warm steady state;
@@ -84,7 +117,7 @@ Record memory and latency throughout the run, not only at process start or exit.
 
 A candidate is healthy only if its pressure/latency behavior remains bounded and reproducible across the intended workload.
 
-## 6. Suggested evidence classes
+## 7. Suggested evidence classes
 
 ### `APPLE_MEMORY_RESIDENT_HEALTHY`
 
@@ -114,13 +147,21 @@ A candidate is healthy only if its pressure/latency behavior remains bounded and
 - latency collapses or allocation failures occur;
 - memory state is non-reproducible or unsafe for the intended service.
 
-## 7. Dense-Qwen consequence
+### `APPLE_SWAP_HEADROOM_BLOCKED`
+
+- internal free space is below the established campaign admission threshold;
+- live memory-aggressive execution is not admitted regardless of apparent instantaneous RAM headroom;
+- no performance or placement conclusion may be drawn from a skipped live run.
+
+## 8. Dense-Qwen consequence
 
 For dense Qwen on Apple Silicon, prefer this hierarchy:
 
 1. native low-bit **fully resident** execution with sufficient KV/workspace/system headroom;
 2. mostly resident execution with a deliberately measured small spill/window;
 3. out-of-core/windowed execution only when storage arithmetic and measured pressure support it.
+
+Before any heavy dense-Qwen live run, satisfy the project swap-headroom gate first.
 
 Do not set the dense target from parameter count or file size alone.
 
@@ -130,7 +171,7 @@ The real budget includes:
 
 and is validated by the pressure envelope above.
 
-## 8. ANE / Core ML consequence
+## 9. ANE / Core ML consequence
 
 ANE/Core ML campaigns must not assume that accelerator execution means model memory is outside the unified-memory budget.
 
@@ -138,7 +179,9 @@ Where allocator behavior is opaque, label it `UNKNOWN` rather than pretending to
 
 Use process/system memory observations, package/load behavior, repeated execution, and pressure changes as evidence. Avoid inventing hidden ANE memory accounting.
 
-## 9. Cross-platform rule
+The established internal-free-space gate remains in force before memory-heavy live ANE/Core ML experiments because swap/system-volume exhaustion is an execution blocker independent of ANE placement.
+
+## 10. Cross-platform rule
 
 This doctrine applies to macOS / Apple Silicon targets.
 
@@ -148,13 +191,15 @@ Do not universalize macOS heuristics either.
 
 **Platform truth outranks generic RAM folklore.**
 
-## 10. Ox Alpha instruction
+## 11. Ox Alpha instruction
 
 When a Colibri/Qwen/ANE design question involves RAM, residency, cache size, model fit, context headroom, swap, or accelerator memory:
 
 1. identify the target OS/hardware first;
 2. use platform-native memory semantics;
-3. on Apple Silicon, reason from unified memory + measured memory pressure, compression, swap activity, cache behavior, accelerator sharing, and sustained latency;
-4. reject Windows-style `free RAM` budgeting as the sole admission criterion;
-5. distinguish `fits`, `runs`, `resident`, `pressure-stable`, and `fast` as separate claims;
-6. bank the measurements and exact workload used to justify any threshold.
+3. on Apple Silicon, preserve the established 50 GB internal-free-space swap-headroom preflight unless live campaign source truth explicitly supersedes it;
+4. treat that 50 GB threshold as an experiment-admission guard, **not** as a RAM model or prediction of swap use;
+5. after admission, reason from unified memory + measured memory pressure, compression, swap activity, cache behavior, accelerator sharing, and sustained latency;
+6. reject Windows-style `free RAM` budgeting as the sole admission criterion;
+7. distinguish `fits`, `runs`, `resident`, `pressure-stable`, and `fast` as separate claims;
+8. bank the measurements and exact workload used to justify any threshold change.
