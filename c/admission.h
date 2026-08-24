@@ -63,15 +63,19 @@ ColiAdmission *coli_admission_new(ColiExpertStore *store,
 void coli_admission_free(ColiAdmission *adm);
 
 /* One demand acquisition. On success *out holds an exclusive lease
- * (release through the store). Returns 0, COLI_EXPERT_ERR_BUSY (busy and
- * fail-fast or window expired), or a negative store error. */
+ * (release through the store). Returns 0, COLI_EXPERT_ERR_BUSY or
+ * COLI_EXPERT_ERR_SATURATED (both transient: busy/saturated with fail-fast
+ * config, or after the coalescing window expired), or a negative store
+ * error. */
 int coli_admission_acquire(ColiAdmission *adm, const ColiExpertKey *key,
                            ColiExpertView *out);
 
 /* Batch acquisition orchestration: dedupe (first-touch order kept),
  * acquire phase for every unique key, concurrent load+publish of the
  * misses up to max_parallel, join, then lease every requested entry in
- * caller order (duplicates share nothing — each view is its own lease).
+ * caller order. Each successful unique job's already-held lease is
+ * TRANSFERRED to its first caller occurrence; further duplicate entries
+ * take their own fresh lookups (each view is its own independent lease).
  * Returns the number of successfully leased entries. */
 int coli_admission_acquire_batch(ColiAdmission *adm,
                                  const ColiExpertKey *keys, size_t count,

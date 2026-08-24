@@ -135,10 +135,15 @@ int coli_admission_acquire(ColiAdmission *adm, const ColiExpertKey *key,
     a->stats.acquires++;
 
     int rc = acquire_once(a, key, out);
-    if (rc != COLI_EXPERT_ERR_BUSY || a->cfg.wait_busy_ms <= 0) return rc;
+    if ((rc != COLI_EXPERT_ERR_BUSY && rc != COLI_EXPERT_ERR_SATURATED) ||
+        a->cfg.wait_busy_ms <= 0)
+        return rc;
 
-    /* Coalescing window: someone else holds the reservation identity —
-     * poll for their publish instead of duplicating the load. */
+    /* Coalescing window: BUSY means someone else holds the reservation
+     * identity; SATURATED means every slot is RESERVED by other admissions.
+     * Both drain without our involvement (owners publish/abort needing only
+     * the store's inner lock), so poll for progress instead of duplicating
+     * the load or stealing capacity. */
     double deadline =
         a->cfg.wait_busy_max_ms > 0 ? now_ms() + a->cfg.wait_busy_max_ms : 0.0;
     for (;;) {
@@ -274,15 +279,40 @@ int coli_admission_acquire_batch(ColiAdmission *adm,
         free(ranges);
     }
 
-    /* leasing phase: every caller entry gets its own lease in order */
+    /* leasing phase: every caller entry gets its own lease, in caller
+     * order. Ownership is transferred exactly once: the job's leased view
+     * moves to the FIRST caller occurrence (no extra store traffic), and
+     * the transferred internal view is cleared so it cannot be released or
+     * leaked a second time. Later duplicate entries take their own fresh
+     * lookups (each is an independent lease). Skipping this transfer leaks
+     * every unique job's lease inside jobs[] (F1 defect: acquire_batch
+     * hidden lease leak). */
+    unsigned char *transferred = (unsigned char *)calloc((size_t)nuniq, 1);
+    if (!transferred) {
+        /* OOM fallback: release job leases rather than leak them */
+        for (int u = 0; u < nuniq; u++)
+            if (jobs[u].done == 1 && jobs[u].view.lease)
+                coli_expert_release(a->store, &jobs[u].view);
+        free(jobs);
+        free(entry_job);
+        free(uniq_key);
+        return 0;
+    }
     int ok = 0;
     for (size_t i = 0; i < count; i++) {
         int u = entry_job[i];
-        if (jobs[u].done == 1) {
-            if (coli_expert_lookup(a->store, keys[i], &views[i]) == 0) ok++;
+        if (jobs[u].done != 1) continue;
+        if (!transferred[u]) {
+            views[i] = jobs[u].view; /* lease ownership moves to the caller */
+            memset(&jobs[u].view, 0, sizeof(jobs[u].view));
+            transferred[u] = 1;
+            ok++;
+        } else if (coli_expert_lookup(a->store, keys[i], &views[i]) == 0) {
+            ok++;
         }
     }
 
+    free(transferred);
     free(jobs);
     free(entry_job);
     free(uniq_key);

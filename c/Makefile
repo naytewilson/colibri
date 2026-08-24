@@ -1119,6 +1119,9 @@ tests/test_expert_store_registry$(EXE): tests/test_expert_store_registry.c exper
 tests/test_expert_backend_pread$(EXE): tests/test_expert_backend_pread.c expert_backend_pread.c expert_backend_pread.h expert_store.h expert_store_registry.h tensor.h st.h
 	$(CC) $(CFLAGS) tests/test_expert_backend_pread.c expert_backend_pread.c expert_store_registry.c -o $@ $(LDFLAGS)
 
+tests/test_pread_liveness$(EXE): tests/test_pread_liveness.c expert_backend_pread.c expert_backend_pread.h expert_store.h expert_store_registry.c expert_store_registry.h admission.c admission.h tensor.h st.h
+	$(CC) $(CFLAGS) tests/test_pread_liveness.c expert_backend_pread.c expert_store_registry.c admission.c -o $@ $(LDFLAGS)
+
 tests/test_admission$(EXE): tests/test_admission.c admission.c admission.h expert_store.h tensor.h
 	$(CC) $(CFLAGS) tests/test_admission.c admission.c -o $@ $(LDFLAGS)
 
