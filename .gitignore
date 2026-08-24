@@ -20,6 +20,8 @@ c/kimi_k3
 c/kimi_k3.exe
 c/qwen36
 c/qwen36.exe
+c/qwen36_trace_replay
+c/qwen36_policy_sim
 c/test_qwen36_ctx
 c/tools/convert_qwen36_direct_c
 c/tools/verify_int3_converter
