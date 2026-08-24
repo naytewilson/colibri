@@ -2,7 +2,7 @@
 # FORGE F1 promotion gate (builder-side). Verifies the working tree against
 # the frozen baseline and prints a promotion packet. Never mutates deploys.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 BASE=f04359aab31a388cc47d36e96c3ea36400061cb6
 FAIL=0
