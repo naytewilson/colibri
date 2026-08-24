@@ -199,7 +199,7 @@ LM_HEAD INT8 stays OUT of the exact lane until bit-exact representation proof.
 
 Reproduce independently, in order:
 1. build at closeout HEAD on Dell; `make -C c test-c` exit 0 (Linux gates incl. uring);
-2. tracked-binary absence: `git ls-files | grep -E "^c/(ling3|ling3_check)$"` empty; make regenerates;
+2. tracked-binary absence: `git ls-files | grep -E "^c/(ling3|ling3_check|l3_tracecmp)(\.exe)?$"` produces NO output; make regenerates each;
 3. regenerate coherent fixture round via committed tools from repo checkout (no host-path coupling);
 4. adjudicate: router 63/63 @ ≤1e-6 w-diff; layer-0 ≤3e-2; quantify deeper stages per §8 (do NOT expect ultra-tight numbers);
 5. thread-policy matrix (§7, all 7 cases) + default resolution print;
@@ -216,3 +216,30 @@ One unidentified one-time copy event delivered the Mac-built arm64
 timestamp inside the Dell make window). Impact contained: wrong-arch file
 deleted, rebuilt natively (ELF), ALL Dell evidence re-derived from ELF binaries.
 Mechanism unresolved — flagged for Nayte; no sync daemon found on either host.
+
+## 16. SOURCE-TRUTH CORRECTION R1 — tracked comparator binary (post-receipt)
+
+Classification: `TRACKED_BUILD_ARTIFACT_CLEANUP = FALSIFIED_AT_B802F76`.
+
+The closeout report and §10 above claimed the tracked Ling binaries were
+removed. That claim was INCOMPLETE at the closeout HEAD `b802f76`: the compiled
+comparator `c/l3_tracecmp` (Mach-O, blob magic `cffaedfe`) was still tracked.
+Root cause: the closeout commit staged it with `git add -A` BEFORE .gitignore
+covered the new tool, and the closeout census grep only patterned
+ling3/ling3_check. The controller caught this via canonical GitHub fetch before
+independent verification. Correction commit: removes `c/l3_tracecmp` from
+tracking (source `c/l3_tracecmp.c` remains authoritative; the Makefile
+on-demand target `l3_tracecmp$(EXE)` rebuilds it) and extends `.gitignore` with
+`c/l3_tracecmp` / `c/l3_tracecmp.exe`. Post-fix census proof:
+`git ls-files | grep -E '^c/(ling3|ling3_check|l3_tracecmp)(\.exe)?$'`
+produces no output. Regeneration proven clean (`make -C c l3_tracecmp`);
+rebuilt binary untracked/ignored and smoke-validated against the banked
+scalar-vs-AVX2 traces (reproduces 4.27246e-04 @ float 1131842 exactly).
+
+Commit-count correction to the closeout battle report: the pre-correction count
+is **3 commits after bee024b** (`ad016ce`, `65d1bd2`, `b802f76`) — a "4 commits"
+wording in that report was wrong; this hygiene correction makes it 4.
+
+This correction is repository hygiene ONLY. No runtime source, kernel math,
+thread policy, dtype contract, fixture data, benchmark protocol, or model
+artifact changed; all runtime/performance/parity evidence in §§4–8 is unchanged.
