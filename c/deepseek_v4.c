@@ -1435,6 +1435,35 @@ int coli_v4_expert_store_open_planned(
     return coli_deepseek_v4_expert_store_open(
         &automatic, output, error, error_size);
 }
+
+/* ---- Forge F1: DeepSeek adapter for the model-neutral descriptor seam ----
+ * Builds a ColiExpertStoreDescriptor view over this engine's planning state.
+ * The descriptor borrows the engine/config/options pointers (no copies); it
+ * stays valid as long as those objects do. Capacity is left 0: the auto
+ * backend derives its budget from runtime planning, not from callers. The
+ * backend handle fields feed the registry's v2 "auto" thunk. */
+int coli_dsv4_build_descriptor(
+    ColiV4Engine *engine,
+    const ColiDeepSeekV4Config *config,
+    const ColiDeepSeekV4ExpertStoreOptions *options,
+    ColiExpertStoreDescriptor *desc) {
+    if (!desc) return -1;
+    memset(desc, 0, sizeof(*desc));
+    if (!engine || !options || !options->model_dir) {
+        if (desc) { desc->backend_name = NULL; }
+        return -1;
+    }
+    desc->backend_name = "auto";
+    if (config) {
+        desc->n_layers = config->num_hidden_layers;
+        desc->n_experts = config->n_routed_experts;
+    }
+    desc->storage_path = options->model_dir;
+    desc->engine_context = engine;
+    desc->backend_config = (void *)config;
+    desc->backend_options = (void *)options;
+    return 0;
+}
 /* ---- end inlined deepseek_v4_expert_store_auto_v5.c ---- */
 #endif /* COLI_V4_UNIT_EXPERT_STORE_AUTO */
 

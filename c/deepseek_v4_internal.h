@@ -34,6 +34,14 @@
 #define COLI_ST_F8_E8M0 5
 #define COLI_ST_I64 6
 
+/* Forge F1: adapter building a model-neutral expert-store descriptor from
+ * this engine's state (defined in the COLI_V4_UNIT_EXPERT_STORE_AUTO unit).
+ * Zero on success; the descriptor borrows the passed pointers. */
+int coli_dsv4_build_descriptor(ColiV4Engine *engine,
+                               const ColiDeepSeekV4Config *config,
+                               const ColiDeepSeekV4ExpertStoreOptions *options,
+                               ColiExpertStoreDescriptor *desc);
+
 typedef int ColiSafetensorsDType;
 typedef st_tensor ColiSafetensorsTensor;
 typedef shards ColiSafetensorsIndex;
