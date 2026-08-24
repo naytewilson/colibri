@@ -2358,47 +2358,54 @@ static void expert_acquire(Model *m, int layer, int eid, float router_mass, Slot
     }
     /* COALESCE: another admission may hold the reservation identity. Wait
      * for its publish instead of duplicating the load; a published copy is
-     * served as a hit, counted exactly ONCE. */
+     * served as a hit, counted exactly ONCE.
+     * Lock order (F1-LIVE-1 closure): g_xorder_mx is NEVER held across
+     * reserve(). The store op is non-blocking post-fix (full pools return
+     * the transient COLI_EXPERT_ERR_SATURATED instead of waiting), but the
+     * engine keeps it outside the publish mutex so no thread can hold the
+     * lock a publisher needs while waiting for capacity/publication
+     * progress. Every retry rechecks residency under the lock first, then
+     * re-runs the full claim search unlocked. */
+    pthread_mutex_unlock(&g_xorder_mx);
     {
         ColiExpertCoreKey core = coli_expert_core_key(key);
         ColiExpertReservation xres;
         int rc = coli_expert_reserve(m->xstore, &core, &xres);
-        if (rc == COLI_EXPERT_ERR_BUSY) {
-            pthread_mutex_unlock(&g_xorder_mx);
+        if (rc == COLI_EXPERT_ERR_BUSY || rc == COLI_EXPERT_ERR_SATURATED)
             g_demand_coalesce_waits++;
-            for (;;) {
-                sleep_ms(1);
-                pthread_mutex_lock(&g_xorder_mx);
-                if (coli_expert_probe(m->xstore, &key)) {
-                    ColiExpertView v;
-                    if (coli_expert_lookup(m->xstore, key, &v) != 0) {
-                        pthread_mutex_unlock(&g_xorder_mx);
-                        continue;
-                    }
-                    Slot *h = qw_dhandle(m, layer);
-                    derive_slot(m, layer, eid, &v, h);
-                    int hit_slot = (int)v.slot_hint;
-                    coli_expert_release(m->xstore, &v);
-                    qw_count_hit(m, h, mode);
-                    qw_emit_hit(m, layer, eid, h, hit_slot);
-                    *out = h; ar->kind = ACQ_HIT;
+        while (rc == COLI_EXPERT_ERR_BUSY || rc == COLI_EXPERT_ERR_SATURATED) {
+            /* BUSY: an in-flight loader owns the identity and always drains.
+             * SATURATED: every slot is RESERVED by other admissions; their
+             * publish/abort needs only brief store-internal locking, never
+             * our held locks, so the pool makes progress while we poll. */
+            sleep_ms(1);
+            pthread_mutex_lock(&g_xorder_mx);
+            if (coli_expert_probe(m->xstore, &key)) {
+                ColiExpertView v;
+                if (coli_expert_lookup(m->xstore, key, &v) != 0) {
                     pthread_mutex_unlock(&g_xorder_mx);
-                    return;
+                    continue;
                 }
-                rc = coli_expert_reserve(m->xstore, &core, &xres);
-                if (rc == COLI_EXPERT_OK) break;
-                /* BUSY again: keep waiting; identity always drains */
+                Slot *h = qw_dhandle(m, layer);
+                derive_slot(m, layer, eid, &v, h);
+                int hit_slot = (int)v.slot_hint;
+                coli_expert_release(m->xstore, &v);
+                qw_count_hit(m, h, mode);
+                qw_emit_hit(m, layer, eid, h, hit_slot);
+                *out = h; ar->kind = ACQ_HIT;
                 pthread_mutex_unlock(&g_xorder_mx);
+                return;
             }
-        } else if (rc != COLI_EXPERT_OK) {
             pthread_mutex_unlock(&g_xorder_mx);
+            rc = coli_expert_reserve(m->xstore, &core, &xres);
+        }
+        if (rc != COLI_EXPERT_OK) {
             fprintf(stderr, "Error: expert reserve L%d E%d failed (%d)\n",
                     layer, eid, rc);
             exit(1);
         }
         ar->xres = xres;
         ar->has_xres = 1;
-        pthread_mutex_unlock(&g_xorder_mx);
     }
 miss_path:
     /* SPECULATIVE SHADOW SERVE: a completed staging load satisfies this
@@ -3355,11 +3362,15 @@ static void pilot_realload(Model *m, int layer, int eid) {
     if (!m->is_queued[layer * c->n_experts + eid]) { pthread_mutex_unlock(&g_pilot_mx); return; }
     pthread_mutex_unlock(&g_pilot_mx);
 
-    /* Stage A: residency + identity + eviction live in the store. */
+    /* Stage A: residency + identity + eviction live in the store.
+     * Lock order (F1-LIVE-1 closure): g_xorder_mx is never held across
+     * reserve(); the non-blocking store op runs unlocked so a saturated
+     * pool can never starve a publisher that needs this mutex. */
     ColiExpertKey key = {layer, eid};
     pthread_mutex_lock(&g_xorder_mx);
-    if (coli_expert_probe(m->xstore, &key)) {
-        pthread_mutex_unlock(&g_xorder_mx);
+    int resident = coli_expert_probe(m->xstore, &key);
+    pthread_mutex_unlock(&g_xorder_mx);
+    if (resident) {
         pthread_mutex_lock(&g_pilot_mx);
         m->is_queued[layer * c->n_experts + eid] = 0;
         pthread_mutex_unlock(&g_pilot_mx);
@@ -3371,7 +3382,6 @@ static void pilot_realload(Model *m, int layer, int eid) {
     tls_quiet_trace = 0;
     tls_victim_index = -1;
     int rc = coli_expert_reserve(m->xstore, &core, &xres);
-    pthread_mutex_unlock(&g_xorder_mx);
     if (rc == COLI_EXPERT_ERR_BUSY) {
         /* COALESCE: an admission (demand or pilot) is already loading this
          * expert — skip; its publish will make it resident. */
@@ -3382,7 +3392,8 @@ static void pilot_realload(Model *m, int layer, int eid) {
         return;
     }
     if (rc != COLI_EXPERT_OK) {
-        /* all pinned/in-flight or no capacity: drop the speculation */
+        /* saturated pool / all pinned-in-flight / no capacity: speculative
+         * prefetch yields to demand and drops instead of contending */
         pthread_mutex_lock(&g_pilot_mx);
         m->is_queued[layer * c->n_experts + eid] = 0;
         pthread_mutex_unlock(&g_pilot_mx);

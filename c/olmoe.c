@@ -525,26 +525,34 @@ static Slot *olmoe_dhandle(Model *m, int layer) {
     return &m->dh_pool[(size_t)layer * 8 + (rr++ & 7)];
 }
 
-/* ---------- cache expert: ritorna i pesi quantizzati (q+scale) da cache o disco ---------- */
+/* ---------- cache expert: ritorna i pesi quantizzati (q+scale) da cache o disco ----------
+ * Lock order (F1-LIVE-1 closure, shared with qwen36): g_xorder_mx is never
+ * held across reserve(). The store op is non-blocking post-fix — full pools
+ * return the transient COLI_EXPERT_ERR_SATURATED instead of waiting — and
+ * running it outside the publish mutex keeps a saturated pool from starving
+ * the publisher that would drain it. Every retry rechecks residency under
+ * the lock first. */
 static void expert_get(Model *m, int layer, int eid, Slot **out) {
     Cfg *c = &m->c;
     ColiExpertKey key = {layer, eid};
-    pthread_mutex_lock(&g_xorder_mx);
+    Slot *hit = NULL;
     /* HIT: pure probe (no store accounting), then derive from a counted
      * lookup so engine hit counters stay authoritative for this engine. */
+    pthread_mutex_lock(&g_xorder_mx);
     if (coli_expert_probe(m->xstore, &key)) {
         ColiExpertView v;
-        if (coli_expert_lookup(m->xstore, key, &v) != 0) goto miss_path;
-        Slot *h = olmoe_dhandle(m, layer);
-        olmoe_derive_slot(m, layer, eid, &v, h);
-        coli_expert_release(m->xstore, &v);
-        m->hits++;
-        tls_victim_index = -1;
-        pthread_mutex_unlock(&g_xorder_mx);
-        *out = h;
-        return;
+        if (coli_expert_lookup(m->xstore, key, &v) == 0) {
+            Slot *h = olmoe_dhandle(m, layer);
+            olmoe_derive_slot(m, layer, eid, &v, h);
+            coli_expert_release(m->xstore, &v);
+            m->hits++;
+            tls_victim_index = -1;
+            hit = h;
+        }
     }
-miss_path:
+    pthread_mutex_unlock(&g_xorder_mx);
+    if (hit) { *out = hit; return; }
+
     /* MISS -> reserve identity (coalescing comes free with the store's
      * in-flight registry — an upgrade over the old duplicate-load window). */
     m->miss++;
@@ -552,13 +560,19 @@ miss_path:
         ColiExpertCoreKey core = coli_expert_core_key(key);
         ColiExpertReservation xres;
         int rc = coli_expert_reserve(m->xstore, &core, &xres);
-        while (rc == COLI_EXPERT_ERR_BUSY) {
-            pthread_mutex_unlock(&g_xorder_mx);
+        while (rc == COLI_EXPERT_ERR_BUSY || rc == COLI_EXPERT_ERR_SATURATED) {
+            /* BUSY: an in-flight loader owns the identity and always drains.
+             * SATURATED: every slot RESERVED by other admissions; their
+             * publish/abort needs only the store's inner lock, never ours,
+             * so the pool drains while we poll unlocked. */
             sleep_ms(1);
             pthread_mutex_lock(&g_xorder_mx);
             if (coli_expert_probe(m->xstore, &key)) {
                 ColiExpertView v;
-                if (coli_expert_lookup(m->xstore, key, &v) != 0) continue;
+                if (coli_expert_lookup(m->xstore, key, &v) != 0) {
+                    pthread_mutex_unlock(&g_xorder_mx);
+                    continue;
+                }
                 Slot *h = olmoe_dhandle(m, layer);
                 olmoe_derive_slot(m, layer, eid, &v, h);
                 coli_expert_release(m->xstore, &v);
@@ -567,15 +581,14 @@ miss_path:
                 *out = h;
                 return;
             }
+            pthread_mutex_unlock(&g_xorder_mx);
             rc = coli_expert_reserve(m->xstore, &core, &xres);
         }
         if (rc != COLI_EXPERT_OK) {
-            pthread_mutex_unlock(&g_xorder_mx);
             fprintf(stderr, "Error: olmoe expert reserve L%d E%d failed (%d)\n",
                     layer, eid, rc);
             exit(1);
         }
-        pthread_mutex_unlock(&g_xorder_mx);
 
         /* unlocked pread into the reservation's segments */
         if (olmoe_store_load(m->xstore, &core, &xres) != 0) {
@@ -874,42 +887,43 @@ static void pilot_realload(Model *m, int layer, int eid) {
     }
     pthread_mutex_unlock(&g_pilot_mx);
 
-    /* Phase 7: residency + identity live in the store. */
+    /* Phase 7: residency + identity live in the store.
+     * Lock order (F1-LIVE-1 closure): g_xorder_mx is never held across
+     * reserve(); the non-blocking store op runs unlocked so a saturated
+     * pool cannot starve a publisher needing this mutex. */
     ColiExpertKey key = {layer, eid};
+    int resident, drop = 0;
     pthread_mutex_lock(&g_xorder_mx);
-    if (coli_expert_probe(m->xstore, &key)) {
-        pthread_mutex_unlock(&g_xorder_mx);
-        pthread_mutex_lock(&g_pilot_mx);
-        m->is_queued[layer * c->n_experts + eid] = 0;
-        pthread_mutex_unlock(&g_pilot_mx);
-        return;
-    }
+    resident = coli_expert_probe(m->xstore, &key);
     /* LFRU evict guard (engine prefetch policy), evaluated BEFORE claiming:
      * would_evict previews the prospective victim expert without mutating
      * anything, so a dropped speculation leaves the warm resident untouched
      * — the baseline contract. */
-    if (g_pilot_evict_guard && m->freq && m->freq[layer] && m->last_access) {
+    if (!resident && g_pilot_evict_guard && m->freq && m->freq[layer] &&
+        m->last_access) {
         int vid = coli_expert_backend_pread_would_evict(m->xstore, &key);
         if (vid >= 0) {
             uint64_t vs = lfru_score(m->freq[layer][vid],
                                      m->last_access[layer * c->n_experts + vid], m->clock);
             uint64_t cs = lfru_score(m->freq[layer][eid],
                                      m->last_access[layer * c->n_experts + eid], m->clock);
-            if (cs <= vs + (vs >> 2) + (4u << 8)) {
-                pthread_mutex_unlock(&g_xorder_mx);
-                pthread_mutex_lock(&g_pilot_mx);
-                m->is_queued[layer * c->n_experts + eid] = 0;
-                pthread_mutex_unlock(&g_pilot_mx);
-                return; /* drop speculation */
-            }
+            if (cs <= vs + (vs >> 2) + (4u << 8)) drop = 1;
         }
+    }
+    pthread_mutex_unlock(&g_xorder_mx);
+    if (resident || drop) {
+        /* resident: a concurrent admission already loaded it; drop: the LFRU
+         * guard declined to displace its previewed victim */
+        pthread_mutex_lock(&g_pilot_mx);
+        m->is_queued[layer * c->n_experts + eid] = 0;
+        pthread_mutex_unlock(&g_pilot_mx);
+        return;
     }
     ColiExpertCoreKey core = coli_expert_core_key(key);
     ColiExpertReservation xres;
     tls_victim_index = -1;
     tls_quiet = 0;
     int rc = coli_expert_reserve(m->xstore, &core, &xres);
-    pthread_mutex_unlock(&g_xorder_mx);
     if (rc == COLI_EXPERT_ERR_BUSY) {
         /* duplicate speculation: an admission is already loading it */
         pthread_mutex_lock(&g_pilot_mx);
@@ -918,7 +932,8 @@ static void pilot_realload(Model *m, int layer, int eid) {
         return;
     }
     if (rc != COLI_EXPERT_OK) {
-        /* all pinned/in-flight or no capacity: drop the speculation */
+        /* saturated pool / all pinned-in-flight / no capacity: speculative
+         * prefetch yields to demand and drops instead of contending */
         pthread_mutex_lock(&g_pilot_mx);
         m->is_queued[layer * c->n_experts + eid] = 0;
         pthread_mutex_unlock(&g_pilot_mx);
