@@ -155,3 +155,58 @@ Candidate diff f04359a→486f557 touches generic store/admission surfaces (`expe
 - INFERRED: 5/12-vs-ref divergence cause = int8-vs-BF16 regime (supported by #108 historical cross-check; not separately re-proven).
 - FALSIFIED: "no canonical OLMoE model identity recoverable" (identity recovered); "OLMoE real E2E impossible" (executed).
 - UNKNOWN/BLOCKED: historical upstream revision actually used for original ref.json (pre-acquisition pin never recorded).
+
+---
+
+# RERUN ON LANE-A LIVENESS REPAIR — 2026-08-24 (Lane B2)
+
+**Verdict**: `OLMOE_FORGE_REAL_E2E_GATE_REPROVEN_ON_LIVENESS_REPAIR`
+
+## Why full rerun was mandatory
+
+Lane A moved the candidate `486f557…` → **`0b789e06eb6448cd16bf904b23cc66e565f44295`** (5 commits, 13 files), touching exactly the surfaces this receipt's handoff statement flagged for full rerun: `c/expert_backend_pread.c` (F1-LIVE-1 closure: stage-3 victim spin removed → non-blocking claim, new transient `COLI_EXPERT_ERR_SATURATED`, engines poll unlocked with residency recheck), `admission.{c,h}`, `expert_store.h`, and `c/olmoe.c` lock-order rework (`g_xorder_mx` never held across `reserve()`; BUSY/SATURATED retry outside the mutex). Diff scope audited: liveness/lease closure only — no unrelated drift (closure doc + 421-line `tests/test_pread_liveness.c` added in-tree).
+
+## Model packet (Mission B) — intact, not reconverted
+
+All 10 container files rehashed OK on node; manifest sha256 recomputed = `250c563439660ac48904507c82e7844efc1d278dc74428a0a85e0c5c76070736` — exact. Census probe re-run: 15/15 PASS (2195 tensors exact).
+
+## Binaries (Mission C) — rebuilt from source, no reuse
+
+| Engine | Source | Binary sha256 |
+|---|---|---|
+| baseline | f04359a | `a8a051e027fae2998768b2c6d221b5c3fc62cf190f07304ef9485c3a56523687` (**byte-identical to Lane B build → zero toolchain drift**) |
+| repaired candidate | 0b789e0 (HEAD verified exact on node clone) | `2b11a2489b3ee1a4e225cc488fa82ae5c9fc887fa8bdc1af48358d8ec070fb98` |
+
+Compiler: gcc Ubuntu 15.2.0 `-O3 -march=native -fopenmp -pthread` (both).
+
+## Full gate rerun (Mission D) — same frozen contract, no weakening
+
+| Check | Expected | Observed | Verdict |
+|---|---|---|---|
+| baseline repeats ×3 | identical tokens | 3× accepted sequence | PASS |
+| repaired-candidate repeats ×3 | identical tokens | 3× `7785 15 187 187 510 5347 273 253 1986 2077 310 5041` | PASS |
+| differential run1/2/3/cap2/ppl | byte-identical (stripped) | BYTE-IDENTICAL ×5 arms vs rebuilt baseline | PASS |
+| generated sequence | prior accepted | exactly prior accepted | PASS |
+| BF16 ref divergence | regime characteristic | unchanged: 5/12, first divergence gen idx 5 | PASS |
+| TF-NLL anchor | 0.6573 nats/tok · ppl 1.93 | identical both engines | PASS |
+| cap=2 eviction stress | tokens preserved | identical tokens; rep2 hit=10 miss=2038 (real churn through new claim path); RSS 1.98 GB | PASS |
+| clean termination / rc | 0 everywhere | 8/8 runs rc=0, no hang | PASS |
+| RSS cap16 | bounded | load 1.79 GB, peak 3.29 GB | PASS |
+| pbs_destroy lease/reservation reports | zero | zero across all runs | PASS |
+
+## Liveness-specific results (Missions E/F)
+
+- Source audit: reserve() non-blocking post-fix; SATURATED/BUSY retry polls with `g_xorder_mx` RELEASED; residency recheck under lock before every retry; prefetch admission skips on saturation (advisory never contends with demand).
+- Runtime discriminator: cap=2 arm forced 2038 misses through constant reserve→publish→evict cycling on the real model via the repaired path — zero deadlock, zero hang, zero SATURATED fatality (all rc=0).
+- No duplicate physical loads: strace pread64 count 2493 — identical to pre-repair Lane B run at same cap.
+- Accounting: hits/misses identical to baseline (887/1161 @cap16); coalescing covered by in-tree `test_pread_liveness.c`; logical request stream unchanged.
+
+## Same-window performance (Mission G) — OBSERVED only
+
+baseline warm run3 6.31 tok/s (cold 0.31 → 1.98 → 6.31) vs repaired candidate 5.71 / 5.71 / 5.68 tok/s (stable, warm from start of window). Within micro-run noise; correctness and liveness outrank. No performance claim.
+
+## Production mutation check
+
+NONE — candidate branch untouched; docs-only append to this evidence branch, pushed non-force.
+
+Raw evidence: Mac `tmp/olmoe_gate_20260824_raw/b2_rerun/` (runs_b2_rerun/, runs_rep2/, rerun_b2.log).
