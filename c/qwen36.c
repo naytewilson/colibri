@@ -744,7 +744,8 @@ static double g_eg_lock_wait_ms = 0.0, g_eg_lookup_ms = 0.0, g_eg_victim_ms = 0.
  * pointer) can compute the window delta and the acquisitions/token self-check. */
 static uint64_t g_acq_hits = 0, g_acq_miss = 0;
 /* duplicate-admission coalescing diagnostics (PILOT_DUPLICATE_RESIDENCY repair) */
-static long g_demand_coalesce_waits = 0;   /* demand acquisitions that waited on an in-flight load */
+static long g_demand_coalesce_waits = 0;
+static long g_demand_coalesce_timeouts = 0;   /* bounded-wait stale-preload reclamations */   /* demand acquisitions that waited on an in-flight load */
 static long g_pilot_coalesce_skips = 0;    /* pilot loads skipped because an admission was already active */
 static uint64_t g_win_hits0 = 0, g_win_miss0 = 0, g_prefill_acq = 0;
 static int g_rep_layers = 0, g_rep_topk = 0;
@@ -2218,7 +2219,19 @@ static void expert_acquire(Model *m, int layer, int eid, float router_mass, Slot
      * Lock is RELEASED while waiting so the publisher can take it. */
     if (lc->loading[eid] >= 0) {
         g_demand_coalesce_waits++;
+        long cw_iters = 0;
         while (lc->loading[eid] >= 0) {
+            /* BOUNDED WAIT (promotion-wedge remedy): a preload publisher lost
+             * to an address-layout-dependent race must never wedge the
+             * canonical pass. After ~45s reclaim the registry entry and fall
+             * through to a fresh demand load; the orphaned buffer is leaked
+             * deliberately (victim scan skips eid<0) and logged. */
+            if (++cw_iters > 45000) {
+                lc->loading[eid] = -1;
+                g_demand_coalesce_timeouts++;
+                fprintf(stderr, "[acq] stale preload reservation L%d eid=%d reclaimed after ~45s\n", layer, eid);
+                break;
+            }
             pthread_mutex_unlock(&g_pilot_mx);
             sleep_ms(1);
             pthread_mutex_lock(&g_pilot_mx);
@@ -2285,7 +2298,12 @@ static void expert_acquire(Model *m, int layer, int eid, float router_mass, Slot
              * slot (may be pinned, but never one currently being loaded). */
             for (int i = 0; i < lc->n; i++) { if (lc->slots[i].eid < 0) continue; if (lru < 0 || lc->slots[i].used < lc->slots[lru].used) lru = i; }
         }
+        long if_iters = 0;
         while (lru < 0) {
+            /* BOUNDED WAIT (promotion-wedge remedy): never wedge the
+             * canonical pass on a preload publish that lost the layout
+             * race. Expiry breaks to the scratch-lease fallback below. */
+            if (++if_iters > 45000) { lru = -2; break; }
             /* EVERY slot is in flight: each buffer is owned by an unlocked pread
              * in the pilot worker (or a demand load) that will publish into it.
              * The old last resort (lru=0) stole such a slot mid-load — two writers
@@ -2306,6 +2324,24 @@ static void expert_acquire(Model *m, int layer, int eid, float router_mass, Slot
                 if (lc->slots[i].eid < 0) continue;
                 if (lru < 0 || lc->slots[i].used < lc->slots[lru].used) lru = i;
             }
+        }
+        if (lru == -2) {
+            /* SCRATCH-LEASE FALLBACK: bounded wait expired with every slot
+             * stuck in-flight. Serve this demand via a one-shot synchronous
+             * load into a private lease — no LRU interaction, no dependency
+             * on the wedged publishers. Counted as a miss (already done);
+             * INSERT trace slot=-2 marks fallback provenance. */
+            Slot *tmp = calloc(1, sizeof(Slot));
+            if (!tmp) { fprintf(stderr, "OOM acq scratch-lease fallback\n"); exit(1); }
+            slot_ensure_allocated(m, tmp);
+            ExpertLoadResult res;
+            load_expert_merged(m, layer, eid, tmp, 0, &res);
+            tmp->eid = eid; tmp->used = ++m->clock;
+            trace_emit("DEMAND", "INSERT", g_trace_tok, layer, eid,
+                       res.fmt, res.bytes, res.ms, -1, -2);
+            ar->kind = ACQ_HIT; *out = tmp;
+            pthread_mutex_unlock(&g_pilot_mx);
+            return;
         }
         s = &lc->slots[lru]; s->pinned = 0;
         if (_tp) g_eg_victim_ms += tm_now() - _tv0;   /* includes in-flight wait spins */
@@ -3096,6 +3132,7 @@ static void deltanet(Model *m, Layer *l, int layer, float *x, int S, int pos_bas
     free(conv_out); free(q); free(k); free(outv); free(outr); free(kv); free(delta);
 }
 
+static int g_st_on(void){ static int v=-1; if(v<0){ const char *e=getenv("COLI_STEPTRACE"); v=(e&&*e=='1')?1:0; } return v; }
 static float *step(Model *m, const int *ids, int S, int pos_base) {
     Cfg *c = &m->c; int D = c->hidden;
     if (m->resident_mode && m->first_step) m->resident_collecting = 1;
@@ -3150,9 +3187,11 @@ static float *step(Model *m, const int *ids, int S, int pos_base) {
         }
         if (g_pilot >= 1 && S <= 8 && i + 1 < c->n_layers)
             pilot_prefetch(m, i + 1, x, S);
+        if (g_st_on()) fprintf(stderr, "[st] L%d pre-moe t=%.1f\n", i, tm_now());
         for (int s = 0; s < S; s++) rmsnorm_row(nrm + (int64_t)s*D, x + (int64_t)s*D, l->post_ln, D, c->eps);
         _t0 = tm_on() ? tm_now() : 0.0;
         moe(m, l, i, nrm, S, tmp);
+        if (g_st_on()) fprintf(stderr, "[st] L%d post-moe t=%.1f\n", i, tm_now());
         if (tm_on()) tm_add(S, 2, tm_now()-_t0);
         for (int64_t j = 0; j < (int64_t)S*D; j++) x[j] += tmp[j];
         if (lf) fwrite(x + (int64_t)(S-1)*D, sizeof(float), D, lf);
@@ -4126,7 +4165,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[prefillbatch] batch_wall=%.0fms preload_io_sum=%.0fms (sum>>wall => concurrency effective; residual=compute+serial)\n",
                 g_pb_wall_ms, g_pb_io_us / 1000.0);
         fprintf(stderr, "[prefillsplit] rowloop_acq=%.0fms rowcompute=%.0fms\n", g_pb_rowacq_ms, g_pb_rowcompute_ms);
-fprintf(stderr, "Coalesce diagnostics: demand waits=%ld pilot skips=%ld | max loaders per (layer,eid)<=1 by construction (single loading registry)\n",                g_demand_coalesce_waits, g_pilot_coalesce_skips);
+fprintf(stderr, "Coalesce diagnostics: demand waits=%ld timeouts= pilot skips=%ld | max loaders per (layer,eid)<=1 by construction (single loading registry)\n",                g_demand_coalesce_waits, g_pilot_coalesce_skips);
         return 0;
     }
 
@@ -4247,8 +4286,8 @@ fprintf(stderr, "Coalesce diagnostics: demand waits=%ld pilot skips=%ld | max lo
         fprintf(stderr, "Expert cache hit rate (decode window): %.1f%% (hit=%llu miss=%llu)\n",
                 w_tot?100.0*w_hit/w_tot:100.0, (unsigned long long)w_hit, (unsigned long long)w_mis);
     }
-    fprintf(stderr, "Coalesce diagnostics: demand waits=%ld pilot skips=%ld | max loaders per (layer,eid)<=1 by construction (single loading registry)\n",
-            g_demand_coalesce_waits, g_pilot_coalesce_skips);
+    fprintf(stderr, "Coalesce diagnostics: demand waits=%ld timeouts=%ld pilot skips=%ld | max loaders per (layer,eid)<=1 by construction (single loading registry)\n",
+            g_demand_coalesce_waits, g_demand_coalesce_timeouts, g_pilot_coalesce_skips);
     fprintf(stderr, "Speed: %.2f tok/s (%.1fs for %d tokens)\n", n_new/dt, dt, n_new);
     if (spec_depth())
         fprintf(stderr, "[spec] issued=%llu shadow_hits=%llu wasted_replaced=%llu (depth=%d budget=%d)\n",
