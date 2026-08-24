@@ -286,10 +286,59 @@ static void exp_load(Model *m, Exp *e, const char *base, int O, int I){
 }
 
 /* y[r] = sum_c x[c]*(nibble(r,c)-8)*scale(r,c/32), straight from packed words.
- * Scalar reference kernel; vectorized variant lands with the throughput wave. */
+ *
+ * AVX2 path: each 16-byte block holds one 32-group as sequential element
+ * PAIRS (byte j = elements 2j,2j+1). Since a dot product is permutation
+ * invariant, x is split ONCE into even/odd streams so both sides stay
+ * contiguous: nibble-lo pairs against x-even, nibble-hi against x-odd.
+ * Group scales applied per 32-block. Scalar reference kept for non-x86. */
 static void exp_matvec(float *y, const float *x, const Exp *e){
     int O=e->O, ng=e->ng;
     if(e->dense){ matmul(y,x,e->dense,1,e->I,O); return; }
+#if defined(__x86_64__) && defined(__AVX2__) && !defined(L3_NO_AVX2)
+    int I=e->I;
+    /* shared across OMP threads: allocated once per call, negligible vs work */
+    float *xev=aligned_alloc(32,(size_t)I/2*4+32);
+    float *xod=aligned_alloc(32,(size_t)I/2*4+32);
+    if(!xev||!xod){fprintf(stderr,"OOM xsplit\n");exit(1);}
+    for(int c=0;c<I;c+=2){ xev[c>>1]=x[c]; xod[c>>1]=x[c+1]; }
+    const __m256i m4=_mm256_set1_epi8(0x0F);
+    const __m128i m4s=_mm_set1_epi8(0x0F);
+    const __m128i e8=_mm_set1_epi8(8);
+    #pragma omp parallel for schedule(static)
+    for(int r=0;r<O;r++){
+        const uint8_t *pb=(const uint8_t*)(e->packed+(int64_t)r*e->nw);
+        const float *sc=e->scl+(int64_t)r*ng;
+        __m256 accE=_mm256_setzero_ps(), accO=_mm256_setzero_ps();
+        int g=0;
+        for(;g<ng;g++){
+            const uint8_t *blk=pb+(int64_t)g*16;
+            __m128i b=_mm_loadu_si128((const __m128i*)blk);
+            __m128i lo=_mm_sub_epi8(_mm_and_si128(b,m4s),e8);
+            __m128i hi=_mm_sub_epi8(_mm_and_si128(_mm_srli_epi16(b,4),m4s),e8);
+            __m256i l0=_mm256_cvtepi8_epi32(lo);
+            __m256i l1=_mm256_cvtepi8_epi32(_mm_bsrli_si128(lo,8));
+            __m256i h0=_mm256_cvtepi8_epi32(hi);
+            __m256i h1=_mm256_cvtepi8_epi32(_mm_bsrli_si128(hi,8));
+            const float *xe=xev+g*16, *xo=xod+g*16;
+            __m256 pe=_mm256_add_ps(
+                _mm256_mul_ps(_mm256_cvtepi32_ps(l0),_mm256_loadu_ps(xe)),
+                _mm256_mul_ps(_mm256_cvtepi32_ps(l1),_mm256_loadu_ps(xe+8)));
+            __m256 po=_mm256_add_ps(
+                _mm256_mul_ps(_mm256_cvtepi32_ps(h0),_mm256_loadu_ps(xo)),
+                _mm256_mul_ps(_mm256_cvtepi32_ps(h1),_mm256_loadu_ps(xo+8)));
+            __m256 sf=_mm256_set1_ps(sc[g]);
+            accE=_mm256_fmadd_ps(pe,sf,accE);
+            accO=_mm256_fmadd_ps(po,sf,accO);
+        }
+        __m128 s=_mm_add_ps(_mm256_castps256_ps128(accE),_mm256_extractf128_ps(accE,1));
+        s=_mm_add_ps(s,_mm_add_ps(_mm256_castps256_ps128(accO),_mm256_extractf128_ps(accO,1)));
+        s=_mm_add_ps(s,_mm_movehl_ps(s,s));
+        s=_mm_add_ss(s,_mm_shuffle_ps(s,s,1));
+        y[r]=_mm_cvtss_f32(s);
+    }
+    free(xev); free(xod);
+#else
     #pragma omp parallel for schedule(static)
     for(int r=0;r<O;r++){
         const uint32_t *pw=e->packed+(int64_t)r*e->nw;
@@ -308,6 +357,7 @@ static void exp_matvec(float *y, const float *x, const Exp *e){
         }
         y[r]=acc;
     }
+#endif
 }
 
 /* ---------- config ---------- */
@@ -880,6 +930,8 @@ static float *g_x0=NULL; static int g_x0_n=0;
 static float *g_xl[128]={NULL}; static int g_xl_n=0;   /* per-layer injected inputs */
 static float *g_mi[128]={NULL};                        /* per-layer injected MoE inputs */
 static FILE *g_lfp=NULL;
+static int g_th_dec=0;                                 /* decode-width thread policy */
+static int g_th_wide=0;                                /* prefill width */
 static float *step_chunk(Model *m, const int *ids, int pos0, int C){
     Cfg *c=&m->c; int D=c->hidden;
     float *hidden=falloc((int64_t)C*D), *nrm=falloc((int64_t)C*D);
@@ -918,6 +970,12 @@ static float *step_chunk(Model *m, const int *ids, int pos0, int C){
         for(int t=0;t<C;t++) rmsnorm_(nrm+(int64_t)t*D,hidden+(int64_t)t*D,l->in_ln,D,c->eps);
         m->t_norm+=now_s()-tn0;
         double ta0=now_s();
+#ifdef _OPENMP
+        if(g_th_wide>0){
+            if(C==1){ if(g_th_dec>0) omp_set_num_threads(g_th_dec); }
+            else omp_set_num_threads(g_th_wide);
+        }
+#endif
         if(l->mla) mla_forward(m,l,i,nrm,pos0,C,att);
         else       kda_forward(m,l,i,nrm,C,att);
         m->t_attn+=now_s()-ta0;
@@ -1023,8 +1081,16 @@ int main(int argc, char **argv){
         fprintf(stderr,"[L3] MoE-input teacher forcing active on %d layers\n",nmi);
     }
 #ifdef _OPENMP
+    /* measured knee (bench_v1 sweep): prefill scales to all cores, decode
+     * regresses past 8 (OMP barrier cost on small per-layer regions).
+     * Hybrid policy: wide during multi-token chunks, narrow for C==1. */
+    int th_pref=getenv("L3_THREADS_PREF")?atoi(getenv("L3_THREADS_PREF")):
+                (getenv("L3_THREADS")?atoi(getenv("L3_THREADS")):omp_get_max_threads());
+    int th_dec =getenv("L3_THREADS_DEC")?atoi(getenv("L3_THREADS_DEC")):8;
     omp_set_dynamic(0);
-    if(getenv("L3_THREADS")) omp_set_num_threads(atoi(getenv("L3_THREADS")));
+    omp_set_num_threads(th_pref);
+    g_th_dec=th_dec;
+    g_th_wide=th_pref;
 #endif
     int cap=65536, *ids=malloc((size_t)cap*sizeof(int)), np=0;
     if(m->c.bos>=0) ids[np++]=m->c.bos;
