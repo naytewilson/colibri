@@ -33,6 +33,13 @@
 #include <immintrin.h>
 #endif
 
+/* Forge F1 Stage A: shared expert-store seam (live cache) + policy layer */
+#include "expert_backend_pread.h"
+#include "admission.h"
+static void qw_evict_notify(void *ud, int layer, int index, int fmt, long slot);
+static int qw_store_load(void *userdata, const ColiExpertCoreKey *key,
+                         ColiExpertReservation *res);
+
 /* Hard context ceiling: the model's max_position_embeddings. Every buffer that
  * scales with position (KV cache, attention score row) is allocated from max_t,
  * so this is a policy limit, not a buffer limit -- but it is ONE limit, named
@@ -582,7 +589,14 @@ typedef struct {
     float *dn_out;                         /* out_proj [hidden, value_dim] */
 } Layer;
 
-/* ---------- LRU expert cache (int8 / packed int4 / fmt=5 int3 weights + scales) ---------- */
+/* ---------- LRU expert cache (int8 / packed int4 / fmt=5 int3 weights + scales) ----------
+ * Forge F1 Stage A: the LIVE cache (slot table, LRU, pins, in-flight
+ * identity, pread I/O) is owned by the shared pread backend through the
+ * ExpertStore seam. `Slot` survives as a DERIVED compute handle: its typed
+ * pointers alias store-owned segment memory for one acquisition and are
+ * rebuilt from a ColiExpertView on every hit/publish (derive_slot). The
+ * speculative shadow ring keeps engine-local Slot copies with their own
+ * buffers — those still use slot_ensure_format/load_expert_merged below. */
 typedef struct {
     int eid;
     int pinned;
@@ -597,11 +611,6 @@ typedef struct {
     float *gs, *us, *ds;
     uint64_t used;
 } Slot;
-typedef struct { Slot *slots; int n, cap; int16_t *loading; } LCache;
-/* loading[eid] = slot index of the ONE active admission for that expert, -1 none.
- * Set under g_pilot_mx at reservation (s->eid=-1), cleared under g_pilot_mx at
- * publish. Makes in-flight loads visible to both admission paths so a second
- * loader for the same (layer,eid) can coalesce instead of duplicating. */
 
 typedef struct {
     Cfg c;
@@ -610,7 +619,9 @@ typedef struct {
     uint16_t *embed_f16;
     float *embed, *lm_head, *final_norm;
     Layer *L;
-    LCache *cache;          /* [n_layers] */
+    ColiExpertStore *xstore;   /* live expert cache (pread backend, Forge F1) */
+    ColiAdmission *xadmission;/* policy layer over the store (Stage B wires knobs) */
+    int *cache_cap;            /* [n_layers] per-layer capacity (pin budgets, gates) */
     int *active_of;         /* [n_layers] original->active idx (Phase 2: identity for all layers) */
     float **DN_rec;         /* [n_layers] recurrent state S[h]=[kdim,vdim] for DeltaNet layers (NULL for attn) */
     float **DN_conv;        /* [n_layers] conv ring [conv_dim, convk-1] for DeltaNet layers (NULL for attn) */
@@ -627,6 +638,7 @@ typedef struct {
     uint8_t *is_pinned;
     uint8_t *is_queued;
     uint8_t *seen;             /* prefill-collected experts (COLIBRI_RESIDENT) */
+    Slot *dh_pool;             /* [n_layers*16] derived-handle pool (Stage A) */
     int resident_mode;         /* 0 off; 1 pin this-prompt experts (CPU no-evict -> GPU resident) */
     int resident_collecting;   /* prefill in progress, collecting routed experts */
     int first_step;            /* the first step() call is the prefill */
@@ -1584,6 +1596,8 @@ static float *load_t_n(Model *m, const char *name, int64_t want) {
     return p;
 }
 
+static int64_t scale_count_gu(const Cfg *c);
+static int64_t scale_count_d(const Cfg *c);
 static void model_init(Model *m, const char *snap, int cap, int bits) {
     memset(m, 0, sizeof(*m));
     m->quant_bits = bits;
@@ -1679,12 +1693,42 @@ static void model_init(Model *m, const char *snap, int cap, int bits) {
             #undef LD4
         }
     }
-    m->cache = calloc(c->n_layers, sizeof(LCache));
-    for (int i = 0; i < c->n_layers; i++) {
-        m->cache[i].cap = cap;
-        m->cache[i].slots = calloc(cap, sizeof(Slot));
-        m->cache[i].loading = malloc((size_t)c->n_experts * sizeof(int16_t));
-        memset(m->cache[i].loading, 0xFF, (size_t)c->n_experts * sizeof(int16_t));   /* all -1 */
+    /* Forge F1 Stage A: the live expert cache is the shared pread backend.
+     * Same capacity semantics (uniform per-layer cap), same tensor naming,
+     * active_of rides through layer_map. */
+    m->cache_cap = calloc(c->n_layers, sizeof(int));
+    for (int i = 0; i < c->n_layers; i++) m->cache_cap[i] = cap;
+    {
+        char err[256];
+        ColiExpertStoreDescriptor xd;
+        memset(&xd, 0, sizeof(xd));
+        xd.n_layers = c->n_layers;
+        xd.n_experts = c->n_experts;
+        xd.storage_path = getenv("SNAP");
+        xd.layer_map = m->active_of;
+        xd.weights_name_template = "model.layers.%d.mlp.experts.%d.merged_weight";
+        xd.scales_name_template = "model.layers.%d.mlp.experts.%d.qs";
+        xd.drop_pagecache = expert_drop_flag();
+        if (getenv("COLI_FUSED_LOAD") && getenv("COLI_FUSED_LOAD")[0] == '1')
+            xd.fused_read = 1;
+        /* per-layer slot budget from the CLI cap: capacity_bytes derived
+         * from the largest slot class so `cap` slots fit per layer */
+        int64_t ng = (int64_t)c->inter * c->hidden, nd = (int64_t)c->hidden * c->inter;
+        int64_t want_w = ng + ng + nd;
+        int64_t max_wbytes = want_w; /* INT8 upper bound covers all classes */
+        int64_t scale_bytes =
+            (int64_t)(2 * scale_count_gu(c) + scale_count_d(c)) * 4;
+        xd.capacity_bytes = (uint64_t)cap * (uint64_t)(max_wbytes + scale_bytes) *
+                            (uint64_t)c->n_layers;
+        if (coli_expert_backend_pread_open(&xd, &m->xstore, err, sizeof(err)) != 0) {
+            fprintf(stderr, "Error: pread expert store open failed: %s\n", err);
+            exit(1);
+        }
+        coli_expert_backend_pread_set_evict_notify(m->xstore, qw_evict_notify, m);
+        ColiAdmissionConfig acfg;
+        memset(&acfg, 0, sizeof(acfg)); /* default OFF; Stage B wires knobs */
+        m->xadmission = coli_admission_new(
+            m->xstore, qw_store_load, m->xstore, &acfg);
     }
     /* per-layer DeltaNet recurrent + conv state (only for linear_attention layers) */
     m->DN_rec = calloc(c->n_layers, sizeof(float*));
@@ -1997,7 +2041,9 @@ static void req_emit_expert_meta(Model *m) {
  * unlocked pread/unpack phases of several misses concurrently behind
  * COLI_EXPERT_ASYNC=1 without changing routing, bytes or arithmetic. ---- */
 typedef enum { ACQ_HIT = 0, ACQ_LOAD = 1 } AcqKind;
-typedef struct { AcqKind kind; Slot *s; int64_t victim_eid; int mode; } AcqRes;
+typedef struct { AcqKind kind; Slot *s; int64_t victim_eid; int mode;
+                 ColiExpertReservation xres;  /* store identity while loading */
+                 int has_xres; } AcqRes;
 /* acquisition mode: single source of truth for telemetry semantics */
 #define ACQ_MODE_DEMAND  0
 #define ACQ_MODE_PRELOAD 1
@@ -2093,30 +2139,31 @@ static void spec_issue(Model *m, int i, const float *x) {
             if (best < 0) break;
             pick[np++] = best;
         }
-        LCache *lc = &m->cache[j];
-        pthread_mutex_lock(&g_pilot_mx);
-        for (int n = 0; n < np; n++) {
-            int eid = pick[n];
-            int resident = lc->loading[eid] >= 0;
-            if (!resident) for (int t = 0; t < lc->n; t++) if (lc->slots[t].eid == eid) { resident = 1; break; }
-            if (resident) continue;
-            int dup = 0;
-            for (int r = 0; r < SPEC_RING_N; r++)
-                if (spec_ring[r].state && spec_ring[r].layer == j && spec_ring[r].eid == eid) { dup = 1; break; }
-            if (dup) continue;
-            int r = -1;
-            for (int t = 0; t < SPEC_RING_N; t++) { int idx = (spec_cursor + t) % SPEC_RING_N; if (spec_ring[idx].state != 1) { r = idx; break; } } /* steal oldest non-loading */
-            if (r < 0) break; /* ring saturated by in-flight loads */
-            spec_cursor = (r + 1) % SPEC_RING_N;
-            if (spec_ring[r].state == 2) g_spec_wasted++;   /* replaced unread */
-            /* do NOT memset: s keeps its allocated buffers; ensure_format
-             * reallocates when the target format/size differs. */
-            spec_ring[r].s.eid = -1; spec_ring[r].layer = j; spec_ring[r].eid = eid;
-            slot_ensure_allocated(m, &spec_ring[r].s);
-            __atomic_store_n(&spec_ring[r].state, 1, __ATOMIC_RELEASE);
-            g_spec_issued++;
+        {
+            pthread_mutex_lock(&g_pilot_mx);
+            for (int n = 0; n < np; n++) {
+                int eid = pick[n];
+                ColiExpertKey pk = {j, eid};
+                int resident = coli_expert_probe(m->xstore, &pk);
+                if (resident) continue;
+                int dup = 0;
+                for (int r = 0; r < SPEC_RING_N; r++)
+                    if (spec_ring[r].state && spec_ring[r].layer == j && spec_ring[r].eid == eid) { dup = 1; break; }
+                if (dup) continue;
+                int r = -1;
+                for (int t = 0; t < SPEC_RING_N; t++) { int idx = (spec_cursor + t) % SPEC_RING_N; if (spec_ring[idx].state != 1) { r = idx; break; } } /* steal oldest non-loading */
+                if (r < 0) break; /* ring saturated by in-flight loads */
+                spec_cursor = (r + 1) % SPEC_RING_N;
+                if (spec_ring[r].state == 2) g_spec_wasted++;   /* replaced unread */
+                /* do NOT memset: s keeps its allocated buffers; ensure_format
+                 * reallocates when the target format/size differs. */
+                spec_ring[r].s.eid = -1; spec_ring[r].layer = j; spec_ring[r].eid = eid;
+                slot_ensure_allocated(m, &spec_ring[r].s);
+                __atomic_store_n(&spec_ring[r].state, 1, __ATOMIC_RELEASE);
+                g_spec_issued++;
+            }
+            pthread_mutex_unlock(&g_pilot_mx);
         }
-        pthread_mutex_unlock(&g_pilot_mx);
     }
     free(nrm); free(lg);
 }
@@ -2190,12 +2237,98 @@ static int spec_serve(Model *m, int layer, int eid, Slot **out) {
     return 0;
 }
 
+/* ---- Forge F1 Stage A: store-backed acquisition core ----
+ * The live cache lives in the shared pread backend; this section adapts it.
+ * Eviction notifications run on the EVICTING thread inside its own reserve()
+ * call (pick_victim executes under that call), so thread-local capture of
+ * the victim is exact. PRELOAD silences trace/counters (W9: the canonical
+ * per-row pass owns events exactly once). */
+static __thread int32_t tls_victim_index = -1;
+static __thread long tls_victim_slot = -1;
+static __thread const char *tls_evict_class = "DEMAND";
+static __thread int tls_quiet_trace = 0;
+
+/* Trace-order invariant (baseline semantics): every slot-table mutation and
+ * its v3 row share ONE critical section, so the replayed stream is a valid
+ * mutation log. Loads stay OUTSIDE the lock, exactly like the baseline's
+ * acquire/finish split. The store's own lock stays innermost. */
+static pthread_mutex_t g_xorder_mx = PTHREAD_MUTEX_INITIALIZER;
+
+static void qw_evict_notify(void *ud, int layer, int index, int fmt, long slot) {
+    Model *m = (Model *)ud;
+    (void)m;
+    tls_victim_index = index;
+    tls_victim_slot = slot;
+    if (!tls_quiet_trace)
+        trace_emit(tls_evict_class, "EVICT", g_trace_tok, layer, index,
+                   fmt, 0, 0.0, -1, (int)slot);
+}
+
+/* ColiAdmissionLoadFn adapter: measured pread into a reservation. */
+static int qw_store_load(void *userdata, const ColiExpertCoreKey *key,
+                         ColiExpertReservation *res) {
+    return coli_expert_backend_pread_load(userdata, key, res);
+}
+
+/* Build a derived compute handle aliasing store-owned segment memory. */
+static void derive_slot(Model *m, int layer, int eid, const ColiExpertView *v,
+                        Slot *s) {
+    Cfg *c = &m->c;
+    int64_t ng = (int64_t)c->inter * c->hidden;
+    memset(s, 0, sizeof(*s));
+    s->eid = eid;
+    uint8_t *wb = (uint8_t *)v->gate.data;
+    float *sb = (float *)v->gate.scales;
+    int fmt = v->gate.format == COLI_TENSOR_INT3_BLOCK ? 5 :
+              v->gate.format == COLI_TENSOR_INT4_BLOCK ? 4 : 1;
+    if (fmt == 5) {
+        int64_t g_sz = (ng / 64) * 24;
+        s->w3 = wb;
+        s->g3 = wb; s->u3 = wb + g_sz; s->d3 = wb + g_sz + g_sz;
+        s->is_int3 = 1;
+    } else if (fmt == 4) {
+        s->w4 = wb;
+        s->g4 = wb; s->u4 = wb + ng / 2; s->d4 = wb + (ng + ng) / 2;
+        s->is_int4 = 1;
+    } else {
+        s->g = (int8_t *)wb; s->u = s->g + ng; s->d = s->u + ng;
+    }
+    int64_t scgu = scale_count_gu(c);
+    if (sb) { s->gs = sb; s->us = sb + scgu; s->ds = sb + 2 * scgu; }
+    s->pinned = m->is_pinned[layer * c->n_experts + eid];
+    s->used = ++m->clock;
+}
+
+/* Rotating derived-handle pool per layer (demand path needs handles that
+ * outlive the acquire call; 16 >= any realistic per-layer concurrency). */
+static Slot *qw_dhandle(Model *m, int layer) {
+    static __thread int rr = 0;
+    if (!m->dh_pool) m->dh_pool = calloc((size_t)m->c.n_layers * 16, sizeof(Slot));
+    return &m->dh_pool[(size_t)layer * 16 + (rr++ & 15)];
+}
+
+static void qw_count_hit(Model *m, Slot *h, int mode) {
+    if (mode == ACQ_MODE_PRELOAD) return;
+    m->hits++; g_acq_hits++;
+    if (h->is_int3) g_cache_hit_int3++;
+    else if (h->is_int4) g_cache_hit_int4++;
+}
+
+static void qw_emit_hit(Model *m, int layer, int eid, Slot *h, int slot_id) {
+    (void)m;
+    trace_emit("DEMAND", "HIT", g_trace_tok, layer, eid,
+               h->is_int3 ? 3 : (h->is_int4 ? 4 : 8), 0, 0.0, -1, slot_id);
+}
+
 static void expert_acquire(Model *m, int layer, int eid, float router_mass, Slot **out, AcqRes *ar, int mode) {
-    LCache *lc = &m->cache[layer];
     int _tp = tm_on();
     double _tl0 = _tp ? tm_now() : 0;
-    ar->mode = mode;
-    pthread_mutex_lock(&g_pilot_mx);
+    ar->mode = mode; ar->kind = ACQ_HIT; ar->s = NULL; ar->victim_eid = -1;
+    ar->has_xres = 0;
+    tls_victim_index = -1;
+    tls_evict_class = "DEMAND";
+    tls_quiet_trace = (mode == ACQ_MODE_PRELOAD);
+    ColiExpertKey key = {layer, eid};
     /* v4 request event: emitted BEFORE any cache decision — carries intent
      * (who wants which expert, when, with what router mass), never outcomes */
     if (mode == ACQ_MODE_DEMAND && g_req_fp) {
@@ -2205,152 +2338,156 @@ static void expert_acquire(Model *m, int layer, int eid, float router_mass, Slot
         req_emit("R", body_);
     }
     double _tl1 = _tp ? tm_now() : 0;
-    double _ts0 = _tl1;
-    for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) {
-        if (mode != ACQ_MODE_PRELOAD) { m->hits++; g_acq_hits++; } lc->slots[i].used = ++m->clock; *out = &lc->slots[i];
-        if (mode != ACQ_MODE_PRELOAD && (*out)->is_int3) g_cache_hit_int3++;
-        else if (mode != ACQ_MODE_PRELOAD && (*out)->is_int4) g_cache_hit_int4++;
+    /* HIT: pure probe first (no accounting), then counted lookup+derive so
+     * the store stats see the same request stream the engine counters do. */
+    pthread_mutex_lock(&g_xorder_mx);
+    if (coli_expert_probe(m->xstore, &key)) {
+        ColiExpertView v;
+        if (coli_expert_lookup(m->xstore, key, &v) != 0) {
+            pthread_mutex_unlock(&g_xorder_mx);
+            goto miss_path;
+        }
+        Slot *h = qw_dhandle(m, layer);
+        derive_slot(m, layer, eid, &v, h);
+        int hit_slot = (int)v.slot_hint;
+        coli_expert_release(m->xstore, &v);
+        qw_count_hit(m, h, mode);
         if (_tp) { double _tn = tm_now(); g_eg_lock_wait_ms += _tl1 - _tl0; g_eg_lookup_ms += _tn - _tl1; }
-        if (mode != ACQ_MODE_PRELOAD) trace_emit("DEMAND", "HIT", g_trace_tok, layer, eid,
-                   (*out)->is_int3 ? 3 : ((*out)->is_int4 ? 4 : 8), 0, 0.0, -1,
-                   (int)(*out - lc->slots));
-        ar->kind = ACQ_HIT;
-        pthread_mutex_unlock(&g_pilot_mx); return;
+        qw_emit_hit(m, layer, eid, h, hit_slot);
+        *out = h; ar->kind = ACQ_HIT;
+        pthread_mutex_unlock(&g_xorder_mx);
+        return;
     }
-    /* NOTE: miss accounting happens only when we actually proceed to load —
-     * a coalesced acquisition (waited for an in-flight load, then hit the
-     * published copy) must count exactly ONCE, as a hit. */
-    Cfg *c = &m->c; Slot *s;
-    if (_tp) { double _tn = tm_now(); g_eg_lookup_ms += _tn - _ts0; }   /* failed hit scan */
-    /* COALESCE: another admission (pilot worker) may already be loading this
-     * expert. Wait for its publish instead of launching a duplicate load.
-     * Lock is RELEASED while waiting so the publisher can take it. */
-    if (lc->loading[eid] >= 0) {
-        g_demand_coalesce_waits++;
-        while (lc->loading[eid] >= 0) {
-            pthread_mutex_unlock(&g_pilot_mx);
-            sleep_ms(1);
-            pthread_mutex_lock(&g_pilot_mx);
-            for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) {
-                /* the coalesced load published: serve as a resident hit */
-                if (mode != ACQ_MODE_PRELOAD) { m->hits++; g_acq_hits++; } lc->slots[i].used = ++m->clock; *out = &lc->slots[i];
-                if (mode != ACQ_MODE_PRELOAD && (*out)->is_int3) g_cache_hit_int3++;
-                else if (mode != ACQ_MODE_PRELOAD && (*out)->is_int4) g_cache_hit_int4++;
-                if (mode != ACQ_MODE_PRELOAD) trace_emit("DEMAND", "HIT", g_trace_tok, layer, eid,
-                           (*out)->is_int3 ? 3 : ((*out)->is_int4 ? 4 : 8), 0, 0.0, -1, i);
-                ar->kind = ACQ_HIT;
-                pthread_mutex_unlock(&g_pilot_mx); return;
+    /* COALESCE: another admission may hold the reservation identity. Wait
+     * for its publish instead of duplicating the load; a published copy is
+     * served as a hit, counted exactly ONCE. */
+    {
+        ColiExpertCoreKey core = coli_expert_core_key(key);
+        ColiExpertReservation xres;
+        int rc = coli_expert_reserve(m->xstore, &core, &xres);
+        if (rc == COLI_EXPERT_ERR_BUSY) {
+            pthread_mutex_unlock(&g_xorder_mx);
+            g_demand_coalesce_waits++;
+            for (;;) {
+                sleep_ms(1);
+                pthread_mutex_lock(&g_xorder_mx);
+                if (coli_expert_probe(m->xstore, &key)) {
+                    ColiExpertView v;
+                    if (coli_expert_lookup(m->xstore, key, &v) != 0) {
+                        pthread_mutex_unlock(&g_xorder_mx);
+                        continue;
+                    }
+                    Slot *h = qw_dhandle(m, layer);
+                    derive_slot(m, layer, eid, &v, h);
+                    int hit_slot = (int)v.slot_hint;
+                    coli_expert_release(m->xstore, &v);
+                    qw_count_hit(m, h, mode);
+                    qw_emit_hit(m, layer, eid, h, hit_slot);
+                    *out = h; ar->kind = ACQ_HIT;
+                    pthread_mutex_unlock(&g_xorder_mx);
+                    return;
+                }
+                rc = coli_expert_reserve(m->xstore, &core, &xres);
+                if (rc == COLI_EXPERT_OK) break;
+                /* BUSY again: keep waiting; identity always drains */
+                pthread_mutex_unlock(&g_xorder_mx);
             }
-            if (lc->loading[eid] < 0 && lc->n < lc->cap) break;   /* loader vanished without publish (cannot happen today) — recover */
+        } else if (rc != COLI_EXPERT_OK) {
+            pthread_mutex_unlock(&g_xorder_mx);
+            fprintf(stderr, "Error: expert reserve L%d E%d failed (%d)\n",
+                    layer, eid, rc);
+            exit(1);
         }
-        /* re-scan once more after the registry cleared; fall through to a
-         * normal miss only if still absent */
-        for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) {
-            if (mode != ACQ_MODE_PRELOAD) { m->hits++; g_acq_hits++; } lc->slots[i].used = ++m->clock; *out = &lc->slots[i];
-            if (mode != ACQ_MODE_PRELOAD && (*out)->is_int3) g_cache_hit_int3++;
-            else if (mode != ACQ_MODE_PRELOAD && (*out)->is_int4) g_cache_hit_int4++;
-            if (mode != ACQ_MODE_PRELOAD) trace_emit("DEMAND", "HIT", g_trace_tok, layer, eid,
-                       (*out)->is_int3 ? 3 : ((*out)->is_int4 ? 4 : 8), 0, 0.0, -1, i);
-            ar->kind = ACQ_HIT;
-            pthread_mutex_unlock(&g_pilot_mx); return;
-        }
+        ar->xres = xres;
+        ar->has_xres = 1;
+        pthread_mutex_unlock(&g_xorder_mx);
     }
-    /* SPECULATIVE SHADOW SERVE: a completed/landing speculative staging load
-     * satisfies this acquisition without entering the LRU and without NVMe.
-     * Accounted as a hit; trace slot -1 marks shadow provenance. */
+miss_path:
+    /* SPECULATIVE SHADOW SERVE: a completed staging load satisfies this
+     * acquisition without NVMe. Accounted as a hit; slot -1 marks shadow. */
     {
         Slot *ss = NULL;
         if (spec_serve(m, layer, eid, &ss)) {
-            if (mode != ACQ_MODE_PRELOAD) { m->hits++; g_acq_hits++; }
-            if (ss->is_int3) g_cache_hit_int3++;
-            else if (ss->is_int4) g_cache_hit_int4++;
-            if (spec_debug_on())
-                fprintf(stderr, "[specdbg] serve tok=%lld L%d eid=%d slot=%p eid_field=%d i3=%d i4=%d w=%p gs=%p\n",
-                        (long long)g_trace_tok, layer, eid, (void*)ss, ss->eid,
-                        ss->is_int3, ss->is_int4,
-                        ss->is_int3 ? (void*)ss->w3 : (void*)ss->w4, (void*)ss->gs);
-            *out = ss;   /* PROPAGATE: caller computes from the lease copy */
+            if (_tp) { double _tn = tm_now(); g_eg_lock_wait_ms += _tl1 - _tl0; }
+            qw_count_hit(m, ss, mode);
             if (mode != ACQ_MODE_PRELOAD) trace_emit("DEMAND", "HIT", g_trace_tok, layer, eid,
                        ss->is_int3 ? 3 : (ss->is_int4 ? 4 : 8), 0, 0.0, -1, -1);
-            ar->kind = ACQ_HIT;
-            pthread_mutex_unlock(&g_pilot_mx);
+            *out = ss; ar->kind = ACQ_HIT;
             return;
         }
     }
     /* proceeding to a real load: count the miss here (post-coalesce decision) */
     if (mode != ACQ_MODE_PRELOAD) { m->miss++; g_acq_miss++; }
-    int64_t _victim_eid = -1;   /* -1 = free capacity (no eviction) */
-    if (lc->n < lc->cap) { s = &lc->slots[lc->n++]; slot_ensure_allocated(m, s); }
-    else {
-        /* LRU eviction — skip pinned and in-flight (eid==-1) slots */
-        double _tv0 = _tp ? tm_now() : 0;
-        int lru = -1;
-        for (int i = 0; i < lc->n; i++) {
-            if (lc->slots[i].pinned || lc->slots[i].eid < 0) continue;
-            if (lru < 0 || lc->slots[i].used < lc->slots[lru].used) lru = i;
-        }
-        if (lru < 0) {
-            /* All slots are pinned or in-flight; find the oldest non-in-flight
-             * slot (may be pinned, but never one currently being loaded). */
-            for (int i = 0; i < lc->n; i++) { if (lc->slots[i].eid < 0) continue; if (lru < 0 || lc->slots[i].used < lc->slots[lru].used) lru = i; }
-        }
-        while (lru < 0) {
-            /* EVERY slot is in flight: each buffer is owned by an unlocked pread
-             * in the pilot worker (or a demand load) that will publish into it.
-             * The old last resort (lru=0) stole such a slot mid-load — two writers
-             * racing the same slab, then whichever published last decided the
-             * expert id the resident bytes answered to. Wait for a publish instead
-             * and rescan; in-flight always drains because a load either finishes
-             * or the process is already dead in the water.
-             *
-             * Taken verbatim from olmoe.c, which this cache derives from and
-             * where this exact fallback was deleted for exactly this reason.
-             * Reachable whenever cap is smaller than the number of candidates a
-             * layer has in flight — PILOT queues up to 128 per layer — i.e. on
-             * any small-RAM box, and it corrupts silently rather than crashing. */
-            pthread_mutex_unlock(&g_pilot_mx);
-            sleep_ms(1);
-            pthread_mutex_lock(&g_pilot_mx);
-            for (int i = 0; i < lc->n; i++) {
-                if (lc->slots[i].eid < 0) continue;
-                if (lru < 0 || lc->slots[i].used < lc->slots[lru].used) lru = i;
-            }
-        }
-        s = &lc->slots[lru]; s->pinned = 0;
-        if (_tp) g_eg_victim_ms += tm_now() - _tv0;   /* includes in-flight wait spins */
-        _victim_eid = s->eid;   /* evicted expert id (trace) */
-        if (mode != ACQ_MODE_PRELOAD) trace_emit("DEMAND", "EVICT", g_trace_tok, layer, _victim_eid,
-                   s->is_int3 ? 3 : (s->is_int4 ? 4 : 8), 0, 0.0, -1, lru);
-    }
-    s->eid = -1; s->used = ++m->clock;
-    lc->loading[eid] = (int16_t)(s - lc->slots);   /* reserve identity: one loader per (layer,eid) */
-    pthread_mutex_unlock(&g_pilot_mx);
-    ar->kind = ACQ_LOAD; ar->s = s; ar->victim_eid = _victim_eid;
+    ar->kind = ACQ_LOAD;
+    ar->victim_eid = tls_victim_index;
 }
 
 static void expert_finish(Model *m, int layer, int eid, AcqRes *ar, Slot **out) {
-    LCache *lc = &m->cache[layer];
-    Cfg *c = &m->c;
-    Slot *s = ar->s;
     int _tp = tm_on();
     ExpertLoadResult res;
+    memset(&res, 0, sizeof(res));
     double _lio0 = tm_now();
-    load_expert_merged(m, layer, eid, s, (ar->mode == ACQ_MODE_PRELOAD ? 1 : 0), &res);
+    if (!ar->has_xres) { *out = ar->s; return; }
+    {
+        ColiExpertCoreKey ck;
+        ck.layer = layer;
+        ck.role = COLI_EXPERT_ROLE_EXPERT;
+        ck.index = eid;
+        if (qw_store_load(m->xstore, &ck, &ar->xres) != 0) {
+            fprintf(stderr, "Error: expert load failed L%d E%d\n", layer, eid);
+            exit(1);
+        }
+    }
     double _lio1 = tm_now();
+    res.ms = _lio1 - _lio0;
+    /* Publish hands back a lease ONLY on the demand path; preload publishes
+     * silently and re-reads through a counted lookup when verification or
+     * derivation is needed (never release a view we were not given). */
+    ColiExpertView pub;
+    int have_pub = 0;
+    int prc;
+    pthread_mutex_lock(&g_xorder_mx);
+    if (ar->mode == ACQ_MODE_DEMAND) {
+        prc = coli_expert_publish(m->xstore, &ar->xres, &pub);
+        have_pub = (prc == COLI_EXPERT_OK);
+        if (prc != COLI_EXPERT_OK) {
+            pthread_mutex_unlock(&g_xorder_mx);
+            fprintf(stderr, "Error: expert publish failed L%d E%d (%d)\n", layer, eid, prc);
+            exit(1);
+        }
+    } else {
+        prc = coli_expert_publish(m->xstore, &ar->xres, NULL);
+        if (prc != COLI_EXPERT_OK) {
+            pthread_mutex_unlock(&g_xorder_mx);
+            fprintf(stderr, "Error: expert preload publish failed L%d E%d (%d)\n", layer, eid, prc);
+            exit(1);
+        }
+    }
+    if (have_pub) {
+        res.bytes = (int64_t)(pub.gate.data_bytes + pub.gate.scale_bytes);
+        res.fmt = pub.gate.format == COLI_TENSOR_INT3_BLOCK ? 3 :
+                  pub.gate.format == COLI_TENSOR_INT4_BLOCK ? 4 : 8;
+    }
     if (ar->mode == ACQ_MODE_PRELOAD && res.ms > 0)
         __atomic_fetch_add(&g_pb_io_us, (unsigned long long)(res.ms * 1000.0), __ATOMIC_RELAXED);
     if (g_lead_fp && ar->mode == ACQ_MODE_DEMAND) fprintf(g_lead_fp, "M %lld %d %d %.3f %.4f %.4f\n",
                            (long long)g_trace_tok, layer, eid, res.ms, _lio0, _lio1);
-    double _tl2 = _tp ? tm_now() : 0;
-    pthread_mutex_lock(&g_pilot_mx);
-    s->eid = eid; s->pinned = m->is_pinned[layer * c->n_experts + eid]; s->used = ++m->clock;
-    lc->loading[eid] = -1;   /* publish: exactly one resident slot now represents (layer,eid) */
-    if (ar->mode != ACQ_MODE_PRELOAD && s->is_int3) g_cache_miss_int3++;
-    else if (ar->mode != ACQ_MODE_PRELOAD && s->is_int4) g_cache_miss_int4++;
-    if (_tp) g_eg_lock_wait_ms += tm_now() - _tl2;
-    if (ar->mode == ACQ_MODE_DEMAND) trace_emit("DEMAND", "INSERT", g_trace_tok, layer, eid,
-               res.fmt, res.bytes, res.ms, ar->victim_eid, (int)(s - lc->slots));
-    *out = s; pthread_mutex_unlock(&g_pilot_mx);
+    ar->has_xres = 0;
+    if (ar->mode == ACQ_MODE_DEMAND) {
+        Slot *h = qw_dhandle(m, layer);
+        derive_slot(m, layer, eid, &pub, h);
+        if (h->is_int3) g_cache_miss_int3++;
+        else if (h->is_int4) g_cache_miss_int4++;
+        trace_emit("DEMAND", "INSERT", g_trace_tok, layer, eid,
+                   res.fmt, res.bytes, res.ms, ar->victim_eid,
+                   (int)pub.slot_hint);
+        *out = h;
+        coli_expert_release(m->xstore, &pub);
+    } else {
+        *out = NULL;
+    }
+    pthread_mutex_unlock(&g_xorder_mx);
+    (void)_tp;
 }
 
 static void expert_get(Model *m, int layer, int eid, Slot **out, float router_mass) {
@@ -2419,7 +2556,7 @@ static void pin_hot_experts(Model *m) {
         uint64_t layer_total = 0;
         for (int e = 0; e < c->n_experts; e++) layer_total += freq_l[e];
         if (layer_total == 0) continue;
-        int max_pin = m->cache[l].cap - 8; if (max_pin < 4) max_pin = 4;
+        int max_pin = m->cache_cap[l] - 8; if (max_pin < 4) max_pin = 4;
         int hn = is_dynamic ? max_pin : (m->hot_n < c->n_experts ? m->hot_n : c->n_experts);
         if (hn > 256) hn = 256;
         int hot_eids[256], actual_hn = 0;
@@ -2437,12 +2574,16 @@ static void pin_hot_experts(Model *m) {
         for (int k = 0; k < actual_hn; k++) {
             int eid = hot_eids[k];
             m->is_pinned[l * c->n_experts + eid] = 1;
-            LCache *lc = &m->cache[l];
-            int found = 0;
-            pthread_mutex_lock(&g_pilot_mx);
-            for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) { lc->slots[i].pinned = 1; found = 1; break; }
-            pthread_mutex_unlock(&g_pilot_mx);
-            if (!found && g_pilot > 0) {
+            /* Stage A: the store applies pin intent immediately to any
+             * resident copy and records it for future publishes. */
+            ColiExpertCoreKey ck = coli_expert_core_key((ColiExpertKey){l, eid});
+            coli_expert_pin(m->xstore, &ck);
+            int resident = 0;
+            {
+                ColiExpertKey pk = {l, eid};
+                resident = coli_expert_probe(m->xstore, &pk);
+            }
+            if (!resident && g_pilot > 0) {
                 ensure_pilot_worker_started(m);
                 unsigned w = __atomic_load_n(&pilot_w, __ATOMIC_RELAXED);
                 unsigned r = __atomic_load_n(&pilot_r, __ATOMIC_ACQUIRE);
@@ -2471,7 +2612,7 @@ static int apply_resident(Model *m, int quiet) {
     int newly = 0, over = 0;
     for (int l = 0; l < c->n_layers; l++) {
         uint8_t *row = m->seen + (int64_t)l * c->n_experts;
-        int cap = m->cache[l].cap;
+        int cap = m->cache_cap[l];
         int already = 0;
         for (int e = 0; e < c->n_experts; e++) if (m->is_pinned[l * c->n_experts + e]) already++;
         int budget = cap - already;                 /* free pin slots in this layer */
@@ -2482,13 +2623,11 @@ static int apply_resident(Model *m, int quiet) {
             if (m->is_pinned[l * c->n_experts + e]) continue;   /* already pinned */
             if (budget <= 0) { over++; continue; }             /* layer full, skip */
             m->is_pinned[l * c->n_experts + e] = 1;
+            ColiExpertCoreKey ck = coli_expert_core_key((ColiExpertKey){l, e});
+            coli_expert_pin(m->xstore, &ck);   /* store applies to resident copy */
             newly++; budget--;
         }
         if (seen > cap) over += seen - cap;
-        LCache *lc = &m->cache[l];
-        for (int i = 0; i < lc->n; i++)
-            if (lc->slots[i].eid >= 0 && row[lc->slots[i].eid])
-                lc->slots[i].pinned = 1;
     }
     if (!quiet || newly > 0)
         fprintf(stderr, "[RESIDENT] Pinned %d new experts (CPU no-evict -> GPU resident)%s\n",
@@ -2765,7 +2904,7 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
         /* Expert slot acquisition */
         double _t_lk = tm_on() ? tm_now() : 0.0;
         Slot *e_slots[256];
-        if (S == 1 && expert_async_on() && K >= 2 && K <= 8 && m->cache[layer].cap >= 2*K) {
+        if (S == 1 && expert_async_on() && K >= 2 && K <= 8 && m->cache_cap[layer] >= 2*K) {
             /* ASYNC BATCH ACQUISITION: locked acquire phases run up front in
              * the same per-kk order as sequential mode (identical R DEMAND
              * intent stream, hit/miss/coalesce accounting), then the unlocked
@@ -3187,43 +3326,75 @@ static float *step(Model *m, const int *ids, int S, int pos_base) {
 }
 
 static void pilot_realload(Model *m, int layer, int eid) {
-    LCache *lc = &m->cache[layer]; Cfg *c = &m->c;
+    Cfg *c = &m->c;
     pthread_mutex_lock(&g_pilot_mx);
     /* Q event under the cache lock: shares the total order with R/C/P */
     if (!m->is_queued[layer * c->n_experts + eid]) { pthread_mutex_unlock(&g_pilot_mx); return; }
-    for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) { m->is_queued[layer*c->n_experts+eid]=0; pthread_mutex_unlock(&g_pilot_mx); return; }
-    /* COALESCE: an admission (demand or pilot) is already loading this expert —
-     * skip; its publish will make it resident. Never launch a duplicate. */
-    if (lc->loading[eid] >= 0) {
-        m->is_queued[layer*c->n_experts+eid] = 0;
+    pthread_mutex_unlock(&g_pilot_mx);
+
+    /* Stage A: residency + identity + eviction live in the store. */
+    ColiExpertKey key = {layer, eid};
+    pthread_mutex_lock(&g_xorder_mx);
+    if (coli_expert_probe(m->xstore, &key)) {
+        pthread_mutex_unlock(&g_xorder_mx);
+        pthread_mutex_lock(&g_pilot_mx);
+        m->is_queued[layer * c->n_experts + eid] = 0;
+        pthread_mutex_unlock(&g_pilot_mx);
+        return;
+    }
+    ColiExpertCoreKey core = coli_expert_core_key(key);
+    ColiExpertReservation xres;
+    tls_evict_class = "PILOT";
+    tls_quiet_trace = 0;
+    tls_victim_index = -1;
+    int rc = coli_expert_reserve(m->xstore, &core, &xres);
+    pthread_mutex_unlock(&g_xorder_mx);
+    if (rc == COLI_EXPERT_ERR_BUSY) {
+        /* COALESCE: an admission (demand or pilot) is already loading this
+         * expert — skip; its publish will make it resident. */
+        pthread_mutex_lock(&g_pilot_mx);
+        m->is_queued[layer * c->n_experts + eid] = 0;
         g_pilot_coalesce_skips++;
         pthread_mutex_unlock(&g_pilot_mx);
         return;
     }
-    Slot *s;
-    int64_t victim_eid = -1;
-    if (lc->n < lc->cap) { s = &lc->slots[lc->n++]; slot_ensure_allocated(m, s); }
-    else {
-        int lru = -1;
-        for (int i = 0; i < lc->n; i++) { if (lc->slots[i].pinned || lc->slots[i].eid < 0) continue; if (lru < 0 || lc->slots[i].used < lc->slots[lru].used) lru = i; }
-        if (lru < 0) { m->is_queued[layer*c->n_experts+eid]=0; pthread_mutex_unlock(&g_pilot_mx); return; }
-        s = &lc->slots[lru]; s->pinned = 0;
-        victim_eid = s->eid;   /* evicted expert id (trace) */
-        trace_emit("PILOT", "EVICT", -1, layer, victim_eid,
-                   s->is_int3 ? 3 : (s->is_int4 ? 4 : 8), 0, 0.0, -1, lru);
+    if (rc != COLI_EXPERT_OK) {
+        /* all pinned/in-flight or no capacity: drop the speculation */
+        pthread_mutex_lock(&g_pilot_mx);
+        m->is_queued[layer * c->n_experts + eid] = 0;
+        pthread_mutex_unlock(&g_pilot_mx);
+        return;
     }
-    s->eid = -1; s->used = ++m->clock;
-    lc->loading[eid] = (int16_t)(s - lc->slots);   /* reserve identity */
-    pthread_mutex_unlock(&g_pilot_mx);
-    ExpertLoadResult res;
-    load_expert_merged(m, layer, eid, s, 1, &res);
+    int64_t victim_eid = tls_victim_index;   /* captured in our own reserve */
+    double t0 = tm_now();
+    if (qw_store_load(m->xstore, &core, &xres) != 0) {
+        coli_expert_abort(m->xstore, &xres);
+        pthread_mutex_lock(&g_pilot_mx);
+        m->is_queued[layer * c->n_experts + eid] = 0;
+        pthread_mutex_unlock(&g_pilot_mx);
+        return;
+    }
+    double ms = tm_now() - t0;
+    ColiExpertView pub;
+    pthread_mutex_lock(&g_xorder_mx);
+    if (coli_expert_publish(m->xstore, &xres, &pub) != COLI_EXPERT_OK) {
+        pthread_mutex_unlock(&g_xorder_mx);
+        pthread_mutex_lock(&g_pilot_mx);
+        m->is_queued[layer * c->n_experts + eid] = 0;
+        pthread_mutex_unlock(&g_pilot_mx);
+        return;
+    }
+    int64_t bytes = (int64_t)(pub.gate.data_bytes + pub.gate.scale_bytes);
+    int fmt = pub.gate.format == COLI_TENSOR_INT3_BLOCK ? 3 :
+              pub.gate.format == COLI_TENSOR_INT4_BLOCK ? 4 : 8;
+    long pub_slot = pub.slot_hint;
+    coli_expert_release(m->xstore, &pub);
     pthread_mutex_lock(&g_pilot_mx);
-    s->eid = eid; s->pinned = m->is_pinned[layer*c->n_experts+eid]; s->used = ++m->clock;
-    m->is_queued[layer*c->n_experts+eid] = 0;
-    lc->loading[eid] = -1;   /* publish */
-    trace_emit("PILOT", "INSERT", -1, layer, eid, res.fmt, res.bytes, res.ms, victim_eid,
-               (int)(s - lc->slots));
+    m->is_queued[layer * c->n_experts + eid] = 0;
+    trace_emit("PILOT", "INSERT", -1, layer, eid, fmt, bytes, ms, victim_eid,
+               (int)pub_slot);
     pthread_mutex_unlock(&g_pilot_mx);
+    pthread_mutex_unlock(&g_xorder_mx);
 }
 
 static void *pilot_worker(void *arg) {
@@ -3296,7 +3467,6 @@ static void pilot_prefetch(Model *m, int lnext, const float *x, int S) {
              * R3: intent + decisions share ONE g_pilot_mx critical section —
              * the C event is mutex-ordered like every other v4 event. */
             pthread_mutex_lock(&g_pilot_mx);
-            LCache *lc = &m->cache[lnext];
             if (g_req_fp) {
                 char body_[160];
                 snprintf(body_, sizeof(body_),
@@ -3308,7 +3478,10 @@ static void pilot_prefetch(Model *m, int lnext, const float *x, int S) {
                 req_emit("C", body_);
             }
             int found = 0;
-            for (int z = 0; z < lc->n; z++) if (lc->slots[z].eid == eid) { found = 1; break; }
+            {
+                ColiExpertKey pk = {lnext, eid};
+                found = coli_expert_probe(m->xstore, &pk);
+            }
             if (!found) {
                 int gidx = lnext*E + eid;
                 int already_queued = m->is_queued[gidx];
@@ -3435,7 +3608,7 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out) {
                         { char hdr_[192];
                           snprintf(hdr_, sizeof(hdr_),
                                    "qwen36_req_stream v4 cap=%d ep=%d pilot=%s wide=%s omp=%s snap=%s",
-                                   m->cache ? m->cache[0].cap : 0,
+                                   m->cache_cap ? m->cache_cap[0] : 0,
                                    expert_parallel_on(), getenv("PILOT") ? getenv("PILOT") : "0",
                                    getenv("COLI_WIDE") ? getenv("COLI_WIDE") : "-",
                                    getenv("OMP_NUM_THREADS") ? getenv("OMP_NUM_THREADS") : "-",
@@ -3869,18 +4042,28 @@ static void print_exact_memory_accounting(Model *m) {
 
     uint64_t fixed_post_quant_bytes = embed_bytes + unreg_f32_bytes + qdw_int8_bytes + qdw_scale_bytes + dn_state_bytes;
 
+    /* Stage A: slot/format composition comes from the store's emeta scan
+     * (container-level truth) and live byte counts from its stats. */
     int total_int3_slots = 0;
     int total_int4_slots = 0;
     int total_int8_slots = 0;
-    for (int l = 0; l < c->n_layers; l++) {
-        for (int s = 0; s < m->cache[l].n; s++) {
-            if (m->cache[l].slots[s].is_int3) total_int3_slots++;
-            else if (m->cache[l].slots[s].is_int4) total_int4_slots++;
-            else total_int8_slots++;
-        }
+    {
+        int cf = container_fmt(m);
+        for (int l = 0; l < c->n_layers; l++)
+            for (int e = 0; e < c->n_experts; e++) {
+                int fe = cf ? cf : expert_fmt(m, l, e);
+                if (fe == 5) total_int3_slots++;
+                else if (fe == 4) total_int4_slots++;
+                else total_int8_slots++;
+            }
     }
     uint64_t total_allocated_slots = total_int3_slots + total_int4_slots + total_int8_slots;
-    uint64_t allocated_expert_bytes = 0; for (int l = 0; l < c->n_layers; l++) for (int s = 0; s < m->cache[l].n; s++) allocated_expert_bytes += m->cache[l].slots[s].allocated_weight_bytes; int64_t _want_s = 2 * scale_count_gu(&m->c) + scale_count_d(&m->c); allocated_expert_bytes += (uint64_t)_want_s * 4 * (total_int3_slots + total_int4_slots);
+    uint64_t allocated_expert_bytes = 0;
+    {
+        ColiExpertStoreStats xs;
+        m->xstore->ops->stats(m->xstore, &xs);
+        allocated_expert_bytes = xs.resident_bytes;
+    }
 
     fprintf(stderr, "\n=======================================================\n");
     fprintf(stderr, "=== EXACT LIVE MEMORY ACCOUNTING (QWEN3.6-35B-A3B) ===\n");
@@ -3920,22 +4103,11 @@ static void print_exact_memory_accounting(Model *m) {
 static void probe_touch_all_cache_slots(Model *m) {
     Cfg *c = &m->c;
     int fmt = container_fmt(m);
-    int64_t ng = (int64_t)c->inter * c->hidden, nd = (int64_t)c->hidden * c->inter;
-    int64_t want_w = ng + ng + nd;
-    int64_t want_s = 2 * scale_count_gu(c) + scale_count_d(c);
-
     fprintf(stderr, "[PROBE] Pre-allocating and touching all %d slots (%d layers x %d cap, fmt=%d)...\n",
-            c->n_layers * m->cache[0].cap, c->n_layers, m->cache[0].cap, fmt);
-    for (int l = 0; l < c->n_layers; l++) {
-        for (int s = 0; s < m->cache[l].cap; s++) {
-            Slot *slot = &m->cache[l].slots[s];
-            slot_ensure_allocated(m, slot);
-            if (slot->w3) memset(slot->w3, 0x55, (size_t)((want_w / 64) * 24));
-            else if (slot->w4) memset(slot->w4, 0x55, (size_t)(want_w / 2));
-            else if (slot->g) memset(slot->g, 1, (size_t)want_w);
-            if (slot->gs) memset(slot->gs, 0, (size_t)want_s * sizeof(float));
-        }
-        m->cache[l].n = m->cache[l].cap;
+            c->n_layers * m->cache_cap[0], c->n_layers, m->cache_cap[0], fmt);
+    if (coli_expert_backend_pread_prewarm(m->xstore) != 0) {
+        fprintf(stderr, "Error: prewarm failed\n");
+        exit(1);
     }
     mem_checkpoint("PROBE_COMMITTED", "all cache slots allocated and touched in RAM");
 }

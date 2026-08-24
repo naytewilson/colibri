@@ -1465,6 +1465,33 @@ int coli_dsv4_build_descriptor(
     return 0;
 }
 /* ---- end inlined deepseek_v4_expert_store_auto_v5.c ---- */
+
+/* Forge F1: register the built-in auto backend under BOTH interfaces at
+ * static-link time (the registry module itself is engine-free). */
+static int coli_dsv4_auto_open_descriptor(const ColiExpertStoreDescriptor *desc,
+                                          ColiExpertStore **output,
+                                          char *error, size_t error_size) {
+    if (!desc || !desc->engine_context || !desc->backend_options) {
+        if (error && error_size)
+            snprintf(error, error_size,
+                     "auto expert store requires descriptor handles "
+                     "(engine_context/backend_options); use "
+                     "coli_dsv4_build_descriptor to build them");
+        return -1;
+    }
+    return coli_v4_expert_store_open_planned(
+        (ColiV4Engine *)desc->engine_context,
+        (const ColiDeepSeekV4Config *)desc->backend_config,
+        (const ColiDeepSeekV4ExpertStoreOptions *)desc->backend_options,
+        output, error, error_size);
+}
+__attribute__((constructor))
+static void coli_register_dsv4_auto_backend(void) {
+    coli_expert_store_backend_register("auto",
+                                       coli_v4_expert_store_open_planned);
+    coli_expert_store_backend_register_v2("auto",
+                                          coli_dsv4_auto_open_descriptor);
+}
 #endif /* COLI_V4_UNIT_EXPERT_STORE_AUTO */
 
 #ifdef COLI_V4_UNIT_MATH

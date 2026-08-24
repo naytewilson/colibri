@@ -883,8 +883,8 @@ olmoe$(EXE): olmoe.c st.h json.h compat.h sample.h tok.h tok_unicode.h tok_unico
 # linking -lcudart only made `make qwen36 CUDA=1` depend on a toolkit it
 # never calls. Same shape as olmoe. (The CUDA expert tier is #713, which
 # adds its own sources and takes the CUDA flags back.)
-qwen36$(EXE): qwen36.c st.h json.h compat.h
-	$(CC) $(NOCUDA_CFLAGS) qwen36.c -o qwen36$(EXE) $(NOCUDA_LDFLAGS)
+qwen36$(EXE): qwen36.c st.h json.h compat.h expert_backend_pread.c expert_backend_pread.h admission.c admission.h expert_store.h expert_store_registry.h tensor.h
+	$(CC) $(NOCUDA_CFLAGS) qwen36.c expert_backend_pread.c admission.c expert_store_registry.c -o qwen36$(EXE) $(NOCUDA_LDFLAGS)
 
 # Offline replay gate for the MoE admission trace (no runtime deps, no model).
 qwen36_trace_replay$(EXE): qwen36_trace_replay.c
@@ -900,8 +900,8 @@ qwen36_policy_sim$(EXE): qwen36_policy_sim.c
 tests/test_qwen36_i4_kernel$(EXE): tests/test_qwen36_i4_kernel.c
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
-tests/test_qwen36_ctx$(EXE): tests/test_qwen36_ctx.c qwen36.c st.h json.h compat.h
-	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+tests/test_qwen36_ctx$(EXE): tests/test_qwen36_ctx.c qwen36.c st.h json.h compat.h expert_backend_pread.c expert_backend_pread.h admission.c admission.h expert_store.h expert_store_registry.h tensor.h
+	$(CC) $(CFLAGS) $< expert_backend_pread.c admission.c expert_store_registry.c -o $@ $(LDFLAGS)
 
 inkling$(EXE): inkling.c st.h json.h compat.h $(INK_CUDA_OBJ) $(METAL_OBJ)
 	$(CC) $(CFLAGS) inkling.c $(INK_CUDA_OBJ) $(METAL_OBJ) -o inkling$(EXE) $(LDFLAGS)
@@ -1118,6 +1118,12 @@ tests/test_expert_store_registry$(EXE): tests/test_expert_store_registry.c exper
 
 tests/test_expert_backend_pread$(EXE): tests/test_expert_backend_pread.c expert_backend_pread.c expert_backend_pread.h expert_store.h expert_store_registry.h tensor.h st.h
 	$(CC) $(CFLAGS) tests/test_expert_backend_pread.c expert_backend_pread.c expert_store_registry.c -o $@ $(LDFLAGS)
+
+tests/test_admission$(EXE): tests/test_admission.c admission.c admission.h expert_store.h tensor.h
+	$(CC) $(CFLAGS) tests/test_admission.c admission.c -o $@ $(LDFLAGS)
+
+tests/test_expert_telemetry$(EXE): tests/test_expert_telemetry.c expert_telemetry.h
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
 tests/test_native_quant$(EXE): tests/test_native_quant.c deepseek_v4.c native_quant.h tensor.h quant.h
 	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_NATIVE_QUANT deepseek_v4.c $< -o $@ $(LDFLAGS)

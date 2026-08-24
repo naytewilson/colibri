@@ -49,7 +49,8 @@ static inline void coli_expert_telemetry_v3_emit(
     int layer, int eid, int fmt, long long bytes, double adm_ms,
     long long victim_eid, int slot) {
     if (!t || !t->fp) return;
-    unsigned long long seq = ++t->seq;
+    unsigned long long seq =
+        __atomic_fetch_add(&t->seq, 1ULL, __ATOMIC_RELAXED) + 1;
     fprintf(t->fp,
             "%llu\t%s\t%s\t%lld\t%d\t%d\t%d\t%lld\t%.3f\t%lld\t%d\n",
             seq, cls, event, (long long)tok, layer, eid, fmt,
@@ -64,7 +65,8 @@ static inline void coli_expert_telemetry_v4_emit(ColiExpertTraceV4 *t,
                                                  const char *kind,
                                                  const char *body) {
     if (!t || !t->fp) return;
-    unsigned long long seq = ++t->seq;
+    unsigned long long seq =
+        __atomic_fetch_add(&t->seq, 1ULL, __ATOMIC_RELAXED) + 1;
     fprintf(t->fp, "%llu %s %s\n", seq, kind, body);
 }
 

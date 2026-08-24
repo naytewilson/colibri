@@ -51,6 +51,17 @@ int coli_expert_backend_pread_load(void *userdata,
                                    const ColiExpertCoreKey *key,
                                    ColiExpertReservation *res);
 
+/* Register an eviction callback (called under the store mutation lock with
+ * the displaced expert's store-layer id, trace format id 3|4|8 and physical
+ * slot id). One callback slot; NULL clears. */
+void coli_expert_backend_pread_set_evict_notify(
+    ColiExpertStore *store,
+    void (*cb)(void *ud, int layer, int index, int fmt, long slot), void *ud);
+
+/* Allocate and touch every slot's segment buffers at max size (RSS commit
+ * probe semantics for store-owned memory). Zero on success. */
+int coli_expert_backend_pread_prewarm(ColiExpertStore *store);
+
 /* Register this backend under `name` (constructor-style helper for links
  * that want it selectable through COLI_EXPERT_STORE). */
 int coli_expert_backend_pread_register(const char *name);

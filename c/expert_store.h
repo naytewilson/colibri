@@ -24,6 +24,9 @@ typedef struct {
     ColiTensorView down;
     ColiTensorView up;
     void *lease;
+    /* v1.2 additive: physical slot id of the resident copy this view aliases
+     * (trace-tooling provenance). -1 when the backend does not expose one. */
+    long slot_hint;
 } ColiExpertView;
 
 typedef struct {
@@ -167,6 +170,10 @@ typedef struct {
      * miss is not an error. */
     int (*lookup_batch)(ColiExpertStore *store, const ColiExpertKey *keys,
                         size_t count, ColiExpertView *views);
+    /* --- v1.2 additive: pure residency query (NO accounting side effects;
+     * policy probes must not pollute hit/miss streams). NULL falls back to
+     * lookup+release, which DOES count. Returns 1 resident, 0 not. --- */
+    int (*probe)(ColiExpertStore *store, const ColiExpertKey *key);
 } ColiExpertStoreOps;
 
 struct ColiExpertStore {
@@ -248,6 +255,20 @@ static inline void coli_expert_unpin(ColiExpertStore *store,
 static inline void coli_expert_destroy(ColiExpertStore *store) {
     if (store && store->ops && store->ops->destroy)
         store->ops->destroy(store);
+}
+
+/* v1.2: pure residency probe — no accounting. Falls back to a counted
+ * lookup+release when the backend has no probe (documented pollution). */
+static inline int coli_expert_probe(ColiExpertStore *store,
+                                    const ColiExpertKey *key) {
+    if (!store || !store->ops || !key) return 0;
+    if (store->ops->probe) return store->ops->probe(store, key) ? 1 : 0;
+    ColiExpertView tmp;
+    if (coli_expert_lookup(store, *key, &tmp) == 0) {
+        coli_expert_release(store, &tmp);
+        return 1;
+    }
+    return 0;
 }
 
 static inline int coli_expert_lookup_batch(ColiExpertStore *store,

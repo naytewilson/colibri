@@ -38,6 +38,30 @@ int coli_v4_expert_store_open_planned(ColiV4Engine *engine,
     return -1; /* sentinel: dispatched but did not open */
 }
 
+/* This link has no DeepSeek engine, so register the auto backend here
+ * (mirroring what deepseek_v4.c's constructor does in real binaries). */
+static int test_auto_open_descriptor(const ColiExpertStoreDescriptor *desc,
+                                     ColiExpertStore **out,
+                                     char *error, size_t error_size) {
+    if (!desc || !desc->engine_context || !desc->backend_options) {
+        if (error && error_size)
+            snprintf(error, error_size,
+                     "auto expert store requires descriptor handles");
+        return -1;
+    }
+    return coli_v4_expert_store_open_planned(
+        (ColiV4Engine *)desc->engine_context,
+        (const ColiDeepSeekV4Config *)desc->backend_config,
+        (const ColiDeepSeekV4ExpertStoreOptions *)desc->backend_options,
+        out, error, error_size);
+}
+__attribute__((constructor))
+static void test_register_auto(void) {
+    coli_expert_store_backend_register("auto",
+                                       coli_v4_expert_store_open_planned);
+    coli_expert_store_backend_register_v2("auto", test_auto_open_descriptor);
+}
+
 /* A distinct v2 backend used to observe descriptor pass-through. */
 static int g_v2_called = 0;
 static ColiExpertStoreDescriptor g_v2_seen;

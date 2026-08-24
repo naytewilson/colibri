@@ -26,38 +26,11 @@
 #define COLI_ESR_EXPORT
 #endif
 
-/* The built-in on-disk/mmap backend, defined in the COLI_V4_UNIT_EXPERT_STORE_AUTO
- * amalgamation unit of deepseek_v4.c. Declared here (not via its header, which
- * is a large amalgamated translation unit) so this module stays standalone.
- * Only pointer types appear, so no DeepSeek header is included. */
-int coli_v4_expert_store_open_planned(
-    ColiV4Engine *engine,
-    const ColiDeepSeekV4Config *config,
-    const ColiDeepSeekV4ExpertStoreOptions *options,
-    ColiExpertStore **output,
-    char *error, size_t error_size);
-
-/* v2 adapter for the built-in "auto" backend: recovers the engine/config/
- * options triple from the descriptor's opaque handle fields (filled by the
- * DeepSeek adapter, coli_dsv4_build_descriptor) and reuses the v1 open. */
-static int coli_auto_expert_store_open_descriptor(
-    const ColiExpertStoreDescriptor *desc,
-    ColiExpertStore **output,
-    char *error, size_t error_size) {
-    if (!desc || !desc->engine_context || !desc->backend_options) {
-        if (error && error_size)
-            snprintf(error, error_size,
-                     "auto expert store requires descriptor handles "
-                     "(engine_context/backend_options); use "
-                     "coli_dsv4_build_descriptor to build them");
-        return -1;
-    }
-    return coli_v4_expert_store_open_planned(
-        (ColiV4Engine *)desc->engine_context,
-        (const ColiDeepSeekV4Config *)desc->backend_config,
-        (const ColiDeepSeekV4ExpertStoreOptions *)desc->backend_options,
-        output, error, error_size);
-}
+/* The built-in on-disk/mmap backend lives in the COLI_V4_UNIT_EXPERT_STORE_AUTO
+ * amalgamation unit of deepseek_v4.c and REGISTERS ITSELF from a constructor
+ * there (both interfaces). This module stays engine-free: engines that do not
+ * link DeepSeek (qwen36, olmoe) simply have no "auto" backend and select
+ * whichever backends their binary carries. */
 
 #define COLI_EXPERT_STORE_MAX_BACKENDS 8
 
@@ -185,14 +158,6 @@ int coli_expert_store_open_descriptor(
     return fn(desc, output, error, error_size);
 }
 
-/* Register the built-in on-disk/mmap backend at static-link time under both
- * interfaces so the default (COLI_EXPERT_STORE unset) path is unchanged from
- * before this seam existed, while model-neutral callers can open it through
- * a descriptor. */
-__attribute__((constructor))
-static void coli_register_auto_backend(void) {
-    coli_expert_store_backend_register("auto",
-                                       coli_v4_expert_store_open_planned);
-    coli_expert_store_backend_register_v2("auto",
-                                          coli_auto_expert_store_open_descriptor);
-}
+/* The built-in "auto" backend registers itself from the DeepSeek link (see
+ * deepseek_v4.c, COLI_V4_UNIT_EXPERT_STORE_AUTO): both interfaces under one
+ * name. Engines without DeepSeek carry whichever backends they register. */

@@ -70,6 +70,8 @@ typedef struct {
     int64_t *emeta_s;  /* scales bytes (0 = none) */
     int8_t *emeta_fmt; /* classified format id per key */
     uint8_t *key_pinned; /* [n_layers*n_experts] pin intent map */
+    void (*evict_cb)(void *ud, int layer, int index, int fmt, long slot);
+    void *evict_ud;
     ColiExpertStoreStats stats;
 } PreadBackend;
 
@@ -115,6 +117,15 @@ static ColiTensorFormat pbs_view_format(int fmt) {
     case 3: return COLI_TENSOR_INT3_BLOCK;
     case 4: return COLI_TENSOR_INT4_BLOCK;
     default: return COLI_TENSOR_INT8_BLOCK;
+    }
+}
+
+/* trace-facing format id (3|4|8) from the stored class */
+static int pbs_classify_fmt(int fmt) {
+    switch (fmt) {
+    case 3: return 3;
+    case 4: return 4;
+    default: return 8;
     }
 }
 
@@ -181,6 +192,12 @@ static PreadSlot *pbs_pick_victim(PreadBackend *bk, PreadLayer *pl) {
     }
     PreadSlot *s = &pl->slots[lru];
     bk->stats.resident_bytes -= (uint64_t)(s->wbytes + s->sbytes);
+    if (bk->evict_cb) {
+        int64_t vei = pbs_ei(bk, s->layer, s->index);
+        int vfmt = pbs_classify_fmt(bk->emeta_fmt[vei]);
+        bk->evict_cb(bk->evict_ud, s->layer, s->index, vfmt,
+                     (long)(s - pl->slots));
+    }
     s->state = PBS_FREE;
     s->lease_count = 0;
     s->io_counted = 0;
@@ -248,6 +265,7 @@ static void pbs_fill_view(const PreadBackend *bk, const PreadSlot *s,
         view->gate.scale_bytes = s->sbytes;
     }
     view->lease = (void *)s;
+    view->slot_hint = (long)(s - bk->layers[s->layer].slots);
 }
 
 /* Charge publish-side accounting. Caller holds mx. */
@@ -580,6 +598,17 @@ static int pbs_lookup_batch(ColiExpertStore *store, const ColiExpertKey *keys,
     return ok;
 }
 
+static int pbs_probe(ColiExpertStore *store, const ColiExpertKey *key) {
+    PreadBackend *bk = (PreadBackend *)store;
+    if (!bk || key->layer < 0 || key->layer >= bk->n_layers ||
+        key->expert < 0 || key->expert >= bk->n_experts)
+        return 0;
+    PBS_LOCK(bk);
+    int r = pbs_find_resident(bk, key->layer, key->expert) != NULL;
+    PBS_UNLOCK(bk);
+    return r;
+}
+
 static void pbs_stats(const ColiExpertStore *store, ColiExpertStoreStats *stats) {
     PreadBackend *bk = (PreadBackend *)store;
     if (!stats) return;
@@ -636,7 +665,55 @@ static const ColiExpertStoreOps pbs_ops = {
     pbs_lookup,   pbs_release, pbs_prefetch, pbs_stats, pbs_destroy,
     pbs_reserve,  pbs_publish, pbs_abort,    pbs_pin,   pbs_unpin,
     pbs_lookup_batch,
+    pbs_probe,
 };
+
+/* Eviction notification: the adapter needs victim identity for its v3
+ * INSERT/EVICT trace rows. Called under the store mutation lock, so a
+ * lightweight recorder preserves the total eviction order. */
+void coli_expert_backend_pread_set_evict_notify(
+    ColiExpertStore *store,
+    void (*cb)(void *ud, int layer, int index, int fmt, long slot), void *ud) {
+    PreadBackend *bk = (PreadBackend *)store;
+    PBS_LOCK(bk);
+    bk->evict_cb = cb;
+    bk->evict_ud = ud;
+    PBS_UNLOCK(bk);
+}
+
+/* Pre-commit every slot's segment buffers to max size and touch their
+ * pages (COLIBRI_PROBE_TOUCH_SLOTS semantics for store-owned memory). */
+int coli_expert_backend_pread_prewarm(ColiExpertStore *store) {
+    PreadBackend *bk = (PreadBackend *)store;
+    if (!bk) return -1;
+    int64_t max_w = 0, max_s = 0;
+    PBS_LOCK(bk);
+    for (int64_t i = 0; i < (int64_t)bk->n_layers * bk->n_experts; i++) {
+        if (bk->emeta_w[i] > max_w) max_w = bk->emeta_w[i];
+        if (bk->emeta_s[i] > max_s) max_s = bk->emeta_s[i];
+    }
+    int ok = 1;
+    for (int l = 0; l < bk->n_layers && ok; l++) {
+        PreadLayer *pl = &bk->layers[l];
+        while (pl->n < pl->cap) {
+            pl->slots[pl->n].state = PBS_FREE;
+            pl->n++;
+        }
+        for (int s = 0; s < pl->n; s++) {
+            PreadSlot *ps = &pl->slots[s];
+            if (pbs_seg_reserve(&ps->wbuf, &ps->wcap, (size_t)max_w) != 0 ||
+                (bk->has_scales &&
+                 pbs_seg_reserve(&ps->sbuf, &ps->scap, (size_t)max_s) != 0)) {
+                ok = 0;
+                break;
+            }
+            memset(ps->wbuf, 0x55, (size_t)max_w);
+            if (bk->has_scales) memset(ps->sbuf, 0, (size_t)max_s);
+        }
+    }
+    PBS_UNLOCK(bk);
+    return ok ? 0 : -1;
+}
 
 /* ---- open ---------------------------------------------------------------- */
 
