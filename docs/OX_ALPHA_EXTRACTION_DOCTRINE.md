@@ -84,6 +84,23 @@ Controller review must still separate:
 
 Plans and battle reports should be reviewed for hidden coupling, accidental scope shrinkage, missing negative controls, non-comparable benchmarks, source-truth drift, and claims not backed by artifacts/tests.
 
+## Platform memory doctrine
+
+Any Ox Alpha wave involving RAM, cache capacity, model fit, context headroom, swap, page cache, accelerator memory, or residency must first identify the target operating system and hardware.
+
+For macOS / Apple Silicon, Ox Alpha must follow `docs/MACOS_UNIFIED_MEMORY_DOCTRINE.md`.
+
+In particular:
+
+- do **not** import Windows-style `free RAM` budgeting as the primary admission law;
+- reason from unified memory, memory pressure, compression, active swap/page churn, file-backed/cacheable pages, CPU/GPU/accelerator sharing, context growth, and sustained latency;
+- distinguish `fits`, `runs`, `resident`, `pressure-stable`, and `fast` as separate claims;
+- do not treat compression or swap as zero-cost extra capacity;
+- do not infer hidden ANE/Core ML allocator behavior when it is not measurable;
+- bank the exact workload and measurements used to justify any RAM threshold.
+
+For Linux/Windows nodes, use those platforms' actual VM/cache/swap semantics instead. Platform truth outranks generic RAM folklore.
+
 ## Current Colibri application
 
 For the current runtime Forge, Ox Alpha is authorized to reason at repo scale and should explicitly harvest:
