@@ -814,20 +814,22 @@ static uint64_t g_req_seq = 0;
 static int g_emeta_fmt[QWEN36_REQ_MAX_LAYERS][QWEN36_REQ_MAX_EXPERTS];
 static long long g_emeta_bytes[QWEN36_REQ_MAX_LAYERS][QWEN36_REQ_MAX_EXPERTS];
 static int g_req_meta_ready = 0;
+/* Forge F1 Phase 5: emission routes through the shared engine-agnostic
+ * writers (expert_telemetry.h); byte layout pinned by
+ * tests/test_expert_telemetry.c. */
+#include "expert_telemetry.h"
+static ColiExpertTraceV3 g_tel_v3 = {NULL, 0};
+static ColiExpertTraceV4 g_tel_v4 = {NULL, 0};
 static void req_emit(const char *kind, const char *body) {
-    if (!g_req_fp) return;
-    unsigned long long seq = ++g_req_seq;
-    fprintf(g_req_fp, "%llu %s %s\n", seq, kind, body);
+    coli_expert_telemetry_v4_emit(&g_tel_v4, kind, body);
 }
 static void req_emit_expert_meta(Model *m);   /* defined after st_* usage below */
 static void trace_emit(const char *cls, const char *event, int64_t tok, int layer,
                        int eid, int fmt, int64_t bytes, double adm_ms, int64_t victim_eid,
                        int slot) {
-    if (!g_trace_fp) return;
-    unsigned long long seq = ++g_trace_seq;   /* callers hold g_pilot_mx: total mutation order */
-    fprintf(g_trace_fp, "%llu\t%s\t%s\t%lld\t%d\t%d\t%d\t%lld\t%.3f\t%lld\t%d\n",
-            seq, cls, event, (long long)tok, layer,
-            eid, fmt, (long long)bytes, adm_ms, (long long)victim_eid, slot);
+    /* callers hold g_pilot_mx: total mutation order */
+    coli_expert_telemetry_v3_emit(&g_tel_v3, cls, event, tok, layer, eid,
+                                  fmt, bytes, adm_ms, victim_eid, slot);
 }
 static pthread_mutex_t g_io_stats_mx = PTHREAD_MUTEX_INITIALIZER;
 
@@ -1977,8 +1979,12 @@ static void req_emit_expert_meta(Model *m) {
                     g_emeta_fmt[layer][eid] = fmt; g_emeta_bytes[layer][eid] = bytes;
                 }
             }
-            if (g_req_fp) { unsigned long long s_ = ++g_req_seq;
-                fprintf(g_req_fp, "%llu E %d %d %d %lld\n", s_, layer, eid, fmt, (long long)bytes); }
+            if (g_req_fp) {
+                char body_[128];
+                snprintf(body_, sizeof(body_), "%d %d %d %lld", layer, eid, fmt,
+                         (long long)bytes);
+                req_emit("E", body_);
+            }
         }
     }
     g_req_meta_ready = 1;
@@ -2192,9 +2198,12 @@ static void expert_acquire(Model *m, int layer, int eid, float router_mass, Slot
     pthread_mutex_lock(&g_pilot_mx);
     /* v4 request event: emitted BEFORE any cache decision — carries intent
      * (who wants which expert, when, with what router mass), never outcomes */
-    if (mode == ACQ_MODE_DEMAND && g_req_fp) { unsigned long long s_ = ++g_req_seq;
-        fprintf(g_req_fp, "%llu R DEMAND %lld %d %d %.6f\n",
-                s_, (long long)g_trace_tok, layer, eid, (double)router_mass); }
+    if (mode == ACQ_MODE_DEMAND && g_req_fp) {
+        char body_[96];
+        snprintf(body_, sizeof(body_), "DEMAND %lld %d %d %.6f",
+                 (long long)g_trace_tok, layer, eid, (double)router_mass);
+        req_emit("R", body_);
+    }
     double _tl1 = _tp ? tm_now() : 0;
     double _ts0 = _tl1;
     for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) {
@@ -3288,12 +3297,16 @@ static void pilot_prefetch(Model *m, int lnext, const float *x, int S) {
              * the C event is mutex-ordered like every other v4 event. */
             pthread_mutex_lock(&g_pilot_mx);
             LCache *lc = &m->cache[lnext];
-            if (g_req_fp) { unsigned long long s_ = ++g_req_seq;
-                fprintf(g_req_fp, "%llu C PC %lld %d %d %d %d %.6f %d %lld\n", s_,
-                        (long long)g_trace_tok, lnext, eid,
-                        score_rank[kk], kk, (double)cand_conf[kk],
-                        (g_req_meta_ready ? g_emeta_fmt[lnext][eid] : -1),
-                        (long long)(g_req_meta_ready ? g_emeta_bytes[lnext][eid] : -1)); }
+            if (g_req_fp) {
+                char body_[160];
+                snprintf(body_, sizeof(body_),
+                         "PC %lld %d %d %d %d %.6f %d %lld",
+                         (long long)g_trace_tok, lnext, eid,
+                         score_rank[kk], kk, (double)cand_conf[kk],
+                         (g_req_meta_ready ? g_emeta_fmt[lnext][eid] : -1),
+                         (long long)(g_req_meta_ready ? g_emeta_bytes[lnext][eid] : -1));
+                req_emit("C", body_);
+            }
             int found = 0;
             for (int z = 0; z < lc->n; z++) if (lc->slots[z].eid == eid) { found = 1; break; }
             if (!found) {
@@ -3403,6 +3416,7 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out) {
                 else {
                     setvbuf(g_trace_fp, NULL, _IOFBF, 1 << 20);
                     fprintf(g_trace_fp, "# qwen36_moe_trace v3 rows: seq class(DEMAND|PILOT) event(HIT|EVICT|INSERT) tok(-1=prefill/no-ctx) layer eid fmt(3|4|8) bytes adm_ms victim_eid(-1=none) slot\n");
+                    coli_expert_telemetry_v3_attach(&g_tel_v3, g_trace_fp);
                 }
             }
         }
@@ -3417,13 +3431,16 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out) {
                     if (!g_req_fp) fprintf(stderr, "[req] cannot open %s — request stream disabled\n", rp);
                     else {
                         setvbuf(g_req_fp, NULL, _IOFBF, 1 << 20);
-                        { unsigned long long s_ = ++g_req_seq;
-                          fprintf(g_req_fp, "%llu # qwen36_req_stream v4 cap=%d ep=%d pilot=%s wide=%s omp=%s snap=%s\n",
-                                  s_, m->cache ? m->cache[0].cap : 0,
-                                  expert_parallel_on(), getenv("PILOT") ? getenv("PILOT") : "0",
-                                  getenv("COLI_WIDE") ? getenv("COLI_WIDE") : "-",
-                                  getenv("OMP_NUM_THREADS") ? getenv("OMP_NUM_THREADS") : "-",
-                                  getenv("SNAP") ? getenv("SNAP") : "-"); }
+                        coli_expert_telemetry_v4_attach(&g_tel_v4, g_req_fp);
+                        { char hdr_[192];
+                          snprintf(hdr_, sizeof(hdr_),
+                                   "qwen36_req_stream v4 cap=%d ep=%d pilot=%s wide=%s omp=%s snap=%s",
+                                   m->cache ? m->cache[0].cap : 0,
+                                   expert_parallel_on(), getenv("PILOT") ? getenv("PILOT") : "0",
+                                   getenv("COLI_WIDE") ? getenv("COLI_WIDE") : "-",
+                                   getenv("OMP_NUM_THREADS") ? getenv("OMP_NUM_THREADS") : "-",
+                                   getenv("SNAP") ? getenv("SNAP") : "-");
+                          req_emit("#", hdr_); }
                         req_emit_expert_meta(m);
                     }
                 }
