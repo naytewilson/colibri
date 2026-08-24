@@ -92,12 +92,17 @@ For macOS / Apple Silicon, Ox Alpha must follow `docs/MACOS_UNIFIED_MEMORY_DOCTR
 
 In particular:
 
+- preserve the established **50 GB internal-free-space preflight** as a swap/system-volume headroom admission law for the current Mac campaigns;
+- if internal free disk is below that threshold, fail closed before a memory-aggressive live run rather than arguing from instantaneous RAM availability;
+- treat the 50 GB threshold as an **experiment-admission guard**, not a claim that 50 GB of swap will be used and not a model-RAM sizing formula;
+- after the run is admitted, reason from unified memory, memory pressure, compression, active swap/page churn, file-backed/cacheable pages, CPU/GPU/accelerator sharing, context growth, and sustained latency;
 - do **not** import Windows-style `free RAM` budgeting as the primary admission law;
-- reason from unified memory, memory pressure, compression, active swap/page churn, file-backed/cacheable pages, CPU/GPU/accelerator sharing, context growth, and sustained latency;
 - distinguish `fits`, `runs`, `resident`, `pressure-stable`, and `fast` as separate claims;
 - do not treat compression or swap as zero-cost extra capacity;
 - do not infer hidden ANE/Core ML allocator behavior when it is not measurable;
-- bank the exact workload and measurements used to justify any RAM threshold.
+- bank the exact workload and measurements used to justify any threshold change.
+
+External model-storage space does not substitute for internal macOS swap/system-volume headroom. Satisfying the 50 GB gate also does not prove memory health; it only admits the experiment.
 
 For Linux/Windows nodes, use those platforms' actual VM/cache/swap semantics instead. Platform truth outranks generic RAM folklore.
 
