@@ -745,7 +745,7 @@ static double g_eg_lock_wait_ms = 0.0, g_eg_lookup_ms = 0.0, g_eg_victim_ms = 0.
 static uint64_t g_acq_hits = 0, g_acq_miss = 0;
 /* duplicate-admission coalescing diagnostics (PILOT_DUPLICATE_RESIDENCY repair) */
 static long g_demand_coalesce_waits = 0;
-static long g_demand_coalesce_timeouts = 0;   /* bounded-wait stale-preload reclamations */   /* demand acquisitions that waited on an in-flight load */
+static long g_demand_coalesce_timeouts = 0;   /* bounded-wait stale-preload reclamations */
 static long g_pilot_coalesce_skips = 0;    /* pilot loads skipped because an admission was already active */
 static uint64_t g_win_hits0 = 0, g_win_miss0 = 0, g_prefill_acq = 0;
 static int g_rep_layers = 0, g_rep_topk = 0;
@@ -2628,6 +2628,28 @@ static void attention(Model *m, Layer *l, int layer, float *x, int S, int pos_ba
 /* MoE: grouped top-k routing (+ optional router bias) + shared expert.
  * Mirrors HF Qwen3 MoE: softmax(gate), optional group-limited top-k, normalized
  * weights, sum routed experts, then add the un-gated shared expert. */
+
+/* Finish (load + publish) a wave of reserved pre-pass acquisitions. Shared by
+ * the capacity drain below and the final flush; concurrency shape identical
+ * to the original single flush (W<=8 threads, static schedule). */
+static void pb_finish_batch(Model *m, int layer, int (*bidx)[8],
+                            AcqRes *ars2, Slot **bsl, const int *ld, int nl) {
+    if (nl <= 0) return;
+    if (nl > 1) {
+        int W = nl < 8 ? nl : 8;
+        #pragma omp parallel for schedule(static) num_threads(W)
+        for (int ii = 0; ii < nl; ii++) {
+            int cell = ld[ii];
+            expert_finish(m, layer, bidx[cell / 8][cell % 8], &ars2[cell], &bsl[cell]);
+        }
+    } else {
+        for (int ii = 0; ii < nl; ii++) {
+            int cell = ld[ii];
+            expert_finish(m, layer, bidx[cell / 8][cell % 8], &ars2[cell], &bsl[cell]);
+        }
+    }
+}
+
 static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
     Cfg *c = &m->c; int D = c->hidden, E = c->n_experts, K = c->topk, I = c->inter;
     float *logits = falloc((int64_t)S*E);
@@ -2695,29 +2717,29 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
         for (int s = 0; s < S; s++)
             for (int kk = 0; kk < K; kk++) {
                 if (bidx[s][kk] < 0) continue;
-                int dup = 0;
-                for (int p = 0; p < s; p++)
-                    for (int j = 0; j < K; j++) if (bidx[p][j] == bidx[s][kk]) { dup = 1; break; }
-                if (!dup) for (int j = 0; j < kk; j++) if (bidx[s][j] == bidx[s][kk]) dup = 1;
-                if (dup) continue;
-                Slot *tmpo = NULL;
-                expert_acquire(m, layer, bidx[s][kk], bval[s*8+kk], &tmpo, &ars2[s*8+kk], ACQ_MODE_PRELOAD);
-                if (ars2[s*8+kk].kind == ACQ_LOAD) ld[nl++] = s*8+kk;
-                bsl[s*8+kk] = tmpo;
-            }
-        if (nl > 1) {
-            int W = nl < 8 ? nl : 8;
-            #pragma omp parallel for schedule(static) num_threads(W)
-            for (int ii = 0; ii < nl; ii++) {
-                int cell = ld[ii];
-                expert_finish(m, layer, bidx[cell / 8][cell % 8], &ars2[cell], &bsl[cell]);
-            }
-        } else {
-            for (int ii = 0; ii < nl; ii++) {
-                int cell = ld[ii];
-                expert_finish(m, layer, bidx[cell / 8][cell % 8], &ars2[cell], &bsl[cell]);
-            }
-        }
+        int dup = 0;
+        for (int p = 0; p < s; p++)
+            for (int j = 0; j < K; j++) if (bidx[p][j] == bidx[s][kk]) { dup = 1; break; }
+        if (!dup) for (int j = 0; j < kk; j++) if (bidx[s][j] == bidx[s][kk]) dup = 1;
+        if (dup) continue;
+        /* WEDGE FIX (batch-wedge 20260823): the pre-pass used to reserve ALL
+         * unique misses before finishing ANY. When uniques exceed the layer's
+         * free slots, the reserve phase fills every slot with eid==-1 and its
+         * own eviction scan then finds "every slot in-flight" -- while the
+         * publishers are sequenced strictly after this loop. Single-threaded,
+         * that is a self-deadlock (observed live: n==cap==128, all eids -1).
+         * Drain: publish outstanding reservations BEFORE a reserve that would
+         * need eviction. Selections, order of first-touch reserves within a
+         * wave, events and accounting are unchanged; when uniques fit in the
+         * cache this executes exactly one flush, byte-identical to before. */
+        if (m->cache[layer].n >= m->cache[layer].cap && nl > 0)
+            pb_finish_batch(m, layer, bidx, ars2, bsl, ld, nl), nl = 0;
+        Slot *tmpo = NULL;
+        expert_acquire(m, layer, bidx[s][kk], bval[s*8+kk], &tmpo, &ars2[s*8+kk], ACQ_MODE_PRELOAD);
+        if (ars2[s*8+kk].kind == ACQ_LOAD) ld[nl++] = s*8+kk;
+        bsl[s*8+kk] = tmpo;
+    }
+    pb_finish_batch(m, layer, bidx, ars2, bsl, ld, nl);
         pb_did = 1; pb_bidx = bidx; pb_bval = bval;   /* W3a: row pass consumes these bit-identical selections */
         free(ars2); free(bsl); free(ld); free(scr);
         if (tm_on()) g_pb_wall_ms += tm_now() - _pb0;
@@ -4165,7 +4187,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[prefillbatch] batch_wall=%.0fms preload_io_sum=%.0fms (sum>>wall => concurrency effective; residual=compute+serial)\n",
                 g_pb_wall_ms, g_pb_io_us / 1000.0);
         fprintf(stderr, "[prefillsplit] rowloop_acq=%.0fms rowcompute=%.0fms\n", g_pb_rowacq_ms, g_pb_rowcompute_ms);
-fprintf(stderr, "Coalesce diagnostics: demand waits=%ld timeouts= pilot skips=%ld | max loaders per (layer,eid)<=1 by construction (single loading registry)\n",                g_demand_coalesce_waits, g_pilot_coalesce_skips);
+fprintf(stderr, "Coalesce diagnostics: demand waits=%ld timeouts=%ld pilot skips=%ld | max loaders per (layer,eid)<=1 by construction (single loading registry)\n",                g_demand_coalesce_waits, g_demand_coalesce_timeouts, g_pilot_coalesce_skips);
         return 0;
     }
 
