@@ -70,3 +70,21 @@ Worktree: `~/ANVIL-worktrees/colibri-forge-f1`
   #55544 (phase 3), #55554 (phases 4-5). Bank stage C receipts when measured.
 - rtk tee logs hold full grep output when RTK truncates:
   `$HOME/Library/Application Support/rtk/tee/`.
+
+---
+
+## CONTINUATION CLOSEOUT (2026-08-24)
+
+- Stage B: batch+async finish concurrency routed through shared
+  coli_admission_run_parallel; widths = baseline rules; gates green (ca7e9e4).
+- Stage C: node-02 mixed_low A/B COMPLETE after two real-container fixes
+  (b2c337b slots_per_layer; 2620ca0 expert_numel classification — gdb-proven
+  INT8-misclassification segfault). Outputs IDENTICAL base-vs-forge;
+  tok/s within run variance (base medians 3.87–4.66, forge 4.37–4.50 under
+  sibling-contention conditions; frozen anchor 4.98 measured on an idle box).
+- Phase 7: olmoe second-consumer port landed, duplicate class deleted,
+  LFRU guard preserved via would_evict preview; unit gates green (531e8be).
+- Phase 8: operating laws + ownership map, promote.sh gate
+  (PROMGATE_LOCAL_GREEN at 333a3ee), promgate receipt banked from ANVIL.
+- olmoe end-to-end vs real model: still UNMEASURED (node dependency).
+- Verdict: FORGE_F1_STAGES_0_9_COMPLETE_READY_FOR_INDEPENDENT_VERIFICATION
