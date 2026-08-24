@@ -100,6 +100,10 @@ typedef struct {
      * n_layers). NULL = identity. Engines whose containers index experts
      * under an active-subset layer id use this instead of forking names. */
     const int *layer_map;
+    /* Explicit per-layer resident-slot budget. When >0 it WINS over the
+     * capacity_bytes derivation (whose max-slot estimate can diverge on
+     * mixed-format containers). 0 = derive from capacity_bytes. */
+    int slots_per_layer;
 } ColiExpertStoreDescriptor;
 
 /* Open a store from a model-neutral descriptor (v2). Zero on success with

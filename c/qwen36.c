@@ -1709,17 +1709,12 @@ static void model_init(Model *m, const char *snap, int cap, int bits) {
         xd.weights_name_template = "model.layers.%d.mlp.experts.%d.merged_weight";
         xd.scales_name_template = "model.layers.%d.mlp.experts.%d.qs";
         xd.drop_pagecache = expert_drop_flag();
+        /* Exact per-layer slot budget: the baseline's `cap` semantics. The
+         * capacity_bytes derivation would over-provision on mixed containers
+         * (its max-slot estimate uses one class), so pass slots directly. */
+        xd.slots_per_layer = cap;
         if (getenv("COLI_FUSED_LOAD") && getenv("COLI_FUSED_LOAD")[0] == '1')
             xd.fused_read = 1;
-        /* per-layer slot budget from the CLI cap: capacity_bytes derived
-         * from the largest slot class so `cap` slots fit per layer */
-        int64_t ng = (int64_t)c->inter * c->hidden, nd = (int64_t)c->hidden * c->inter;
-        int64_t want_w = ng + ng + nd;
-        int64_t max_wbytes = want_w; /* INT8 upper bound covers all classes */
-        int64_t scale_bytes =
-            (int64_t)(2 * scale_count_gu(c) + scale_count_d(c)) * 4;
-        xd.capacity_bytes = (uint64_t)cap * (uint64_t)(max_wbytes + scale_bytes) *
-                            (uint64_t)c->n_layers;
         if (coli_expert_backend_pread_open(&xd, &m->xstore, err, sizeof(err)) != 0) {
             fprintf(stderr, "Error: pread expert store open failed: %s\n", err);
             exit(1);

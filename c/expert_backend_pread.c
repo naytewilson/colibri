@@ -859,10 +859,14 @@ int coli_expert_backend_pread_open(const ColiExpertStoreDescriptor *desc,
         }
     }
 
-    /* Capacity: explicit budget derives uniform per-layer slots; without one,
-     * a documented minimal floor applies (callers should always size). */
+    /* Capacity: explicit per-layer budget wins; else derive from the
+     * capacity_bytes budget over actual max slot size (documented minimal
+     * floor when neither is given — callers should always size). */
     int spl = 2;
-    if (desc->capacity_bytes > 0 && max_slot > 0) {
+    if (desc->slots_per_layer > 0) {
+        spl = desc->slots_per_layer;
+        if (spl > bk->n_experts) spl = bk->n_experts;
+    } else if (desc->capacity_bytes > 0 && max_slot > 0) {
         spl = (int)(desc->capacity_bytes /
                     ((uint64_t)max_slot * (uint64_t)bk->n_layers));
         if (spl < 1) spl = 1;
