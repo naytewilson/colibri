@@ -92,7 +92,10 @@
 #include "tok.h"
 #include "quant.h"
 
-/* ---------- config ---------- */
+static int g_mla_simd=0;   /* L3_MLA_SIMD=1: rejected-as-default MLA AXPY variant */
+static int g_serial_c1=0;  /* REJECTED as default: control-run proven 3.3x KDA wall
+                             * regression (26.9s vs 8.16s). L3_SERIAL_C1=1 opts in. */
+
 typedef struct {
     int hidden, n_layers, vocab, first_dense, dense_inter;
     /* MLA */
@@ -175,6 +178,7 @@ typedef struct {
         float *qa,*qv,*ckv,*gv,*ctx;                        /* MLA chunk temps */
         float *moe_U; int *moe_idx; float *moe_w;           /* MoE route arrays */
         float *gate,*up,*hz;                                /* expert temps */
+        float *eg,*eu,*eh;                                  /* [8] per-slot expert scratch (STRIKE 4) */
         float *xev,*xod;                                    /* AVX2 split (max I/2) */
         float *logits;                                      /* [V] */
         float *uid_f,*wlist,*poslist_f;                     /* MoE union scratch (int-packed) */
@@ -216,7 +220,34 @@ static void rmsnorm_(float *out, const float *x, const float *w, int D, float ep
 }
 
 /* ---------- W: load-time quantization + matvec (kimi_k3.c machinery) ----- */
+/* STRIKE 5: C==1 serial matvec - per-ROW arithmetic order identical to the
+ * threaded path (rows are independent), so results are bit-identical while
+ * eliminating one OpenMP team launch per call (~150/token). */
+static void l3_matvec1(float *y, const float *x, const W *w){
+    int I=w->I,O=w->O;
+    if(w->fmt==0){ const float *Wf=w->f;
+        for(int r=0;r<O;r++){ const float *row=Wf+(int64_t)r*I; float a=0;
+            for(int i=0;i<I;i++) a+=x[i]*row[i]; y[r]=a; } }
+    else if(w->fmt==1){ const int8_t *q=w->q8;
+        for(int r=0;r<O;r++){ const int8_t *row=q+(int64_t)r*I; float s=w->s[r],a=0;
+            for(int i=0;i<I;i++) a+=x[i]*(float)row[i]; y[r]=a*s; } }
+    else if(w->fmt==4){ int rb=(I+1)/2,ng=(I+w->gs-1)/w->gs;
+        for(int r=0;r<O;r++){ const uint8_t *p=w->q4+(int64_t)r*rb;
+            const float *scl=w->s+(int64_t)r*ng; float a=0;
+            for(int g=0;g*w->gs<I;g++){ float ga=0; int e=(g+1)*w->gs; if(e>I)e=I;
+                for(int i=g*w->gs;i<e;i+=2){ uint8_t bb=p[i>>1];
+                    ga+=x[i]*(float)((int)(bb&0xF)-8);
+                    if(i+1<e) ga+=x[i+1]*(float)((int)(bb>>4)-8); }
+                a+=ga*scl[g]; }
+            y[r]=a; } }
+}
 static void w_matmul(float *y, const float *x, const W *w, int S){
+    if(S==1&&g_serial_c1){
+        /* measured: universal-serial regressed decode 9.6->1.4 tok/s
+         * (big matrices are bandwidth-bound and need threads). Serial ONLY
+         * where a team launch dominates the work (<3M MACs). */
+        if((int64_t)w->O*w->I < (int64_t)1<<20){ l3_matvec1(y,x,w); return; }
+    }
     if(w->fmt==0)      matmul(y,x,w->f,S,w->I,w->O);
     else if(w->fmt==1) matmul_q(y,x,w->q8,w->s,S,w->I,w->O);
     else if(w->fmt==4) matmul_i4_grouped(y,x,w->q4,w->s,S,w->I,w->O,w->gs);
@@ -225,7 +256,26 @@ static void w_matmul(float *y, const float *x, const W *w, int S){
 /* acc[0..I) += coef * row r (MLA absorb builds q_abs from kv_b rows) */
 static void w_addrow(const W *w, int r, float coef, float *acc){
     int I=w->I;
-    if(w->fmt==0){ const float *p=w->f+(int64_t)r*I; for(int i=0;i<I;i++) acc[i]+=coef*p[i]; }
+    if(w->fmt==0){
+        /* STRIKE 6 verdict: vector AXPY is bit-identical in isolation but any
+         * MLA arithmetic change breaks Wave-1 stream identity downstream
+         * (knife-edge routing). Scalar retained as default; L3_MLA_SIMD=1
+         * opts into the measured-but-rejected variant. */
+        const float *p=w->f+(int64_t)r*I;
+        if(g_mla_simd){
+#if defined(__x86_64__) && defined(__AVX2__) && !defined(L3_NO_AVX2)
+            __m256 vc=_mm256_set1_ps(coef);
+            int i=0;
+            for(;i+8<=I;i+=8)
+                _mm256_storeu_ps(acc+i,_mm256_add_ps(_mm256_loadu_ps(acc+i),
+                    _mm256_mul_ps(_mm256_loadu_ps(p+i),vc)));
+            for(;i<I;i++) acc[i]+=coef*p[i];
+            return;
+#endif
+        }
+        for(int i=0;i<I;i++) acc[i]+=coef*p[i];
+        return;
+    }
     else if(w->fmt==1){ const int8_t *p=w->q8+(int64_t)r*I; float s=w->s[r]*coef;
         for(int i=0;i<I;i++) acc[i]+=s*p[i]; }
     else { int rb=(I+1)/2, ng=(I+w->gs-1)/w->gs; const uint8_t *p=w->q4+(int64_t)r*rb;
@@ -237,7 +287,15 @@ static void w_addrow(const W *w, int r, float coef, float *acc){
 }
 static float w_rowdot(const W *w, int r, const float *x){
     int I=w->I; float a=0;
-    if(w->fmt==0){ const float *p=w->f+(int64_t)r*I; for(int i=0;i<I;i++) a+=x[i]*p[i]; return a; }
+    if(w->fmt==0){
+        /* REJECTED for promotion (measured): AVX2 lane reduction changes
+         * rounding -> 2/5888 knife-edge router selections flip. Scalar
+         * retained for the exact contract; revisit only behind an
+         * explicit non-default opt-in if a wave ever needs it. */
+        const float *p=w->f+(int64_t)r*I;
+        for(int i=0;i<I;i++) a+=x[i]*p[i];
+        return a;
+    }
     if(w->fmt==1){ const int8_t *p=w->q8+(int64_t)r*I; for(int i=0;i<I;i++) a+=x[i]*p[i]; return a*w->s[r]; }
     { int rb=(I+1)/2, ng=(I+w->gs-1)/w->gs; const uint8_t *p=w->q4+(int64_t)r*rb;
       const float *scl=w->s+(int64_t)r*ng;
@@ -409,6 +467,38 @@ static void exp_matvec(float *y, const float *x, const Exp *e){
 }
 
 static double g_rec_work=0,g_abs_work=0,g_val_work=0,g_ctx_work=0;
+/* STRIKE 4: prepared-input serial expert matvec (decode top-8 lane).
+ * Caller splits x once; no OpenMP region inside; bit-identical math to
+ * exp_matvec's scalar accumulation order. */
+static void exp_matvec_p(float *y, const float *xe, const float *xo, const Exp *e){
+    int O=e->O, ng=e->ng;
+    for(int r=0;r<O;r++){
+        const uint8_t *pb=(const uint8_t*)(e->packed+(int64_t)r*e->nw);
+        const float *sc=e->scl+(int64_t)r*ng;
+        float acc=0;
+        for(int g=0;g<ng;g++){
+            const uint32_t *wp=(const uint32_t*)(pb+(int64_t)g*16);
+            const float *pe=xe+g*16, *po=xo+g*16;
+            float ga=0;
+            for(int w4=0;w4<4;w4++){
+                uint32_t word=wp[w4];
+                for(int nb=0;nb<8;nb+=2){
+                    ga+=pe[w4*4+nb/2]*(float)((int)(word>>(4*nb)&0xF)-8);
+                    ga+=po[w4*4+nb/2]*(float)((int)(word>>(4*(nb+1))&0xF)-8);
+                }
+            }
+            acc+=ga*sc[g];
+        }
+        y[r]=acc;
+    }
+}
+static void exp_split_prepare(const float *x, int I){
+    for(int c=0;c<I;c+=2){ g_ws_xev[c>>1]=x[c]; g_ws_xod[c>>1]=x[c+1]; }
+}
+
+/* ---------- config ---------- */
+
+
 static int g_kda_scalar=0;                             /* L3_KDA_SCALAR=1: Wave-1 reference recurrence */
 static int g_phases=0;                                 /* L3_PHASES: sub-wall telemetry */
 
@@ -641,6 +731,9 @@ static void kv_alloc(Model *m, int max_t){
         WSA(moe_U,(long)cm*D); m->ws.moe_idx=(int*)falloc(cm*(long)c->topk); g_allocs--;
         m->ws.moe_w=falloc((long)cm*c->topk);
         WSA(gate,c->moe_inter); WSA(up,c->moe_inter); WSA(hz,D);
+        for(int sl=0;sl<8;sl++){ WSA(eg,sl*c->moe_inter); }
+        for(int sl=0;sl<8;sl++){ WSA(eu,sl*c->moe_inter); }
+        for(int sl=0;sl<8;sl++){ WSA(eh,sl*D); }
         { int Imax=c->hidden>c->moe_inter?c->hidden:c->moe_inter;
           WSA(xev,Imax/2+16); WSA(xod,Imax/2+16); }
         WSA(logits,c->vocab);
@@ -1016,6 +1109,30 @@ static void moe_forward(Model *m, Layer *l, int li, const float *x, int C, float
             int j=map[idxs[(int64_t)t*c->topk+kk]];
             poslist[cur[j]]=t; wlist[cur[j]]=wsels[(int64_t)t*c->topk+kk]; cur[j]++;
         }
+        /* REJECTED as default (measured): serial prepared-input kernel changes
+             * the decode arithmetic lineage (scalar order vs AVX2 row kernel)
+             * -> greedy stream diverges at token 6; also slower (experts
+             * 2.17->2.61s). Kept strictly opt-in for the record. */
+        if(C==1&&getenv("L3_TOP8")){
+            /* STRIKE 4: one outer region across selected experts; per-slot
+             * scratch; split prepared ONCE (Finding E); deterministic
+             * uid-order reduction. */
+            exp_split_prepare(x,LT);
+            #pragma omp parallel for schedule(static)
+            for(int j=0;j<nu;j++){
+                Exp *eg=&o->exps[uid[j]*3+0], *eu=&o->exps[uid[j]*3+1], *ed=&o->exps[uid[j]*3+2];
+                float *gj=m->ws.eg+j*MI, *uj=m->ws.eu+j*MI, *hj=m->ws.eh+j*LT;
+                exp_matvec_p(gj,g_ws_xev,g_ws_xod,eg);
+                exp_matvec_p(uj,g_ws_xev,g_ws_xod,eu);
+                for(int i2=0;i2<MI;i2++) gj[i2]=siluf_(gj[i2])*uj[i2];
+                exp_matvec_p(hj,g_ws_xev,g_ws_xod,ed);
+            }
+            for(int j=0;j<nu;j++){
+                float wk=wlist[pfirst[j]];
+                const float *hj=m->ws.eh+j*LT;
+                for(int i2=0;i2<LT;i2++) U[i2]+=wk*hj[i2];
+            }
+        } else {
         float *gate=m->ws.gate, *up=m->ws.up, *hz=m->ws.hz;
         for(int j=0;j<nu;j++){
             Exp *eg=&o->exps[uid[j]*3+0], *eu=&o->exps[uid[j]*3+1], *ed=&o->exps[uid[j]*3+2];
@@ -1030,7 +1147,7 @@ static void moe_forward(Model *m, Layer *l, int li, const float *x, int C, float
                 for(int i2=0;i2<LT;i2++) U[(int64_t)t*LT+i2]+=wk*hz[i2];
             }
         }
-        (void)0;
+        }
     }
     m->t_expert+=now_s()-te0;
     for(int64_t i2=0;i2<(int64_t)C*LT;i2++) out[i2]+=U[i2];
@@ -1263,6 +1380,9 @@ int main(int argc, char **argv){
     int phases=getenv("L3_PHASES")?atoi(getenv("L3_PHASES")):0;
     g_phases=phases;
     g_kda_scalar=getenv("L3_KDA_SCALAR")?atoi(getenv("L3_KDA_SCALAR")):0;
+    g_mla_simd=getenv("L3_MLA_SIMD")?atoi(getenv("L3_MLA_SIMD")):0;
+    if(getenv("L3_SERIAL_C1")) g_serial_c1=1;
+    g_mla_simd=getenv("L3_MLA_SIMD")?atoi(getenv("L3_MLA_SIMD")):0;
     g_heap_phase=1;
     double t_wall0=now_s();
     int chunk=getenv("L3_CHUNK")?atoi(getenv("L3_CHUNK")):32;
