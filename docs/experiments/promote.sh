@@ -27,7 +27,8 @@ if [[ ! -d /tmp/kilo/qwen36_tiny_i8 ]]; then
   (cd c && python3 tools/make_qwen36_tiny.py --out /tmp/kilo/qwen36_tiny --emit-ref /tmp/kilo/ref_qwen36.json >/dev/null 2>&1 \
     && python3 tools/convert_qwen36.py --model /tmp/kilo/qwen36_tiny --out /tmp/kilo/qwen36_tiny_i8 --ebits 8 >/dev/null 2>&1)
 fi
-git archive $BASE c/qwen36.c c/st.h c/json.h c/compat.h | tar -x -C "$TDIR"
+git archive $BASE c/qwen36.c c/st.h c/json.h c/compat.h | tar -x -C "$TDIR" 2>/dev/null || {
+  git -C "$(git rev-parse --show-toplevel)" archive $BASE c/qwen36.c c/st.h c/json.h c/compat.h | tar -x -C "$TDIR"; }
 clang -O3 -Xclang -fopenmp -I/opt/homebrew/opt/libomp/include "$TDIR"/qwen36.c -o "$TDIR/qwen36_base" -lm -L/opt/homebrew/opt/libomp/lib -lomp
 for arm in "" "PILOT=1" "COLI_FUSED_LOAD=1" "COLI_EXPERT_ASYNC=1" "COLI_BATCH_ACQ=1"; do
   env SNAP=/tmp/kilo/qwen36_tiny_i8 OMP_NUM_THREADS=4 $arm DUMP="$TDIR/lb.f32" "$TDIR/qwen36_base" 16 8 /tmp/kilo/ref_qwen36.json >/dev/null 2>&1
