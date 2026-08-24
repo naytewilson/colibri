@@ -162,6 +162,10 @@ typedef struct {
     float *cos_t, *sin_t;                 /* [max_t][rotary_dim/2] */
     int64_t wbytes;                       /* resident model bytes */
     double t_attn, t_router, t_expert, t_shared, t_norm, t_head, t_embed;
+    /* STRIKE 1: attention sub-walls (KDA/MLA and inner stages) */
+    double t_kda, t_mla;
+    double t_kda_proj, t_kda_conv, t_kda_rec, t_kda_out;
+    double t_mla_proj, t_mla_abs, t_mla_ctx, t_mla_val, t_mla_out;
     FILE *trace, *routef;
 } Model;
 
@@ -386,6 +390,9 @@ static void exp_matvec(float *y, const float *x, const Exp *e){
     }
 #endif
 }
+
+static int g_kda_scalar=0;                             /* L3_KDA_SCALAR=1: Wave-1 reference recurrence */
+static int g_phases=0;                                 /* L3_PHASES: sub-wall telemetry */
 
 /* ---------- config ---------- */
 static double req_num(jval *r, const char *k){
@@ -686,24 +693,75 @@ static void kda_forward(Model *m, Layer *l, int li, const float *x, int C, float
                 float s0=0; for(int z=0;z<hd*hd;z++) s0+=fabsf(S[z]);
                 fprintf(stderr,"DBG S_abssum_before %.6f\n",s0);
             }
-            /* S' = Diag(alpha) S ;  v' = beta (v - S'^T k) */
-            for(int kk=0;kk<hd;kk++){
-                float *row=S+(int64_t)kk*hd; float al=alpha[kk];
-                for(int vv=0;vv<hd;vv++) row[vv]*=al;
-            }
-            for(int vv=0;vv<hd;vv++){
-                float s2=0; for(int kk=0;kk<hd;kk++) s2+=S[(int64_t)kk*hd+vv]*kn[kk];
-                vt[vv]=(vh[vv]-s2)*beta;
-            }
-            /* S'' = S' + k v'^T ; o = S''^T q */
-            for(int kk=0;kk<hd;kk++){
-                float *row=S+(int64_t)kk*hd; float kv=kn[kk];
-                for(int vv=0;vv<hd;vv++) row[vv]+=kv*vt[vv];
-            }
-            memset(oh,0,sizeof(oh));
-            for(int kk=0;kk<hd;kk++){
-                const float *row=S+(int64_t)kk*hd; float qq=qn[kk];
-                for(int vv=0;vv<hd;vv++) oh[vv]+=qq*row[vv];
+            double tr0=now_s();
+            if(g_kda_scalar){
+                /* scalar reference path (4 sweeps, Wave-1 semantics) */
+                for(int kk=0;kk<hd;kk++){
+                    float *row=S+(int64_t)kk*hd; float al=alpha[kk];
+                    for(int vv=0;vv<hd;vv++) row[vv]*=al;
+                }
+                for(int vv=0;vv<hd;vv++){
+                    float s2=0; for(int kk=0;kk<hd;kk++) s2+=S[(int64_t)kk*hd+vv]*kn[kk];
+                    vt[vv]=(vh[vv]-s2)*beta;
+                }
+                for(int kk=0;kk<hd;kk++){
+                    float *row=S+(int64_t)kk*hd; float kv=kn[kk];
+                    for(int vv=0;vv<hd;vv++) row[vv]+=kv*vt[vv];
+                }
+                memset(oh,0,sizeof(oh));
+                for(int kk=0;kk<hd;kk++){
+                    const float *row=S+(int64_t)kk*hd; float qq=qn[kk];
+                    for(int vv=0;vv<hd;vv++) oh[vv]+=qq*row[vv];
+                }
+            } else {
+                /* STRIKE 2 two-pass row-major recurrence. Per-element math and
+                 * kk accumulation order are IDENTICAL to the reference; only
+                 * the S^T k strided traversal is fused into pass 1. SIMD lanes
+                 * map to independent vv, so vectorization stays bit-faithful
+                 * to this loop nest. */
+                /* STRIKE 2: two row-major sweeps replace four full traversals.
+                 * Bit-faithful to the Wave-1 reference: every product is
+                 * rounded exactly where the scalar loop rounds it (explicit
+                 * mul then add — no fused contracts), and each vv lane keeps
+                 * the original kk accumulation order. */
+                float sk[512] __attribute__((aligned(32)));
+                for(int vv=0;vv<hd;vv++) sk[vv]=0.f;
+                for(int kk=0;kk<hd;kk++){
+                    float *row=S+(int64_t)kk*hd;
+                    const float al=alpha[kk], kv=kn[kk];
+#if defined(__x86_64__) && defined(__AVX2__) && !defined(L3_NO_AVX2)
+                    const __m256 va=_mm256_set1_ps(al), vk=_mm256_set1_ps(kv);
+                    /* lanes span distinct vv: each chunk accumulates its OWN
+                     * sk slice (a hoisted register mixes chunks). */
+                    for(int vv=0;vv<hd;vv+=8){
+                        __m256 r=_mm256_mul_ps(_mm256_loadu_ps(row+vv),va);
+                        _mm256_storeu_ps(row+vv,r);
+                        _mm256_store_ps(sk+vv,_mm256_add_ps(_mm256_load_ps(sk+vv),
+                                                            _mm256_mul_ps(r,vk)));
+                    }
+#else
+                    for(int vv=0;vv<hd;vv++){ row[vv]*=al; sk[vv]+=row[vv]*kv; }
+#endif
+                }
+                for(int vv=0;vv<hd;vv++) vt[vv]=(vh[vv]-sk[vv])*beta;
+                memset(oh,0,sizeof(oh));
+                for(int kk=0;kk<hd;kk++){
+                    float *row=S+(int64_t)kk*hd;
+                    const float kv=kn[kk], qq=qn[kk];
+#if defined(__x86_64__) && defined(__AVX2__) && !defined(L3_NO_AVX2)
+                    const __m256 vk=_mm256_set1_ps(kv), vq=_mm256_set1_ps(qq);
+                    for(int vv=0;vv<hd;vv+=8){
+                        __m256 vt8=_mm256_loadu_ps(vt+vv);
+                        __m256 pr=_mm256_mul_ps(vk,vt8);
+                        __m256 r=_mm256_add_ps(_mm256_loadu_ps(row+vv),pr);
+                        _mm256_storeu_ps(row+vv,r);
+                        _mm256_storeu_ps(oh+vv,_mm256_add_ps(_mm256_loadu_ps(oh+vv),
+                                                             _mm256_mul_ps(vq,r)));
+                    }
+#else
+                    for(int vv=0;vv<hd;vv++){ row[vv]+=kv*vt[vv]; oh[vv]+=qq*row[vv]; }
+#endif
+                }
             }
             double ms=0; for(int vv=0;vv<hd;vv++) ms+=(double)oh[vv]*oh[vv];
             if(g_debug&&li==0&&t==0&&h==0){
@@ -715,6 +773,7 @@ static void kda_forward(Model *m, Layer *l, int li, const float *x, int C, float
                 fprintf(stderr,"DBG vt[0:4] %.6f %.6f %.6f %.6f\n",vt[0],vt[1],vt[2],vt[3]);
                 fprintf(stderr,"DBG S_after[0:4] %.6f %.6f %.6f %.6f\n",S[0],S[1],S[2],S[3]);
             }
+            if(g_phases) m->t_kda_rec+=now_s()-tr0;
             float r=1.f/sqrtf((float)(ms/hd)+c->eps);
             float *dst=ont+(int64_t)h*hd;
             for(int vv=0;vv<hd;vv++) dst[vv]=oh[vv]*r*a->onw[vv]*sigmoidf_(gpt[(int64_t)h*hd+vv]);
@@ -736,12 +795,14 @@ static void mla_forward(Model *m, Layer *l, int li, const float *x, int pos0, in
     float *qa=falloc((int64_t)C*c->q_lora), *qv=falloc((int64_t)C*H*c->qk_head);
     float *ckv=falloc((int64_t)C*(kvl+qr));
     float *gv=falloc((int64_t)C*H), *ctx=falloc((int64_t)C*H*vh);
+    double mp0=now_s();
     w_matmul(qa,x,&a->qa,C);
     for(int t=0;t<C;t++)
         rmsnorm_(qa+(int64_t)t*c->q_lora,qa+(int64_t)t*c->q_lora,a->qa_ln,c->q_lora,c->eps);
     w_matmul(qv,qa,&a->qb,C);
     w_matmul(ckv,x,&a->kva,C);
     w_matmul(gv,x,&a->g,C);
+    if(g_phases) m->t_mla_proj+=now_s()-mp0;
     /* cache chunk: latent rows + rotated k_rot; rotate this chunk's q_rot */
     for(int t=0;t<C;t++){
         int pos=pos0+t;
@@ -772,8 +833,10 @@ static void mla_forward(Model *m, Layer *l, int li, const float *x, int pos0, in
         for(int h=0;h<H;h++){
             const float *qp=qvt+(int64_t)h*c->qk_head, *qrp=qp+c->qk_nope;
             int rbase=h*(c->qk_nope+vh);
+            double ma0=now_s();
             float qabs[4096]; memset(qabs,0,kvl*sizeof(float));
             for(int d=0;d<c->qk_nope;d++) w_addrow(&a->kvb,rbase+d,qp[d],qabs);
+            if(g_phases) m->t_mla_abs+=now_s()-ma0;
             float sc[16384]; float mx=-1e30f;
             for(int t=0;t<nt;t++){
                 const float *Lt=m->Lc[li]+(int64_t)t*kvl, *Rt=m->Rc[li]+(int64_t)t*qr;
@@ -784,11 +847,14 @@ static void mla_forward(Model *m, Layer *l, int li, const float *x, int pos0, in
             }
             float sm=0; for(int t=0;t<nt;t++){ sc[t]=expf(sc[t]-mx); sm+=sc[t]; }
             for(int t=0;t<nt;t++) sc[t]/=sm;
+            double mc0=now_s();
             float clat[4096]; memset(clat,0,kvl*sizeof(float));
             for(int t=0;t<nt;t++){
                 const float *Lt=m->Lc[li]+(int64_t)t*kvl; float s2=sc[t];
                 for(int i=0;i<kvl;i++) clat[i]+=s2*Lt[i];
             }
+            if(g_phases) m->t_mla_val+=now_s()-mc0;
+            double mx0=now_s();
             float *cx=ctxt+(int64_t)h*vh;
             float gate=sigmoidf_(gvt[h]);               /* head-wise gate */
             if(getenv("L3_MLA_DEBUG")&&li==3&&tt==0&&h==0){
@@ -958,7 +1024,7 @@ static float *g_xl[128]={NULL}; static int g_xl_n=0;   /* per-layer injected inp
 static float *g_mi[128]={NULL};                        /* per-layer injected MoE inputs */
 static FILE *g_lfp=NULL;
 static int g_th_dec=0;                                 /* decode-width thread policy */
-static int g_th_wide=0;                                /* prefill width */
+static int g_th_wide=0;              /* L3_KDA_SCALAR=1 forces Wave-1 reference recurrence */                                /* prefill width */
 static float *step_chunk(Model *m, const int *ids, int pos0, int C){
     Cfg *c=&m->c; int D=c->hidden;
     float *hidden=falloc((int64_t)C*D), *nrm=falloc((int64_t)C*D);
@@ -1003,9 +1069,8 @@ static float *step_chunk(Model *m, const int *ids, int pos0, int C){
             else omp_set_num_threads(g_th_wide);
         }
 #endif
-        if(l->mla) mla_forward(m,l,i,nrm,pos0,C,att);
-        else       kda_forward(m,l,i,nrm,C,att);
-        m->t_attn+=now_s()-ta0;
+        if(l->mla){ double t0=now_s(); mla_forward(m,l,i,nrm,pos0,C,att); double dt=now_s()-t0; m->t_mla+=dt; m->t_attn+=dt; }
+        else      { double t0=now_s(); kda_forward(m,l,i,nrm,C,att);  double dt=now_s()-t0; m->t_kda+=dt; m->t_attn+=dt; }
         if(getenv("L3_ATT_DUMP")){
             char ap[600]; snprintf(ap,sizeof(ap),"%s/att_L%d.f32",getenv("L3_ATT_DUMP"),i);
             FILE *af=fopen(ap,"wb"); if(af){ fwrite(att,sizeof(float),(size_t)C*D,af); fclose(af);} else perror(ap);
@@ -1156,6 +1221,8 @@ int main(int argc, char **argv){
     kv_alloc(m,maxt);
     model_state_reset(m);
     int phases=getenv("L3_PHASES")?atoi(getenv("L3_PHASES")):0;
+    g_phases=phases;
+    g_kda_scalar=getenv("L3_KDA_SCALAR")?atoi(getenv("L3_KDA_SCALAR")):0;
     double t_wall0=now_s();
     int chunk=getenv("L3_CHUNK")?atoi(getenv("L3_CHUNK")):32;
     if(chunk<1)chunk=1; if(chunk>512)chunk=512;
@@ -1184,8 +1251,10 @@ int main(int argc, char **argv){
             np,t_prefill,t_prefill>0?np/t_prefill:0,ttft,produced,t_dec,t_dec>0?produced/t_dec:0,
             rss_gb(),peak_rss_gb());
     if(phases)
-        fprintf(stderr,"[L3-PHASE] embed %.3fs attn %.3fs norms %.3fs router %.3fs experts %.3fs shared %.3fs head %.3fs total_accounted %.3fs\n",
-                m->t_embed,m->t_attn,m->t_norm,m->t_router,m->t_expert,m->t_shared,m->t_head,
+        fprintf(stderr,"[L3-PHASE] embed %.3fs attn %.3fs [kda %.3fs mla %.3fs | kda_rec %.3fs mla_abs %.3fs mla_ctx %.3fs mla_val %.3fs] norms %.3fs router %.3fs experts %.3fs shared %.3fs head %.3fs total_accounted %.3fs\n",
+                m->t_embed,m->t_attn,m->t_kda,m->t_mla,
+                m->t_kda_rec,m->t_mla_abs,m->t_mla_ctx,m->t_mla_val,
+                m->t_norm,m->t_router,m->t_expert,m->t_shared,m->t_head,
                 m->t_embed+m->t_attn+m->t_norm+m->t_router+m->t_expert+m->t_shared+m->t_head);
     if(m->trace) fclose(m->trace);
     if(g_lfp) fclose(g_lfp);
