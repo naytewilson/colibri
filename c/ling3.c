@@ -167,6 +167,17 @@ typedef struct {
     double t_kda_proj, t_kda_conv, t_kda_rec, t_kda_out;
     double t_mla_proj, t_mla_abs, t_mla_ctx, t_mla_val, t_mla_out;
     FILE *trace, *routef;
+    /* STRIKE 3 persistent decode/prefill workspace (sized once at kv_alloc) */
+    struct {
+        int cmax;
+        float *hidden,*nrm,*att,*mlp;                       /* [cmax][D] */
+        float *kq,*kk_,*kv,*kgp,*kon,*kgraw,*kbraw;         /* KDA chunk temps */
+        float *qa,*qv,*ckv,*gv,*ctx;                        /* MLA chunk temps */
+        float *moe_U; int *moe_idx; float *moe_w;           /* MoE route arrays */
+        float *gate,*up,*hz;                                /* expert temps */
+        float *xev,*xod;                                    /* AVX2 split (max I/2) */
+        float *logits;                                      /* [V] */
+    } ws;
 } Model;
 
 static double now_s(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec+t.tv_nsec*1e-9; }
@@ -188,8 +199,9 @@ static int l3_thread_count(const char *name){
         fprintf(stderr,"[L3] %s=%s rejected: must be a positive integer thread count\n",name,v); exit(1); }
     return (int)n;
 }
-static float *falloc(int64_t n){ float *p=malloc((size_t)n*sizeof(float)); if(!p){fprintf(stderr,"OOM %lld floats\n",(long long)n);exit(1);} return p; }
-static float *fcalloc(int64_t n){ float *p=calloc((size_t)n,sizeof(float)); if(!p){fprintf(stderr,"OOM %lld floats\n",(long long)n);exit(1);} return p; }
+static long g_allocs=0, g_frees=0;
+static float *falloc(int64_t n){ float *p=malloc((size_t)n*sizeof(float)); if(!p){fprintf(stderr,"OOM %lld floats\n",(long long)n);exit(1);} g_allocs++; return p; }
+static float *fcalloc(int64_t n){ float *p=calloc((size_t)n,sizeof(float)); if(!p){fprintf(stderr,"OOM %lld floats\n",(long long)n);exit(1);} g_allocs++; return p; }
 static inline float sigmoidf_(float x){ return 1.f/(1.f+expf(-x)); }
 static inline float siluf_(float x){ return x/(1.f+expf(-x)); }
 static void rmsnorm_(float *out, const float *x, const float *w, int D, float eps){
@@ -328,10 +340,9 @@ static void exp_matvec(float *y, const float *x, const Exp *e){
     if(e->dense){ matmul(y,x,e->dense,1,e->I,O); return; }
 #if defined(__x86_64__) && defined(__AVX2__) && !defined(L3_NO_AVX2)
     int I=e->I;
-    /* shared across OMP threads: allocated once per call, negligible vs work */
-    float *xev=aligned_alloc(32,(size_t)I/2*4+32);
-    float *xod=aligned_alloc(32,(size_t)I/2*4+32);
-    if(!xev||!xod){fprintf(stderr,"OOM xsplit\n");exit(1);}
+    /* STRIKE 4: prepared-input split lives in the persistent workspace */
+    float *xev=g_ws_xev, *xod=g_ws_xod;
+    (void)I;
     for(int c=0;c<I;c+=2){ xev[c>>1]=x[c]; xod[c>>1]=x[c+1]; }
     const __m256i m4=_mm256_set1_epi8(0x0F);
     const __m128i m4s=_mm_set1_epi8(0x0F);
@@ -368,7 +379,6 @@ static void exp_matvec(float *y, const float *x, const Exp *e){
         s=_mm_add_ss(s,_mm_shuffle_ps(s,s,1));
         y[r]=_mm_cvtss_f32(s);
     }
-    free(xev); free(xod);
 #else
     #pragma omp parallel for schedule(static)
     for(int r=0;r<O;r++){
@@ -391,6 +401,8 @@ static void exp_matvec(float *y, const float *x, const Exp *e){
 #endif
 }
 
+static float *g_ws_xev=NULL,*g_ws_xod=NULL;
+static double g_rec_work=0,g_abs_work=0,g_val_work=0,g_ctx_work=0;
 static int g_kda_scalar=0;                             /* L3_KDA_SCALAR=1: Wave-1 reference recurrence */
 static int g_phases=0;                                 /* L3_PHASES: sub-wall telemetry */
 
@@ -608,6 +620,27 @@ static void model_init(Model *m, const char *snap, int n_layers_env){
 
 static void kv_alloc(Model *m, int max_t){
     Cfg *c=&m->c; m->max_t=max_t;
+    { /* STRIKE 3: one-time workspace sizing */
+        int cm=getenv("L3_CHUNK")?atoi(getenv("L3_CHUNK")):32;
+        if(cm<1)cm=1; if(cm>512)cm=512;
+        m->ws.cmax=cm;
+        long D=c->hidden, P=c->kda_proj;
+        #define WSA(f,n) m->ws.f=falloc(n)
+        WSA(hidden,cm*D); WSA(nrm,cm*D); WSA(att,cm*D); WSA(mlp,cm*D);
+        WSA(kq,cm*P); WSA(kk_,cm*P); WSA(kv,cm*P); WSA(kgp,cm*P);
+        WSA(kon,cm*P); WSA(kgraw,cm*P); WSA(kbraw,(long)cm*c->kda_heads);
+        WSA(qa,(long)cm*c->q_lora); WSA(qv,(long)cm*c->n_heads*c->qk_head);
+        WSA(ckv,(long)cm*(c->kv_lora+c->qk_rope)); WSA(gv,(long)cm*c->n_heads);
+        WSA(ctx,(long)cm*c->n_heads*c->v_head);
+        WSA(moe_U,(long)cm*D); m->ws.moe_idx=falloc(cm*c->topk); g_allocs--;
+        m->ws.moe_w=falloc((long)cm*c->topk);
+        WSA(gate,c->moe_inter); WSA(up,c->moe_inter); WSA(hz,D);
+        { int Imax=c->hidden>c->moe_inter?c->hidden:c->moe_inter;
+          WSA(xev,Imax/2+16); WSA(xod,Imax/2+16); }
+        WSA(logits,c->vocab);
+        #undef WSA
+        g_ws_xev=m->ws.xev; g_ws_xod=m->ws.xod;
+    }
     m->Lc=calloc(c->n_layers,sizeof(float*));
     m->Rc=calloc(c->n_layers,sizeof(float*));
     for(int i=0;i<c->n_layers;i++) if(m->L[i].mla){
@@ -644,9 +677,9 @@ static int g_debug=-1;
 static void kda_forward(Model *m, Layer *l, int li, const float *x, int C, float *out){
     Cfg *c=&m->c; Kda *a=&l->a;
     int P=c->kda_proj, H=c->kda_heads, hd=c->kda_hd, K=c->conv_k;
-    float *q=falloc((int64_t)C*P), *k=falloc((int64_t)C*P), *v=falloc((int64_t)C*P);
-    float *gp=falloc((int64_t)C*P), *on=falloc((int64_t)C*P);
-    float *graw=falloc((int64_t)C*P), *braw=falloc((int64_t)C*H);
+    float *q=m->ws.kq, *k=m->ws.kk_, *v=m->ws.kv;
+    float *gp=m->ws.kgp, *on=m->ws.kon;
+    float *graw=m->ws.kgraw, *braw=m->ws.kbraw;
     w_matmul(q,x,&a->q,C); w_matmul(k,x,&a->k,C); w_matmul(v,x,&a->v,C);
     w_matmul(gp,x,&a->g,C); w_matmul(graw,x,&a->f,C);
     matmul(braw,x,a->bp,C,c->hidden,H);
@@ -676,7 +709,7 @@ static void kda_forward(Model *m, Layer *l, int li, const float *x, int C, float
                 vec[d]=siluf_(acc);
             }
         }
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(static) reduction(+:g_rec_work)
         for(int h=0;h<H;h++){
             const float *qh=qt+(int64_t)h*hd, *kh=kt+(int64_t)h*hd, *vh=tv+(int64_t)h*hd;
             float qn[512], kn[512], alpha[512], vt[512], oh[512];
@@ -689,11 +722,11 @@ static void kda_forward(Model *m, Layer *l, int li, const float *x, int C, float
                 alpha[i]=expf(c->gate_lb*sigmoidf_(a->A[h]*(z[i]+a->dt[(int64_t)h*hd+i])));
             float beta=sigmoidf_(bt[h]);
             float *S=m->kstate[li]+(int64_t)h*hd*hd;
+            double tr0=now_s();
             if(g_debug&&li==0&&t==0&&h==0){
                 float s0=0; for(int z=0;z<hd*hd;z++) s0+=fabsf(S[z]);
                 fprintf(stderr,"DBG S_abssum_before %.6f\n",s0);
             }
-            double tr0=now_s();
             if(g_kda_scalar){
                 /* scalar reference path (4 sweeps, Wave-1 semantics) */
                 for(int kk=0;kk<hd;kk++){
@@ -773,28 +806,20 @@ static void kda_forward(Model *m, Layer *l, int li, const float *x, int C, float
                 fprintf(stderr,"DBG vt[0:4] %.6f %.6f %.6f %.6f\n",vt[0],vt[1],vt[2],vt[3]);
                 fprintf(stderr,"DBG S_after[0:4] %.6f %.6f %.6f %.6f\n",S[0],S[1],S[2],S[3]);
             }
-            if(g_phases) m->t_kda_rec+=now_s()-tr0;
+            g_rec_work+=now_s()-tr0;
             float r=1.f/sqrtf((float)(ms/hd)+c->eps);
             float *dst=ont+(int64_t)h*hd;
             for(int vv=0;vv<hd;vv++) dst[vv]=oh[vv]*r*a->onw[vv]*sigmoidf_(gpt[(int64_t)h*hd+vv]);
         }
     }
     w_matmul(out,on,&a->o,C);
-    if(g_debug&&li==0){
-        fprintf(stderr,"DBG conv_q[0:4] %.6f %.6f %.6f %.6f\n",q[0],q[1],q[2],q[3]);
-        fprintf(stderr,"DBG on[0:4] %.6f %.6f %.6f %.6f\n",on[0],on[1],on[2],on[3]);
-        fprintf(stderr,"DBG out[0:4] %.6f %.6f %.6f %.6f\n",out[0],out[1],out[2],out[3]);
-    }
-    free(q);free(k);free(v);free(gp);free(on);free(graw);free(braw);
 }
 
 /* ---------- gated MLA with partial interleaved RoPE ---------- */
 static void mla_forward(Model *m, Layer *l, int li, const float *x, int pos0, int C, float *out){
     Cfg *c=&m->c; Mla *a=&l->m;
     int H=c->n_heads, vh=c->v_head, kvl=c->kv_lora, qr=c->qk_rope, rd=c->rotary_dim, half=rd/2;
-    float *qa=falloc((int64_t)C*c->q_lora), *qv=falloc((int64_t)C*H*c->qk_head);
-    float *ckv=falloc((int64_t)C*(kvl+qr));
-    float *gv=falloc((int64_t)C*H), *ctx=falloc((int64_t)C*H*vh);
+    float *qa=m->ws.qa, *qv=m->ws.qv, *ckv=m->ws.ckv, *gv=m->ws.gv, *ctx=m->ws.ctx;
     double mp0=now_s();
     w_matmul(qa,x,&a->qa,C);
     for(int t=0;t<C;t++)
@@ -829,14 +854,15 @@ static void mla_forward(Model *m, Layer *l, int li, const float *x, int pos0, in
         int nt=pos0+tt+1;
         const float *qvt=qv+(int64_t)tt*H*c->qk_head, *gvt=gv+(int64_t)tt*H;
         float *ctxt=ctx+(int64_t)tt*H*vh;
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(static) reduction(+:g_abs_work,g_val_work,g_ctx_work)
         for(int h=0;h<H;h++){
             const float *qp=qvt+(int64_t)h*c->qk_head, *qrp=qp+c->qk_nope;
             int rbase=h*(c->qk_nope+vh);
-            double ma0=now_s();
-            float qabs[4096]; memset(qabs,0,kvl*sizeof(float));
+            float qabs[4096] __attribute__((aligned(32)));
+            memset(qabs,0,kvl*sizeof(float));
+            double wa0=now_s();
             for(int d=0;d<c->qk_nope;d++) w_addrow(&a->kvb,rbase+d,qp[d],qabs);
-            if(g_phases) m->t_mla_abs+=now_s()-ma0;
+            g_abs_work+=now_s()-wa0;
             float sc[16384]; float mx=-1e30f;
             for(int t=0;t<nt;t++){
                 const float *Lt=m->Lc[li]+(int64_t)t*kvl, *Rt=m->Rc[li]+(int64_t)t*qr;
@@ -847,14 +873,17 @@ static void mla_forward(Model *m, Layer *l, int li, const float *x, int pos0, in
             }
             float sm=0; for(int t=0;t<nt;t++){ sc[t]=expf(sc[t]-mx); sm+=sc[t]; }
             for(int t=0;t<nt;t++) sc[t]/=sm;
-            double mc0=now_s();
-            float clat[4096]; memset(clat,0,kvl*sizeof(float));
+            float clat[4096] __attribute__((aligned(32)));
+            memset(clat,0,kvl*sizeof(float));
+            double wv0=now_s(), wc0=0;
             for(int t=0;t<nt;t++){
                 const float *Lt=m->Lc[li]+(int64_t)t*kvl; float s2=sc[t];
+                wc0-=now_s();
                 for(int i=0;i<kvl;i++) clat[i]+=s2*Lt[i];
+                wc0+=now_s();
             }
-            if(g_phases) m->t_mla_val+=now_s()-mc0;
-            double mx0=now_s();
+            g_val_work+=now_s()-wv0;
+            g_ctx_work+=wc0;
             float *cx=ctxt+(int64_t)h*vh;
             float gate=sigmoidf_(gvt[h]);               /* head-wise gate */
             if(getenv("L3_MLA_DEBUG")&&li==3&&tt==0&&h==0){
@@ -873,7 +902,6 @@ static void mla_forward(Model *m, Layer *l, int li, const float *x, int pos0, in
         FILE *cf=fopen(cp2,"wb"); if(cf){ fwrite(ctx,sizeof(float),(size_t)C*H*vh,cf); fclose(cf);} else perror(cp2);
     }
     w_matmul(out,ctx,&a->o,C);
-    free(qa);free(qv);free(ckv);free(gv);free(ctx);
 }
 
 /* ---------- grouped sigmoid top-k router (noaux_tc, exact) ---------- */
@@ -943,9 +971,8 @@ static void moe_forward(Model *m, Layer *l, int li, const float *x, int C, float
     Cfg *c=&m->c; Moe *o=&l->moe;
     int LT=c->hidden, MI=c->moe_inter;
     memset(out,0,(size_t)C*LT*sizeof(float));
-    float *U=fcalloc((int64_t)C*LT);
-    int (*idxs)=malloc((size_t)C*c->topk*sizeof(int));
-    float *wsels=falloc((int64_t)C*c->topk);
+    float *U=m->ws.moe_U; memset(U,0,(size_t)C*LT*sizeof(float));
+    int *idxs=m->ws.moe_idx; float *wsels=m->ws.moe_w;
     double tr0=now_s();
     for(int t=0;t<C;t++)
         route_select(x+(int64_t)t*LT,o,c,li,t,idxs+(int64_t)t*c->topk,wsels+(int64_t)t*c->topk);
@@ -991,10 +1018,12 @@ static void moe_forward(Model *m, Layer *l, int li, const float *x, int C, float
             }
         }
         free(gate);free(up);free(hz);
-        free(uid);free(pcnt);free(pfirst);free(poslist);free(wlist);free(cur);
+        g_frees+=7; free(uid);free(pcnt);free(pfirst);free(poslist);free(wlist);free(cur);
+        (void)0;
     }
     m->t_expert+=now_s()-te0;
     for(int64_t i2=0;i2<(int64_t)C*LT;i2++) out[i2]+=U[i2];
+    (void)0;
     double ts0=now_s();
     {
         int SI=c->sh_inter;
@@ -1006,7 +1035,6 @@ static void moe_forward(Model *m, Layer *l, int li, const float *x, int C, float
         free(sg);free(su);free(sd);
     }
     m->t_shared+=now_s()-ts0;
-    free(U);free(idxs);free(wsels);
 }
 
 static void dense_forward(Model *m, Layer *l, const float *x, int C, float *out){
@@ -1027,8 +1055,7 @@ static int g_th_dec=0;                                 /* decode-width thread po
 static int g_th_wide=0;              /* L3_KDA_SCALAR=1 forces Wave-1 reference recurrence */                                /* prefill width */
 static float *step_chunk(Model *m, const int *ids, int pos0, int C){
     Cfg *c=&m->c; int D=c->hidden;
-    float *hidden=falloc((int64_t)C*D), *nrm=falloc((int64_t)C*D);
-    float *att=falloc((int64_t)C*D), *mlp=falloc((int64_t)C*D);
+    float *hidden=m->ws.hidden, *nrm=m->ws.nrm, *att=m->ws.att, *mlp=m->ws.mlp;
     double te0=now_s();
     if(g_x0){
         for(int t=0;t<C;t++){
@@ -1103,7 +1130,7 @@ static float *step_chunk(Model *m, const int *ids, int pos0, int C){
             float *lo=falloc(c->vocab);
             w_matmul(lo,mix,&m->lm_head,1);
             if(g_lfp) fwrite(lo,sizeof(float),(size_t)c->vocab,g_lfp);
-            if(t==C-1) logits=lo; else free(lo);
+            if(t==C-1) logits=lo; else { memcpy(m->ws.logits,lo,(size_t)c->vocab*4); free(lo); }
         }
         m->t_head+=now_s()-th0;
     }
@@ -1251,7 +1278,7 @@ int main(int argc, char **argv){
             np,t_prefill,t_prefill>0?np/t_prefill:0,ttft,produced,t_dec,t_dec>0?produced/t_dec:0,
             rss_gb(),peak_rss_gb());
     if(phases)
-        fprintf(stderr,"[L3-PHASE] embed %.3fs attn %.3fs [kda %.3fs mla %.3fs | kda_rec %.3fs mla_abs %.3fs mla_ctx %.3fs mla_val %.3fs] norms %.3fs router %.3fs experts %.3fs shared %.3fs head %.3fs total_accounted %.3fs\n",
+        fprintf(stderr,"[L3-PHASE] embed %.3fs attn %.3fs [kda %.3fs mla %.3fs | WORK kda_rec %.3fs mla_abs %.3fs mla_lat %.3fs mla_val %.3fs] norms %.3fs router %.3fs experts %.3fs shared %.3fs head %.3fs total_accounted %.3fs\n",
                 m->t_embed,m->t_attn,m->t_kda,m->t_mla,
                 m->t_kda_rec,m->t_mla_abs,m->t_mla_ctx,m->t_mla_val,
                 m->t_norm,m->t_router,m->t_expert,m->t_shared,m->t_head,
@@ -1259,5 +1286,7 @@ int main(int argc, char **argv){
     if(m->trace) fclose(m->trace);
     if(g_lfp) fclose(g_lfp);
     if(m->routef) fclose(m->routef);
+    if(getenv("L3_ALLOC_COUNT"))
+        fprintf(stderr,"[L3-ALLOC] total heap allocs=%ld frees=%ld\n",g_allocs,g_frees);
     return 0;
 }
