@@ -261,6 +261,61 @@ static void pbs_charge_publish(PreadBackend *bk, PreadSlot *s) {
     bk->stats.resident_bytes += (uint64_t)(s->wbytes + s->sbytes);
 }
 
+/* Shared I/O core: pread the container bytes for slot s (identity already
+ * claimed) into its segment buffers. Unlocked; returns 0 and sets
+ * *bytes_read, or -1 on any failure (nothing published either way). */
+static int pbs_io_fill(PreadBackend *bk, PreadSlot *s, int64_t *bytes_read) {
+    char wnm[192], snm[192];
+    pbs_names(bk, s->layer, s->index, wnm, sizeof(wnm), snm, sizeof(snm));
+    int64_t ei = pbs_ei(bk, s->layer, s->index);
+    st_tensor *tw = st_find(&bk->S, wnm);
+    st_tensor *ts = bk->has_scales ? st_find(&bk->S, snm) : NULL;
+    if (!tw || tw->nbytes != bk->emeta_w[ei] ||
+        (bk->has_scales && (!ts || ts->nbytes != bk->emeta_s[ei])))
+        return -1;
+
+    double t0 = pbs_now_ms();
+    int64_t total = 0;
+    int fused = 0;
+    if (bk->fused_read && ts)
+        fused = (ts->fd == tw->fd) && ts->off + ts->nbytes == tw->off &&
+                ts->nbytes > 0;
+    if (fused) {
+        /* Container interleaves [qs][merged_weight] with zero gap (verified
+         * above per-tensor): one pread spanning both replaces two device
+         * commands; identical bytes, split after transfer. */
+        int64_t tot = ts->nbytes + tw->nbytes;
+        uint8_t *stg = (uint8_t *)malloc((size_t)tot);
+        if (!stg) return -1;
+        st_pread_full(tw->fd, stg, tot, ts->off, "pbs fused");
+        if (bk->drop_pagecache)
+            posix_fadvise(tw->fd, ts->off, tot, POSIX_FADV_DONTNEED);
+        memcpy(s->sbuf, stg, (size_t)ts->nbytes);
+        memcpy(s->wbuf, stg + ts->nbytes, (size_t)tw->nbytes);
+        free(stg);
+        total = tot;
+    } else {
+        st_pread_full(tw->fd, s->wbuf, tw->nbytes, tw->off, "pbs weights");
+        if (bk->drop_pagecache)
+            posix_fadvise(tw->fd, tw->off, tw->nbytes, POSIX_FADV_DONTNEED);
+        total = tw->nbytes;
+        if (ts) {
+            st_pread_full(ts->fd, s->sbuf, ts->nbytes, ts->off, "pbs scales");
+            if (bk->drop_pagecache)
+                posix_fadvise(ts->fd, ts->off, ts->nbytes, POSIX_FADV_DONTNEED);
+            total += ts->nbytes;
+        }
+    }
+    double t1 = pbs_now_ms();
+
+    PBS_LOCK(bk);
+    bk->stats.bytes_read += (uint64_t)total;
+    bk->stats.admission_ms_total += (t1 - t0);
+    PBS_UNLOCK(bk);
+    if (bytes_read) *bytes_read = total;
+    return 0;
+}
+
 /* Internal synchronous admission used by prefetch(): claim -> pread into the
  * reserved buffers (unlocked I/O) -> publish. Returns 0 on success. */
 static int pbs_admit_sync(PreadBackend *bk, int layer, int index, int as_prefetch) {
@@ -277,71 +332,22 @@ static int pbs_admit_sync(PreadBackend *bk, int layer, int index, int as_prefetc
                (!bk->has_scales ||
                 pbs_seg_reserve(&s->sbuf, &s->scap, (size_t)want_s) == 0);
     PBS_UNLOCK(bk);
-    if (!grow) {
+    if (!grow || pbs_io_fill(bk, s, NULL) != 0) {
         PBS_LOCK(bk);
         pbs_unclaim(bk, s, 1);
         PBS_UNLOCK(bk);
         return -1;
     }
-
-    char wnm[192], snm[192];
-    pbs_names(bk, layer, index, wnm, sizeof(wnm), snm, sizeof(snm));
-    st_tensor *tw = st_find(&bk->S, wnm);
-    st_tensor *ts = bk->has_scales ? st_find(&bk->S, snm) : NULL;
-    if (!tw || tw->nbytes != want_w ||
-        (bk->has_scales && (!ts || ts->nbytes != want_s))) {
-        PBS_LOCK(bk);
-        pbs_unclaim(bk, s, 1);
-        PBS_UNLOCK(bk);
-        return -1;
-    }
-
-    double t0 = pbs_now_ms();
-    int64_t bytes_read = 0;
-    int fused = 0;
-    if (bk->fused_read && ts)
-        fused = (ts->fd == tw->fd) && ts->off + ts->nbytes == tw->off &&
-                ts->nbytes > 0;
-    if (fused) {
-        /* Container interleaves [qs][merged_weight] with zero gap (verified
-         * above per-tensor): one pread spanning both replaces two device
-         * commands; identical bytes, split after transfer. */
-        int64_t tot = ts->nbytes + tw->nbytes;
-        uint8_t *stg = (uint8_t *)malloc((size_t)tot);
-        if (!stg) {
-            PBS_LOCK(bk);
-            pbs_unclaim(bk, s, 1);
-            PBS_UNLOCK(bk);
-            return -1;
-        }
-        st_pread_full(tw->fd, stg, tot, ts->off, "pbs fused");
-        if (bk->drop_pagecache)
-            posix_fadvise(tw->fd, ts->off, tot, POSIX_FADV_DONTNEED);
-        memcpy(s->sbuf, stg, (size_t)ts->nbytes);
-        memcpy(s->wbuf, stg + ts->nbytes, (size_t)tw->nbytes);
-        free(stg);
-        bytes_read = tot;
-    } else {
-        st_pread_full(tw->fd, s->wbuf, tw->nbytes, tw->off, "pbs weights");
-        if (bk->drop_pagecache)
-            posix_fadvise(tw->fd, tw->off, tw->nbytes, POSIX_FADV_DONTNEED);
-        bytes_read = tw->nbytes;
-        if (ts) {
-            st_pread_full(ts->fd, s->sbuf, ts->nbytes, ts->off, "pbs scales");
-            if (bk->drop_pagecache)
-                posix_fadvise(ts->fd, ts->off, ts->nbytes, POSIX_FADV_DONTNEED);
-            bytes_read += ts->nbytes;
-        }
-    }
-    double t1 = pbs_now_ms();
 
     PBS_LOCK(bk);
     s->wbytes = (size_t)want_w;
     s->sbytes = bk->has_scales ? (size_t)want_s : 0;
     bk->stats.physical_loads++;
     s->io_counted = 1;
-    bk->stats.bytes_read += (uint64_t)bytes_read;
-    bk->stats.admission_ms_total += (t1 - t0);
+    if (s->last_class == PBS_CLASS_PREFETCH)
+        bk->stats.prefetch_requests++;
+    else
+        bk->stats.demand_requests++;
     s->state = PBS_RESIDENT;
     s->pinned_by_key = bk->key_pinned[ei];
     s->used = ++bk->clock;
@@ -829,4 +835,35 @@ fail:
 int coli_expert_backend_pread_register(const char *name) {
     return coli_expert_store_backend_register_v2(
         name, coli_expert_backend_pread_open);
+}
+
+/* ColiAdmissionLoadFn adapter: fill an active reservation's segments with
+ * the expert's container bytes. userdata = the ColiExpertStore*. */
+int coli_expert_backend_pread_load(void *userdata,
+                                   const ColiExpertCoreKey *key,
+                                   ColiExpertReservation *res) {
+    PreadBackend *bk = (PreadBackend *)userdata;
+    if (!bk || !res || !res->impl || !key ||
+        key->role != COLI_EXPERT_ROLE_EXPERT)
+        return -1;
+    PreadSlot *s = (PreadSlot *)res->impl;
+    if (s->state != PBS_RESERVED || s->layer != key->layer ||
+        s->index != key->index)
+        return -1;
+    int64_t ei = pbs_ei(bk, s->layer, s->index);
+    /* buffers were grown at reserve(); be defensive about capacity anyway */
+    if (pbs_seg_reserve(&s->wbuf, &s->wcap, (size_t)bk->emeta_w[ei]) != 0)
+        return -1;
+    if (bk->has_scales &&
+        pbs_seg_reserve(&s->sbuf, &s->scap, (size_t)bk->emeta_s[ei]) != 0)
+        return -1;
+    if (pbs_io_fill(bk, s, NULL) != 0) return -1;
+    s->wbytes = (size_t)bk->emeta_w[ei];
+    s->sbytes = bk->has_scales ? (size_t)bk->emeta_s[ei] : 0;
+
+    PBS_LOCK(bk);
+    bk->stats.physical_loads++;
+    s->io_counted = 1; /* publish will not double-charge */
+    PBS_UNLOCK(bk);
+    return 0;
 }

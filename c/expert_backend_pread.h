@@ -44,6 +44,13 @@ int coli_expert_backend_pread_open(const ColiExpertStoreDescriptor *desc,
                                    ColiExpertStore **output,
                                    char *error, size_t error_size);
 
+/* ColiAdmissionLoadFn-shaped loader for this backend: preads the container
+ * bytes into an active reservation's segments (fused path honored when
+ * configured). Pass the ColiExpertStore* as userdata. Zero on success. */
+int coli_expert_backend_pread_load(void *userdata,
+                                   const ColiExpertCoreKey *key,
+                                   ColiExpertReservation *res);
+
 /* Register this backend under `name` (constructor-style helper for links
  * that want it selectable through COLI_EXPERT_STORE). */
 int coli_expert_backend_pread_register(const char *name);
