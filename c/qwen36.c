@@ -2679,7 +2679,7 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
         #define PB_FLUSH() do { \
             if (nl > 1) { \
                 int W_ = nl < 8 ? nl : 8; \
-                _Pragma("omp parallel for schedule(static)") \
+                _Pragma("omp parallel for schedule(static) num_threads(W_)") \
                 for (int ii_ = 0; ii_ < nl; ii_++) { \
                     int cell_ = ld[ii_]; \
                     expert_finish(m, layer, bidx[cell_ / 8][cell_ % 8], &ars2[cell_], &bsl[cell_]); \

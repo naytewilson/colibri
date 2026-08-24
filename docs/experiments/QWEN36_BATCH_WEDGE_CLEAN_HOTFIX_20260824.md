@@ -65,3 +65,36 @@ completed cleanly rc=0. Not candidate-attributable.
 cap64 BATCH=1 full-model reproducer terminates and matches control output
 (banked as required regression); scripts: /tmp/hotfix_20260824/*.sh on
 anvil-node-02.
+
+## CONTROLLER CORRECTION (2026-08-24, post-1971084)
+
+Source review of 1971084 found PB_FLUSH computed `int W_ = nl < 8 ? nl : 8`
+but never applied it: `_Pragma("omp parallel for schedule(static)")` lacked
+`num_threads(W_)`. With inherited OMP_NUM_THREADS > 8 the flush team could
+therefore exceed the historical min(nl,8) software worker cap. OMP8-based
+validation could not see this because the env cap already bounds the default
+team at 8 — exactly why OMP16/32 discriminators were added.
+
+Correction (commit e70c135): `_Pragma("omp parallel for schedule(static)
+num_threads(W_)")`. W_ is consumed; worker count <= 8 regardless of inherited
+OMP_NUM_THREADS; nl==1 stays serial; nl>1 stays parallel. Zero new compiler
+warnings vs pristine f04359a baseline census (all remaining warnings identical).
+
+Thread-environment discriminator on final binary: BATCH=1 cap128 terminates
+with byte-identical stdout and flat MaxRSS at OMP_NUM_THREADS=1 / 8 / 16 / 32;
+cap64 x2 and cap128 x2 PASS under OMP1; absent/0 PASS; rich profile PASS.
+
+Performance confirmation (frozen serving protocol, tonight, final binary):
+batch_wall 12.06-12.45s with preload_io_sum 87.1-89.9s => 7.2-7.3x effective
+load concurrency; live frozen-binary control arm in the same window measured
+batch_wall 10.97s / io_sum 79.0s (same 7.2x ratio) while frozen's own earlier
+passes spanned 9.95-10.64s — absolute drift is node-load environment, ratio
+is drift-resistant and unchanged. No sequentialization; RSS flat ~10.8-10.9 GB
+serving profile.
+
+Accounting/compat: make test-c rc=0 (all suites); W9 cumulative totals equal
+(109,120 acquisitions both binaries; hit/miss split delta 7 within the frozen
+code's own arm-to-arm variance); K<=8/S<=512 gate untouched; no new demand
+telemetry from PRELOAD_NB (counters fire on ACQ_MODE_DEMAND only).
+
+1971084 evidence above is preserved unmodified.
