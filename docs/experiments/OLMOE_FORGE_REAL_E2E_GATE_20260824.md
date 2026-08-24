@@ -210,3 +210,64 @@ baseline warm run3 6.31 tok/s (cold 0.31 → 1.98 → 6.31) vs repaired candidat
 NONE — candidate branch untouched; docs-only append to this evidence branch, pushed non-force.
 
 Raw evidence: Mac `tmp/olmoe_gate_20260824_raw/b2_rerun/` (runs_b2_rerun/, runs_rep2/, rerun_b2.log).
+
+---
+
+# INDEPENDENT RE-VERIFICATION — 2026-08-24 (Lane B3, fresh operator)
+
+**Verdict**: `OLMOE_FORGE_REAL_E2E_GATE_REPROVEN_INDEPENDENTLY` — every load-bearing claim of Lane B/B2 re-established from source truth by a fresh session with no reliance on prior binaries or prior process state.
+
+## Refs at B3 start (live-fetched)
+
+| Ref | Observed | vs receipts |
+|---|---|---|
+| `origin/forge/f1-ooc-moe-runtime` | `0b789e06eb6448cd16bf904b23cc66e565f44295` | = Lane B2 tested ref; **no newer Lane A ref exists** |
+| `486f557d…` (mission handoff candidate) | present in object store | = Lane B tested ref |
+| `verify/forge-f1-20260824` | `5689298b…` | exact match to mission file |
+
+## Artifact integrity — rehashed, not trusted
+
+- Container: all 10 files re-hashed on node against `container_hashes.txt` → 10/10 OK. Manifest hash file sha256 `250c5634…0736` exact.
+- Oracle copy: `ref.json` sha256 `745d8e6d0ae2bd902f3c6e1514e53a1e7c6c6405ab37c293706b44ab0f11000f` exact.
+- Node clones: baseline_colibri @ `f04359a`, forge_colibri @ `0b789e0`, both clean worktrees.
+
+## Binaries — rebuilt from clean source, zero reuse
+
+Prior binaries deleted (`rm -f olmoe`) and rebuilt in place from verified refs, gcc (Ubuntu 15.2.0) `-O3 -march=native -fopenmp -pthread`:
+
+- baseline `f04359a`: `a8a051e027fae2998768b2c6d221b5c3fc62cf190f07304ef9485c3a56523687` — byte-reproduced
+- forge `0b789e0`: `2b11a2489b3ee1a4e225cc488fa82ae5c9fc887fa8bdc1af48358d8ec070fb98` — byte-reproduced
+
+Reproducible-build property itself independently confirmed.
+
+## Frozen-contract gate rerun (same arms, same invocation, no weakening)
+
+`bash olmoe_gate.sh <bin> b3_<engine> b3_runs_<engine> 16 0 1` per engine:
+
+| Check | Expected | Observed | Verdict |
+|---|---|---|---|
+| baseline ×3 rc | 0 | 0/0/0 | PASS |
+| forge ×3 rc | 0 | 0/0/0 | PASS |
+| generated sequence | accepted `7785 15 187 187 510 5347 273 253 1986 2077 310 5041` | exact, all 8 gen runs | PASS |
+| self-determinism ×3/engine | 1 unique sequence | 1 / 1 | PASS |
+| differential run1/2/3/cap2/ppl | byte-identical post-telemetry-strip | BYTE-IDENTICAL ×5 (guarded adjudicator; empty-payload comparisons rejected after first attempt caught a transport-mangled strip regex) | PASS |
+| TF-NLL anchor | engines equal | `0.6573 nats/token · ppl = 1.93` both | PASS |
+| cap=2 eviction stress | tokens preserved | identical sequence, 5/12 | PASS |
+
+Adjudicator note: first strip attempt silently compared empty payloads (ERE mangled in SSH transport) and would have reported false BYTE-IDENTICAL; v2 rejects zero-line payloads. The guarded result is the one of record.
+
+## Shared-substrate spot-checks (source truth, forge clone @ 0b789e0)
+
+- `olmoe.c:403` opens generic backend (`coli_expert_backend_pread_open`); loads via adapter at :140; evict-notify wired at :434.
+- Old local cache machinery: zero occurrences of `loading[` / private `LCache` typedef in olmoe.c.
+- `coli_expert_backend_pread_would_evict` (`expert_backend_pread.c:713`): read-only policy preview — locks, inspects, unlocks, mutates nothing, charges no counters; docstring states the contract.
+- Sole olmoe.c call site (:904) sits behind opt-in `g_pilot_evict_guard`; defaults-off parity held all B3 runs with zero env knobs.
+- Runtime counters identical across engines: hit=887 miss=1161 @cap16 (identical logical request stream through shared store).
+
+## Production mutation check
+
+NONE — candidate branch untouched (still `0b789e0`); docs-only append here; raw text receipts parked at Mac `tmp/olmoe_gate_20260824_raw/b3_indep/`.
+
+## Handoff statement (unchanged in substance)
+
+No newer Lane A ref exists as of this verification; evidence is current for the live Forge head. If Lane A lands further commits: admission/acquire_batch-only changes → targeted smoke sufficient; changes to `expert_backend_pread.c` reserve/publish/victim logic or olmoe lock-order → full gate rerun required (rerun command above).
