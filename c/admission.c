@@ -39,6 +39,62 @@ const ColiAdmissionStats *coli_admission_stats(const ColiAdmission *adm) {
     return adm ? &((const Admission *)adm)->stats : NULL;
 }
 
+const ColiAdmissionConfig *coli_admission_config(const ColiAdmission *adm) {
+    return adm ? &((const Admission *)adm)->cfg : NULL;
+}
+
+typedef struct {
+    void (*job)(void *arg, int idx);
+    void *arg;
+    int from, to;
+} RunRange;
+
+static void *run_worker(void *p) {
+    RunRange *r = (RunRange *)p;
+    for (int i = r->from; i < r->to; i++) r->job(r->arg, i);
+    return NULL;
+}
+
+void coli_admission_run_parallel(ColiAdmission *adm,
+                                 void (*job)(void *arg, int idx),
+                                 void *arg, int count, int max_workers) {
+    if (!job || count <= 0) return;
+    int w = max_workers > 0 ? max_workers : 1;
+    if (w > count) w = count;
+    if (w <= 1) {
+        for (int i = 0; i < count; i++) job(arg, i);
+        return;
+    }
+    pthread_t *tid = (pthread_t *)malloc((size_t)w * sizeof(pthread_t));
+    RunRange *ranges = (RunRange *)malloc((size_t)w * sizeof(RunRange));
+    if (!tid || !ranges) {
+        free(tid);
+        free(ranges);
+        for (int i = 0; i < count; i++) job(arg, i);
+        return;
+    }
+    int launched = 0;
+    int base = count / w, extra = count % w, at = 0;
+    for (int i = 0; i < w; i++) {
+        ranges[i].job = job;
+        ranges[i].arg = arg;
+        ranges[i].from = at;
+        at += base + (i < extra ? 1 : 0);
+        ranges[i].to = at;
+        if (i == w - 1) continue; /* main thread takes the last range */
+        if (pthread_create(&tid[launched++], NULL, run_worker,
+                           &ranges[i]) != 0) {
+            launched--;
+            run_worker(&ranges[i]);
+        }
+    }
+    run_worker(&ranges[w - 1]);
+    for (int i = 0; i < launched; i++) pthread_join(tid[i], NULL);
+    free(tid);
+    free(ranges);
+    (void)adm;
+}
+
 static double now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);

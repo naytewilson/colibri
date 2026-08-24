@@ -2740,6 +2740,41 @@ static void attention(Model *m, Layer *l, int layer, float *x, int S, int pos_ba
 /* MoE: grouped top-k routing (+ optional router bias) + shared expert.
  * Mirrors HF Qwen3 MoE: softmax(gate), optional group-limited top-k, normalized
  * weights, sum routed experts, then add the un-gated shared expert. */
+/* Stage B: job contexts for the shared bounded-parallel admission runner.
+ * Each job body is exactly the baseline loop body (expert_finish on one
+ * cell); publish+trace critical sections serialize on g_xorder_mx inside
+ * expert_finish, loads run unlocked. */
+typedef struct {
+    Model *m;
+    int layer;
+    int (*bidx)[8];
+    AcqRes *ars2;
+    Slot **bsl;
+    int *ld;
+} qw_batch_finish_ctx;
+
+static void qw_batch_finish_job(void *arg, int ii) {
+    qw_batch_finish_ctx *c = (qw_batch_finish_ctx *)arg;
+    int cell = c->ld[ii];
+    expert_finish(c->m, c->layer, c->bidx[cell / 8][cell % 8],
+                  &c->ars2[cell], &c->bsl[cell]);
+}
+
+typedef struct {
+    Model *m;
+    int layer;
+    const int *idx;
+    AcqRes *ars;
+    Slot **e_slots;
+    const int *loadkk;
+} qw_async_finish_ctx;
+
+static void qw_async_finish_job(void *arg, int ii) {
+    qw_async_finish_ctx *c = (qw_async_finish_ctx *)arg;
+    int k2 = c->loadkk[ii];
+    expert_finish(c->m, c->layer, c->idx[k2], &c->ars[k2], &c->e_slots[k2]);
+}
+
 static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
     Cfg *c = &m->c; int D = c->hidden, E = c->n_experts, K = c->topk, I = c->inter;
     float *logits = falloc((int64_t)S*E);
@@ -2815,18 +2850,15 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
                 if (ars2[s*8+kk].kind == ACQ_LOAD) ld[nl++] = s*8+kk;
                 bsl[s*8+kk] = tmpo;
             }
-        if (nl > 1) {
-            int W = nl < 8 ? nl : 8;
-            #pragma omp parallel for schedule(static) num_threads(W)
-            for (int ii = 0; ii < nl; ii++) {
-                int cell = ld[ii];
-                expert_finish(m, layer, bidx[cell / 8][cell % 8], &ars2[cell], &bsl[cell]);
-            }
-        } else {
-            for (int ii = 0; ii < nl; ii++) {
-                int cell = ld[ii];
-                expert_finish(m, layer, bidx[cell / 8][cell % 8], &ars2[cell], &bsl[cell]);
-            }
+        if (nl > 0) {
+            /* Stage B: shared bounded-parallel admission runner replaces the
+             * engine-private omp region; width matches the baseline rule
+             * W=min(nl,8). Loads run outside g_xorder_mx inside the jobs;
+             * publish+trace critical sections serialize on it as before. */
+            coli_admission_run_parallel(m->xadmission, qw_batch_finish_job,
+                                        &(qw_batch_finish_ctx){m, layer, bidx,
+                                                               ars2, bsl, ld},
+                                        nl, nl < 8 ? nl : 8);
         }
         free(ars2); free(bsl); free(ld); free(bidx); free(bval); free(scr);
         if (tm_on()) g_pb_wall_ms += tm_now() - _pb0;
@@ -2915,19 +2947,12 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
                 expert_acquire(m, layer, idx[kk], val[kk], &e_slots[kk], &ars[kk], ACQ_MODE_DEMAND);
                 if (ars[kk].kind == ACQ_LOAD) loadkk[nload++] = kk;
             }
-            if (nload > 1) {
-                int W = nload < async_w_threads() ? nload : async_w_threads();
-                #pragma omp parallel for schedule(static) num_threads(W)
-                for (int ii = 0; ii < nload; ii++) {
-                    int k2 = loadkk[ii];
-                    expert_finish(m, layer, idx[k2], &ars[k2], &e_slots[k2]);
-                }
-            } else {
-                for (int ii = 0; ii < nload; ii++) {
-                    int k2 = loadkk[ii];
-                    expert_finish(m, layer, idx[k2], &ars[k2], &e_slots[k2]);
-                }
-            }
+            /* Stage B: shared bounded-parallel runner; width matches the
+             * baseline rule W=min(nload, COLI_ASYNC_W||4). */
+            coli_admission_run_parallel(
+                m->xadmission, qw_async_finish_job,
+                &(qw_async_finish_ctx){m, layer, idx, ars, e_slots, loadkk},
+                nload, nload < async_w_threads() ? nload : async_w_threads());
             if (S == 1) {
                 for (int kk = 0; kk < K; kk++) {
                     if (e_slots[kk]->is_int3) g_routed_int3_count++;

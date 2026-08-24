@@ -179,9 +179,12 @@ typedef struct {
 struct ColiExpertStore {
     const ColiExpertStoreOps *ops;
     void *state;
-    /* Optional CUDA-tier mirror cache owned by the GPU translation unit
-     * (deepseek_v4.c COLI_V4_UNIT_GPU). NULL when the tier is inactive; the
-     * CPU lease path ignores it entirely. */
+    /* LEGACY-COMPATIBILITY ONLY (pre-Forge ABI): optional CUDA-tier mirror
+     * owned by the DeepSeek-V4 translation unit (deepseek_v4.c
+     * COLI_V4_UNIT_GPU). NULL when the tier is inactive; the CPU lease path
+     * ignores it entirely. NOT part of the model-neutral v1.1/v1.2 semantics:
+     * new backends and adapters must not read or set it; a future extension
+     * seam will replace it without changing lease/reservation contracts. */
     void *gpu;
 };
 

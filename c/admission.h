@@ -85,6 +85,20 @@ size_t coli_admission_order_prefetch(ColiExpertKey *keys, size_t count);
 int coli_admission_prefetch(ColiAdmission *adm, const ColiExpertKey *keys,
                             size_t count);
 
+/* Bounded-parallel job runner (shared concurrency policy): runs `count`
+ * jobs via job(arg, i) across at most `max_workers` pthreads, joining
+ * before return. max_workers <= 1 runs inline (default OFF == serial);
+ * workers are fanned out round-robin over contiguous ranges. Loads belong
+ * INSIDE jobs; anything touching shared trace order belongs to the caller's
+ * own locking discipline inside job bodies. */
+void coli_admission_run_parallel(ColiAdmission *adm,
+                                 void (*job)(void *arg, int idx),
+                                 void *arg, int count, int max_workers);
+
+/* Read back the effective config (engines derive coalescing-window
+ * behavior from it instead of hard-coding their own knobs). */
+const ColiAdmissionConfig *coli_admission_config(const ColiAdmission *adm);
+
 const ColiAdmissionStats *coli_admission_stats(const ColiAdmission *adm);
 
 #ifdef __cplusplus
