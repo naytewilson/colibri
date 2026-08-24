@@ -1110,6 +1110,9 @@ tests/test_compat_direct$(EXE): tests/test_compat_direct.c compat.h
 tests/test_expert_store_ops$(EXE): tests/test_expert_store_ops.c expert_store.h tensor.h
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
+tests/test_expert_reservation$(EXE): tests/test_expert_reservation.c expert_store.h tensor.h
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+
 tests/test_native_quant$(EXE): tests/test_native_quant.c deepseek_v4.c native_quant.h tensor.h quant.h
 	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_NATIVE_QUANT deepseek_v4.c $< -o $@ $(LDFLAGS)
 

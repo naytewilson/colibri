@@ -101,6 +101,44 @@ int main(void) {
 
     store.ops->destroy(&store);
     if (state.active_leases != 0) return 1;
+
+    /* --- v1.1 fallback surface (this mock implements no reservation ops) --- */
+
+    /* lookup_batch synthesizes per-key lookups; misses clear their view. */
+    {
+        ColiExpertKey keys[2] = {{1, 2}, {3, 4}};
+        ColiExpertView views[2];
+        int ok = coli_expert_lookup_batch(&store, keys, 2, views);
+        if (ok != 1) return 1;
+        if (views[0].lease != &state) return 1;
+        if (!view_is_cleared(&views[1])) return 1;
+        coli_expert_release(&store, &views[0]);
+        if (state.held || state.active_leases) return 1;
+    }
+
+    /* pin/unpin are advisory no-ops when unsupported. */
+    {
+        ColiExpertKey k = {0, 0};
+        ColiExpertCoreKey core = coli_expert_core_key(k);
+        if (coli_expert_pin(&store, &core) != COLI_EXPERT_OK) return 1;
+        coli_expert_unpin(&store, &core);
+    }
+
+    /* Reservation surface reports UNSUPPORTED so callers fall back to
+     * synchronous lookup+load. */
+    {
+        ColiExpertKey k = {9, 9};
+        ColiExpertCoreKey core = coli_expert_core_key(k);
+        ColiExpertReservation res;
+        if (coli_expert_reserve(&store, &core, &res) !=
+            COLI_EXPERT_ERR_UNSUPPORTED) return 1;
+        if (res.segment_count != 0 || res.segments != NULL) return 1;
+        if (coli_expert_publish(&store, &res, NULL) !=
+            COLI_EXPERT_ERR_UNSUPPORTED) return 1;
+        coli_expert_abort(&store, &res); /* no-op, clears */
+        if (res.key.layer != 0 || res.segments != NULL) return 1;
+    }
+
     puts("expert store ops tests: ok");
     return 0;
 }
