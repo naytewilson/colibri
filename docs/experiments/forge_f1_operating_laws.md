@@ -87,6 +87,10 @@ tests/test_expert_backend_pread.c (all-reserved spin drain).
 - Promotion gate (`promote.sh`) is the LOCAL builder gate only. Independent
   verification is a separate, not-yet-started step. No deployment or merge
   has occurred; rollback reference remains frozen f04359a.
-- Canonical census (live git at d2801c6): TOTAL FORGE LINEAGE
-  f04359a..d2801c6 = 19 commits, 31 changed files; CONTINUATION-ONLY
-  66d4660..d2801c6 = 11 commits, 19 files.
+- Census provenance: the builder's closeout prose reported 19 commits / 31
+  changed files total and 11 commits / 19 files continuation-only. Controller
+  GitHub comparison at builder handoff `fcb95f2` instead resolved
+  `f04359a..fcb95f2` as 20 commits / 28 changed files and
+  `66d4660..fcb95f2` as 12 commits / 16 changed files. Treat the builder census
+  as FALSIFIED; fresh verification must recompute exact counts from its live
+  target ref rather than carrying either pre-verifier count forward.
