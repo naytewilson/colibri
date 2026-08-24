@@ -32,8 +32,9 @@ for f in qwen36.c st.h json.h compat.h; do
 done
 clang -O3 -Xclang -fopenmp -I/opt/homebrew/opt/libomp/include "$TDIR"/qwen36.c -o "$TDIR/qwen36_base" -lm -L/opt/homebrew/opt/libomp/lib -lomp
 for arm in "" "PILOT=1" "COLI_FUSED_LOAD=1" "COLI_EXPERT_ASYNC=1" "COLI_BATCH_ACQ=1"; do
-  env SNAP=/tmp/kilo/qwen36_tiny_i8 OMP_NUM_THREADS=4 $arm DUMP="$TDIR/lb.f32" "$TDIR/qwen36_base" 16 8 /tmp/kilo/ref_qwen36.json >/dev/null 2>&1
-  env SNAP=/tmp/kilo/qwen36_tiny_i8 OMP_NUM_THREADS=4 $arm DUMP="$TDIR/lp.f32" c/qwen36 16 8 /tmp/kilo/ref_qwen36.json >/dev/null 2>&1
+  # engines may exit 1 on the known tiny-fixture mismatch; the gate is cmp
+  env SNAP=/tmp/kilo/qwen36_tiny_i8 OMP_NUM_THREADS=4 $arm DUMP="$TDIR/lb.f32" "$TDIR/qwen36_base" 16 8 /tmp/kilo/ref_qwen36.json >/dev/null 2>&1 || true
+  env SNAP=/tmp/kilo/qwen36_tiny_i8 OMP_NUM_THREADS=4 $arm DUMP="$TDIR/lp.f32" c/qwen36 16 8 /tmp/kilo/ref_qwen36.json >/dev/null 2>&1 || true
   cmp -s "$TDIR/lb.f32" "$TDIR/lp.f32" && say "PASS logits identical [$arm]" || { say "FAIL logits [$arm]"; FAIL=1; }
 done
 
