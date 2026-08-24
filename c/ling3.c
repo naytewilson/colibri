@@ -328,6 +328,8 @@ static void exp_load(Model *m, Exp *e, const char *base, int O, int I){
     m->wbytes += want + (int64_t)O*e->ng*4;
 }
 
+static float *g_ws_xev=NULL,*g_ws_xod=NULL;   /* persistent prepared-input split */
+
 /* y[r] = sum_c x[c]*(nibble(r,c)-8)*scale(r,c/32), straight from packed words.
  *
  * AVX2 path: each 16-byte block holds one 32-group as sequential element
@@ -401,7 +403,6 @@ static void exp_matvec(float *y, const float *x, const Exp *e){
 #endif
 }
 
-static float *g_ws_xev=NULL,*g_ws_xod=NULL;
 static double g_rec_work=0,g_abs_work=0,g_val_work=0,g_ctx_work=0;
 static int g_kda_scalar=0;                             /* L3_KDA_SCALAR=1: Wave-1 reference recurrence */
 static int g_phases=0;                                 /* L3_PHASES: sub-wall telemetry */
@@ -632,7 +633,7 @@ static void kv_alloc(Model *m, int max_t){
         WSA(qa,(long)cm*c->q_lora); WSA(qv,(long)cm*c->n_heads*c->qk_head);
         WSA(ckv,(long)cm*(c->kv_lora+c->qk_rope)); WSA(gv,(long)cm*c->n_heads);
         WSA(ctx,(long)cm*c->n_heads*c->v_head);
-        WSA(moe_U,(long)cm*D); m->ws.moe_idx=falloc(cm*c->topk); g_allocs--;
+        WSA(moe_U,(long)cm*D); m->ws.moe_idx=(int*)falloc(cm*(long)c->topk); g_allocs--;
         m->ws.moe_w=falloc((long)cm*c->topk);
         WSA(gate,c->moe_inter); WSA(up,c->moe_inter); WSA(hz,D);
         { int Imax=c->hidden>c->moe_inter?c->hidden:c->moe_inter;
@@ -1064,7 +1065,11 @@ static float *step_chunk(Model *m, const int *ids, int pos0, int C){
         }
     } else {
         const W *E=&m->embed;
+        if(getenv("L3_GUARD")&&(!E->f||((uintptr_t)E->f<(uintptr_t)1<<40)))
+            fprintf(stderr,"GUARD: suspicious E->f=%p\n",(void*)E->f);
         for(int t=0;t<C;t++){
+            if(getenv("L3_GUARD")&&(ids[t]<0||ids[t]>=c->vocab)){
+                fprintf(stderr,"GUARD: BAD id[%d]=%d (E->f=%p)\n",t,ids[t],(void*)E->f); exit(9); }
             if(E->fmt==0) memcpy(hidden+(int64_t)t*D,E->f+(int64_t)ids[t]*D,D*sizeof(float));
             else if(E->fmt==1){ const int8_t *p=E->q8+(int64_t)ids[t]*D; float s=E->s[ids[t]];
                 for(int d=0;d<D;d++) hidden[(int64_t)t*D+d]=(float)p[d]*s; }
@@ -1134,7 +1139,7 @@ static float *step_chunk(Model *m, const int *ids, int pos0, int C){
         }
         m->t_head+=now_s()-th0;
     }
-    free(hidden);free(nrm);free(att);free(mlp);
+    /* workspace is persistent: no frees here (STRIKE 3) */
     return logits;
 }
 
@@ -1280,7 +1285,7 @@ int main(int argc, char **argv){
     if(phases)
         fprintf(stderr,"[L3-PHASE] embed %.3fs attn %.3fs [kda %.3fs mla %.3fs | WORK kda_rec %.3fs mla_abs %.3fs mla_lat %.3fs mla_val %.3fs] norms %.3fs router %.3fs experts %.3fs shared %.3fs head %.3fs total_accounted %.3fs\n",
                 m->t_embed,m->t_attn,m->t_kda,m->t_mla,
-                m->t_kda_rec,m->t_mla_abs,m->t_mla_ctx,m->t_mla_val,
+                g_rec_work,g_abs_work,g_ctx_work,g_val_work,
                 m->t_norm,m->t_router,m->t_expert,m->t_shared,m->t_head,
                 m->t_embed+m->t_attn+m->t_norm+m->t_router+m->t_expert+m->t_shared+m->t_head);
     if(m->trace) fclose(m->trace);
