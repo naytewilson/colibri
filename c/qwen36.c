@@ -651,6 +651,23 @@ static Model *pilot_m = NULL;
 static int g_pilot = 0;
 static int g_wide  = 1;
 
+/* ---- Background worker lifecycle (F1 hardening 2026-08-24) ----
+ * Ownership law: every background thread is joinable, its handle is stored,
+ * and no detached infinite thread may retain model/store pointers past
+ * main's return. Shutdown is explicit, idempotent, and deterministic:
+ * set the stop flag, then join pilots, then join the spec loader. Workers
+ * observe the flag BEFORE claiming new work, so queued-but-unclaimed jobs
+ * are cancelled, while an in-flight store operation always runs to its
+ * terminal publish/abort before its thread exits (never freed mid-flight). */
+#define PILOT_MAX_WORKERS 8
+static pthread_t g_pilot_thr[PILOT_MAX_WORKERS];
+static int g_pilot_thr_n = 0;
+static pthread_t g_spec_thr;
+static int g_spec_thr_live = 0;
+static volatile int g_workers_stop = 0;
+
+static void background_workers_shutdown(void);
+
 static void pilot_prefetch(Model *m, int lnext, const float *x, int S);
 static void *pilot_worker(void *arg);
 static void ensure_pilot_worker_started(Model *m);
@@ -658,20 +675,38 @@ static void slot_ensure_allocated(Model *m, Slot *s);
 static int expert_drop_flag(void);
 
 static void ensure_pilot_worker_started(Model *m) {
-    if (!pilot_m) {
+    if (!pilot_m && !g_pilot_thr_n) {
         pilot_m = m;
         int W = 1;
         const char *e = getenv("COLI_PILOT_W");
         if (e) { W = atoi(e); if (W < 1) W = 1; if (W > 8) W = 8; }
         for (int i = 0; i < W; i++) {
-            pthread_t t;
-            if (pthread_create(&t, NULL, pilot_worker, NULL) != 0) {
+            if (pthread_create(&g_pilot_thr[g_pilot_thr_n], NULL, pilot_worker, NULL) != 0) {
                 fprintf(stderr, "Error: Failed to create pilot prefetch worker thread\n");
                 exit(1);
             }
-            pthread_detach(t);
+            g_pilot_thr_n++;
         }
     }
+}
+
+/* Idempotent cooperative stop: workers finish their current job, cancel any
+ * unclaimed queue entries, and exit; both worker classes are joined BEFORE
+ * the caller may touch model/store teardown or close trace streams. */
+static void background_workers_shutdown(void) {
+    if (__atomic_exchange_n(&g_workers_stop, 1, __ATOMIC_ACQ_REL)) return;
+    for (int i = 0; i < g_pilot_thr_n; i++)
+        pthread_join(g_pilot_thr[i], NULL);
+    int spec_was_live = g_spec_thr_live;
+    if (g_spec_thr_live) {
+        pthread_join(g_spec_thr, NULL);
+        g_spec_thr_live = 0;
+    }
+    unsigned cancelled = __atomic_load_n(&pilot_w, __ATOMIC_ACQUIRE)
+                       - __atomic_load_n(&pilot_r, __ATOMIC_ACQUIRE);
+    fprintf(stderr, "[workers] shutdown: %d pilot worker(s) joined, spec loader %s, %u queued prefetch entr%s cancelled\n",
+            g_pilot_thr_n, spec_was_live ? "joined" : "not started",
+            (unsigned)cancelled, (cancelled == 1) ? "y" : "ies");
 }
 
 /* ---------- utility ---------- */
@@ -741,6 +776,15 @@ static double g_demand_expert_admission_ms = 0.0;
 static uint64_t g_pilot_loads = 0;
 static uint64_t g_pilot_bytes = 0;
 static double g_pilot_expert_admission_ms = 0.0;
+/* Authoritative physical accounting source (F1 hardening 2026-08-24):
+ * the shared ExpertStore. Set once at model_init; tm_report() has no Model
+ * pointer, so reporting reads ColiExpertStoreStats through this handle
+ * instead of engine-local counters that no longer observe Forge-path
+ * admissions. NULL (unit tests) disables the store block. */
+static ColiExpertStore *g_xstore_report = NULL;
+/* speculative shadow-ring issue counter (defined with the ring below);
+ * read by tm_report to decide whether the shadow-load line may print */
+static unsigned long long g_spec_issued;
 /* admission decomposition (Phase 1): weight-read vs scale-read segments of the
  * same interval g_*_expert_admission_ms wraps; operation-boundary timers only */
 static double g_demand_weight_ms = 0.0, g_demand_scale_ms = 0.0;
@@ -771,6 +815,12 @@ static double g_win_adm0 = 0.0, g_win_wgt0 = 0.0, g_win_scl0 = 0.0;
 static double g_win_slot0 = 0.0, g_win_lock0 = 0.0, g_win_lookup0 = 0.0, g_win_victim0 = 0.0;
 static double g_win_adm_ms = 0.0, g_win_wgt_ms = 0.0, g_win_scl_ms = 0.0;
 static double g_win_slot_ms = 0.0, g_win_lock_ms = 0.0, g_win_lookup_ms = 0.0, g_win_victim_ms = 0.0;
+/* F1 hardening: demand admission timing now measures the LIVE store path
+ * (expert_finish around qw_store_load), not the removed private-sync load.
+ * The weight/scale ms split was only observable inside load_expert_merged
+ * and is no longer engine-derivable; the store reports byte splits instead. */
+static double g_dem_load_ms = 0.0;
+static double g_win_demload0 = 0.0;
 static uint64_t g_win_hit_ms = 0, g_win_miss_ms = 0;
 static int g_window_armed = 0;        /* baselines valid (armed post-prefill) */
 static int g_window_fold_armed = 0;   /* an unfolded decode stretch is pending */
@@ -884,13 +934,55 @@ static void tm_add(int S, int idx, double ms){
     } else g_tm_pre[idx]+=ms;
 }
 static void tm_report(void){
+    /* ---- Authoritative physical accounting (shared ExpertStore) ----
+     * Under Forge, expert admission flows through
+     * qw_store_load -> coli_expert_backend_pread_load; the store's own
+     * counters are the single source of truth for physical loads, bytes,
+     * coalescing and residency. The engine never re-derives them.
+     * Printed unconditionally: this is residency truth, not timer detail. */
+    if (g_xstore_report) {
+        ColiExpertStoreStats xs;
+        g_xstore_report->ops->stats(g_xstore_report, &xs);
+        fprintf(stderr, "[expert_store] requests %llu (logical %llu) | hits %llu misses %llu | coalesced %llu\n",
+                (unsigned long long)xs.requests, (unsigned long long)xs.logical_requests,
+                (unsigned long long)xs.hits, (unsigned long long)xs.misses,
+                (unsigned long long)xs.coalesced_requests);
+        fprintf(stderr, "[expert_store] physical_loads %llu | admitted %.2f MB (weights %.2f / scales %.2f) | admission %.1f ms (avg %.2f ms/load)\n",
+                (unsigned long long)xs.physical_loads,
+                (double)xs.admitted_bytes / 1048576.0,
+                (double)xs.admitted_weight_bytes / 1048576.0,
+                (double)xs.admitted_scale_bytes / 1048576.0,
+                xs.admission_ms_total,
+                xs.physical_loads ? xs.admission_ms_total / (double)xs.physical_loads : 0.0);
+        fprintf(stderr, "[expert_store] resident %.2f of %.2f MB | publishes %llu aborts %llu reservations_active %llu pinned %llu prefetch_requests %llu bytes_read %.2f MB\n",
+                (double)xs.resident_bytes / 1048576.0, (double)xs.capacity_bytes / 1048576.0,
+                (unsigned long long)xs.publishes, (unsigned long long)xs.aborts,
+                (unsigned long long)xs.reservations_active, (unsigned long long)xs.pinned_count,
+                (unsigned long long)xs.prefetch_requests,
+                (double)xs.bytes_read / 1048576.0);
+    }
+    /* Legacy private-sync load counters (nonzero-only truth lines). On the
+     * Forge path these observe no demand traffic (loads are store-side);
+     * they are printed ONLY when nonzero and clearly relabeled so a zero
+     * can never masquerade as authoritative and a nonzero can never
+     * masquerade as store truth.
+     *   - "demand sync" counts synchronous private-cache demand loads (a
+     *     removed path — any nonzero means a second load site appeared).
+     *   - "spec-shadow" counts speculative shadow-ring staging loads into
+     *     private Slot copies, which are NOT physical admissions. */
+    if (g_demand_loads)
+        fprintf(stderr,"[expert_io] legacy demand sync-loads: %llu (%llu bytes, %.2f MB), cum_expert_admission: %.1f ms, avg_latency: %.2f ms/load << UNEXPECTED under Forge store path\n",
+                (unsigned long long)g_demand_loads, (unsigned long long)g_demand_bytes,
+                (double)g_demand_bytes / 1048576.0, g_demand_expert_admission_ms,
+                g_demand_loads ? g_demand_expert_admission_ms / g_demand_loads : 0.0);
+    if (g_pilot_loads || g_spec_issued)
+        fprintf(stderr,"[expert_io] spec-shadow private-slot loads: %llu (%llu bytes, %.2f MB), cum_expert_admission: %.1f ms, avg_latency: %.2f ms/load (shadow staging only, not store admissions)\n",
+                (unsigned long long)g_pilot_loads, (unsigned long long)g_pilot_bytes,
+                (double)g_pilot_bytes / 1048576.0, g_pilot_expert_admission_ms,
+                g_pilot_loads ? g_pilot_expert_admission_ms / g_pilot_loads : 0.0);
     if(!tm_on()) return;
-    /* fold the FINAL decode stretch (after the last prefill) into the window
-     * sums so reported decode windows cover every decoded token */
     if (g_window_fold_armed) {
-        g_win_adm_ms    += g_demand_expert_admission_ms - g_win_adm0;
-        g_win_wgt_ms    += g_demand_weight_ms - g_win_wgt0;
-        g_win_scl_ms    += g_demand_scale_ms - g_win_scl0;
+        g_win_adm_ms    += g_dem_load_ms - g_win_demload0;
         g_win_slot_ms   += g_moe_sub[1] - g_win_slot0;
         g_win_lock_ms   += g_eg_lock_wait_ms - g_win_lock0;
         g_win_lookup_ms += g_eg_lookup_ms - g_win_lookup0;
@@ -944,7 +1036,13 @@ static void tm_report(void){
                 routed_i4_ms / g_tm_dec_tokens, g_moe_sub[5]/g_tm_dec_tokens, g_moe_sub[6]/g_tm_dec_tokens, g_moe_sub[7]/g_tm_dec_tokens);
         fprintf(stderr, "  Shared expert (SwiGLU + gate):   %8.2f ms/token (%5.1f%%)\n", g_moe_sub[8] / g_tm_dec_tokens, 100.0 * g_moe_sub[8] / g_tm_dec[2]);
         fprintf(stderr, "  Weighted output accumulation:    %8.2f ms/token (%5.1f%%)\n", g_moe_sub[9] / g_tm_dec_tokens, 100.0 * g_moe_sub[9] / g_tm_dec[2]);
-        fprintf(stderr, "  Admission (demand NVMe I/O):     %8.2f ms/token\n", g_demand_expert_admission_ms / g_tm_dec_tokens);
+        {
+            /* Decode-window admission I/O measured around the live store
+             * load (expert_finish -> qw_store_load); the legacy cumulative
+             * counter observed the removed private-sync path. */
+            double dem_adm = g_win_adm_ms; if (dem_adm < 0) dem_adm = 0;
+            fprintf(stderr, "  Admission (demand NVMe I/O):     %8.2f ms/token\n", dem_adm / g_tm_dec_tokens);
+        }
         /* Phase 1 decomposition of Expert slot acquisition (sub[1]):
          * sub[1] wraps lookup + victim/LRU + lock waits AND the synchronous
          * admission I/O of misses (loads run inline on this thread). The
@@ -954,13 +1052,11 @@ static void tm_report(void){
              * in generate(); never cumulative prefill+decode counters. */
             double slot_ms = g_win_slot_ms;   /* decode-only by construction, window-accumulated */
             double adm_ms  = g_win_adm_ms;    if (adm_ms < 0) adm_ms = 0;
-            double wgt_ms  = g_win_wgt_ms;    if (wgt_ms < 0) wgt_ms = 0;
-            double scl_ms  = g_win_scl_ms;    if (scl_ms < 0) scl_ms = 0;
             double mach_ms = slot_ms - adm_ms; if (mach_ms < 0) mach_ms = 0;
             fprintf(stderr, "  --- Slot Acquisition Decomposition (Phase 1, decode window) ---\n");
             fprintf(stderr, "  Slot acquisition total:          %8.2f ms/token\n", slot_ms / g_tm_dec_tokens);
-            fprintf(stderr, "    demand admission I/O inside:   %8.2f ms/token (weights %.2f + scales %.2f)\n",
-                    adm_ms / g_tm_dec_tokens, wgt_ms / g_tm_dec_tokens, scl_ms / g_tm_dec_tokens);
+            fprintf(stderr, "    demand admission I/O inside:   %8.2f ms/token (store load interval)\n",
+                    adm_ms / g_tm_dec_tokens);
             fprintf(stderr, "    cache machinery (excl I/O):    %8.2f ms/token\n", mach_ms / g_tm_dec_tokens);
             if (tm_on()) {
                 fprintf(stderr, "      lock wait:      %7.2f ms/token | hit/miss scan: %7.2f ms/token | LRU/victim: %7.2f ms/token\n",
@@ -973,24 +1069,22 @@ static void tm_report(void){
         fprintf(stderr, "  Actual routed INT4 percentage:   %8.2f%%\n", i4_pct);
         fprintf(stderr, "  Cache hits (INT3 / INT4):        %llu / %llu\n", (unsigned long long)g_cache_hit_int3, (unsigned long long)g_cache_hit_int4);
         fprintf(stderr, "  Cache misses (INT3 / INT4):      %llu / %llu\n", (unsigned long long)g_cache_miss_int3, (unsigned long long)g_cache_miss_int4);
-        fprintf(stderr, "  Admitted bytes (INT3 / INT4):    %.2f MB / %.2f MB\n", (double)g_admitted_bytes_int3 / 1048576.0, (double)g_admitted_bytes_int4 / 1048576.0);
+        /* Physical byte admission is store-owned under Forge (demand loads
+         * flow through qw_store_load -> backend pread); the legacy per-fmt
+         * engine byte counters only observed the removed private-sync path
+         * and read zero on every normal run, so they are no longer printed. */
+        if (g_xstore_report) {
+            ColiExpertStoreStats xs;
+            g_xstore_report->ops->stats(g_xstore_report, &xs);
+            fprintf(stderr, "  Admitted bytes (store physical): %.2f MB over %llu physical load(s)\n",
+                    (double)xs.admitted_bytes / 1048576.0, (unsigned long long)xs.physical_loads);
+        }
         fprintf(stderr, "  --- Traffic & Parallelism ---\n");
         fprintf(stderr, "  LOGICAL_WEIGHT_BYTES_PROCESSED:  %llu B/token (%.2f MB/token)\n", (unsigned long long)logical_bytes_per_tok, (double)logical_bytes_per_tok / 1048576.0);
         fprintf(stderr, "  Routed GEMV parallel invocations: %8.1f / token\n", (double)g_expert_gemv_parallel_invocations / g_tm_dec_tokens);
         fprintf(stderr, "===========================================================\n");
     }
 
-    fprintf(stderr,"\n[expert_io] demand: %llu loads (%llu bytes, %.2f MB), cum_expert_admission: %.1f ms, avg_latency: %.2f ms/load\n",
-            (unsigned long long)g_demand_loads, (unsigned long long)g_demand_bytes,
-            (double)g_demand_bytes / 1048576.0, g_demand_expert_admission_ms,
-            g_demand_loads ? g_demand_expert_admission_ms / g_demand_loads : 0.0);
-    fprintf(stderr,"[expert_io] demand split (CUMULATIVE prefill+decode): weights %.1f ms | scales %.1f ms (sum %.1f of %.1f total)\n",
-            g_demand_weight_ms, g_demand_scale_ms,
-            g_demand_weight_ms + g_demand_scale_ms, g_demand_expert_admission_ms);
-    fprintf(stderr,"[expert_io] pilot : %llu loads (%llu bytes, %.2f MB), cum_expert_admission: %.1f ms, avg_latency: %.2f ms/load\n",
-            (unsigned long long)g_pilot_loads, (unsigned long long)g_pilot_bytes,
-            (double)g_pilot_bytes / 1048576.0, g_pilot_expert_admission_ms,
-            g_pilot_loads ? g_pilot_expert_admission_ms / g_pilot_loads : 0.0);
     /* decode-window acquisition self-check: hits/misses are demand-only by
      * construction (single expert_get call site), so window acquisitions/token
      * must equal layers*topk. Any deviation means the window is contaminated
@@ -1723,6 +1817,7 @@ static void model_init(Model *m, const char *snap, int cap, int bits) {
             exit(1);
         }
         coli_expert_backend_pread_set_evict_notify(m->xstore, qw_evict_notify, m);
+        g_xstore_report = m->xstore;
         ColiAdmissionConfig acfg;
         memset(&acfg, 0, sizeof(acfg)); /* default OFF; Stage B wires knobs */
         m->xadmission = coli_admission_new(
@@ -1909,7 +2004,7 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pil
     }
     if (tw->nbytes == want_w3) {
         static int noted_3 = 0;
-        if (!noted_3) { fprintf(stderr, "[qwen36] packed INT3-g64 expert CPU residency active (1.38 MB/slot)\n"); noted_3 = 1; }
+        if (!noted_3) { fprintf(stderr, "[qwen36] packed INT3-g64 spec-shadow slot staging active (1.38 MB/slot; physical admissions are store-accounted)\n"); noted_3 = 1; }
         slot_ensure_format(m, s, 5);
         if (fused) {
             int64_t tot = ts->nbytes + tw->nbytes;
@@ -1925,7 +2020,7 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s, int is_pil
     } else if (tw->nbytes == want_w / 2) {
         if (!unpack_int8_mode()) {
             static int noted_p = 0;
-            if (!noted_p) { fprintf(stderr, "[qwen36] packed INT4 expert CPU residency active (1.77 MB/slot)\n"); noted_p = 1; }
+            if (!noted_p) { fprintf(stderr, "[qwen36] packed INT4 spec-shadow slot staging active (1.77 MB/slot; physical admissions are store-accounted)\n"); noted_p = 1; }
             slot_ensure_format(m, s, 4);
             if (fused) {
                 int64_t tot = ts->nbytes + tw->nbytes;
@@ -2095,7 +2190,9 @@ static unsigned long long g_pb_io_us = 0;    /* sum of preload load durations (u
 
 static void *spec_loader(void *arg){
     (void)arg;
-    while (1) {
+    /* Same lifecycle law as pilot_worker: finish the in-flight shadow load,
+     * then exit on the observed stop flag instead of looping forever. */
+    while (!__atomic_load_n(&g_workers_stop, __ATOMIC_ACQUIRE)) {
         int busy = 0;
         for (int i = 0; i < SPEC_RING_N; i++)
             if (spec_ring[i].state == 1) {
@@ -2110,10 +2207,14 @@ static void *spec_loader(void *arg){
     return NULL;
 }
 static void ensure_spec_loader_started(void){
-    if (spec_ring_on) return;
+    if (spec_ring_on || g_workers_stop) return;
     spec_ring_on = 1;
     memset(spec_ring, 0, sizeof spec_ring);
-    pthread_t t; pthread_create(&t, NULL, spec_loader, NULL); pthread_detach(t);
+    if (pthread_create(&g_spec_thr, NULL, spec_loader, NULL) != 0) {
+        fprintf(stderr, "Error: Failed to create spec loader thread\n");
+        exit(1);
+    }
+    g_spec_thr_live = 1;
 }
 /* issue speculative loads for layers i+1..i+depth from post-moe anchor x */
 static void spec_issue(Model *m, int i, const float *x) {
@@ -2178,24 +2279,36 @@ static int spec_serve(Model *m, int layer, int eid, Slot **out) {
         if (i3only && !spec_ring[r].s.is_int3) continue;
         if ((st == 1 || st == 2) && spec_ring[r].layer == layer && spec_ring[r].eid == eid) {
             if (st == 1) { while (__atomic_load_n(&spec_ring[r].state, __ATOMIC_ACQUIRE) == 1) sleep_ms(0); }
-            /* re-read post-wait: loader finished; copy out under our ownership */
+            /* Re-read post-wait and copy out UNDER g_pilot_mx: the issuer
+             * mutates/restyles ring entries only while holding this mutex,
+             * and the loader never touches buffers once state reaches 2 —
+             * so the lock closes the steal-during-copy race. The lease is
+             * formatted FAITHFULLY to the ring slot's real format: on
+             * unpacked-INT8 containers the shadow slot holds g/u/d blobs
+             * (is_int3=is_int4=0); the old code assumed packed INT4 and
+             * memcpy'd from a NULL w4 (deterministic SIGSEGV, hidden while
+             * speculation stayed default-off). */
+            pthread_mutex_lock(&g_pilot_mx);
+            int rfmt = spec_ring[r].s.is_int3 ? 5 : (spec_ring[r].s.is_int4 ? 4 : 1);
             if (!lease_init) { memset(lease, 0, sizeof lease); lease_init = 1; }
             Slot *L = &lease[lease_i++ & 7];
             /* rebuild lease through the engine's own format allocator so all
              * format-derived pointers/sizes are valid, then deep-copy blobs */
             slot_ensure_allocated(m, L);
-            slot_ensure_format(m, L, spec_ring[r].s.is_int3 ? 5 : 4);
+            slot_ensure_format(m, L, rfmt);
             size_t wb = spec_ring[r].wb, sb = spec_ring[r].sb;
-            if (spec_ring[r].s.is_int3) { if (L->w3 && wb) memcpy(L->w3, spec_ring[r].s.w3, wb); }
-            else { if (L->w4 && wb) memcpy(L->w4, spec_ring[r].s.w4, wb); }
-            if (L->gs && sb) memcpy(L->gs, spec_ring[r].s.gs, sb);
+            if (rfmt == 5) { if (L->w3 && spec_ring[r].s.w3 && wb) memcpy(L->w3, spec_ring[r].s.w3, wb); }
+            else if (rfmt == 4) { if (L->w4 && spec_ring[r].s.w4 && wb) memcpy(L->w4, spec_ring[r].s.w4, wb); }
+            else { if (L->g && spec_ring[r].s.g && wb) memcpy(L->g, spec_ring[r].s.g, wb); }
+            if (L->gs && spec_ring[r].s.gs && sb) memcpy(L->gs, spec_ring[r].s.gs, sb);
             L->eid = eid; L->pinned = 0;
+            pthread_mutex_unlock(&g_pilot_mx);
             if (spec_debug_on()) {
                 /* WAVE4 bisection: hash lease vs ring vs direct container read */
                 unsigned long long hl = 1469598103934665603ULL, hr = hl, hd = hl;
-                const uint8_t *lb = spec_ring[r].s.is_int3 ? L->w3 : L->w4;
-                const uint8_t *rb = spec_ring[r].s.is_int3 ? spec_ring[r].s.w3 : spec_ring[r].s.w4;
-                for (size_t z = 0; z < wb; z++) { hl ^= lb[z]; hl *= 1099511628211ULL; hr ^= rb[z]; hr *= 1099511628211ULL; }
+                const uint8_t *lb = rfmt == 5 ? L->w3 : (rfmt == 4 ? L->w4 : (const uint8_t *)L->g);
+                const uint8_t *rb = rfmt == 5 ? spec_ring[r].s.w3 : (rfmt == 4 ? spec_ring[r].s.w4 : (const uint8_t *)spec_ring[r].s.g);
+                for (size_t z = 0; z < wb && lb && rb; z++) { hl ^= lb[z]; hl *= 1099511628211ULL; hr ^= rb[z]; hr *= 1099511628211ULL; }
                 int la = m->active_of[layer];
                 char nm[256]; snprintf(nm, sizeof nm, "model.layers.%d.mlp.experts.%d.merged_weight", la, eid);
                 st_tensor *tw = st_find(&m->S, nm);
@@ -2408,9 +2521,14 @@ static void expert_acquire(Model *m, int layer, int eid, float router_mass, Slot
         ar->has_xres = 1;
     }
 miss_path:
-    /* SPECULATIVE SHADOW SERVE: a completed staging load satisfies this
-     * acquisition without NVMe. Accounted as a hit; slot -1 marks shadow. */
-    {
+    /* SPECULATIVE SHADOW SERVE: only legal while we hold NO reservation.
+     * When reserve() succeeded, control falls through here owning the
+     * admission identity — completing our own store load (publish) is
+     * mandatory. Serving from the shadow in that state leaked the live
+     * reservation: every later acquirer of the key spins forever in the
+     * BUSY coalesce poll below (pre-existing stall, exposed once the INT8
+     * shadow-copy segv was fixed). */
+    if (!ar->has_xres) {
         Slot *ss = NULL;
         if (spec_serve(m, layer, eid, &ss)) {
             if (_tp) { double _tn = tm_now(); g_eg_lock_wait_ms += _tl1 - _tl0; }
@@ -2445,6 +2563,7 @@ static void expert_finish(Model *m, int layer, int eid, AcqRes *ar, Slot **out) 
     }
     double _lio1 = tm_now();
     res.ms = _lio1 - _lio0;
+    if (ar->mode == ACQ_MODE_DEMAND) g_dem_load_ms += res.ms;
     /* Publish hands back a lease ONLY on the demand path; preload publishes
      * silently and re-reads through a counted lookup when verification or
      * derivation is needed (never release a view we were not given). */
@@ -2483,6 +2602,15 @@ static void expert_finish(Model *m, int layer, int eid, AcqRes *ar, Slot **out) 
         derive_slot(m, layer, eid, &pub, h);
         if (h->is_int3) g_cache_miss_int3++;
         else if (h->is_int4) g_cache_miss_int4++;
+        /* Store-truthful residency banner: fires on the FIRST real demand
+         * admission through the shared store (the old banner lived inside
+         * load_expert_merged, which under Forge only runs for shadow loads
+         * and never fired on normal runs). */
+        {
+            static int noted_res3 = 0, noted_res4 = 0;
+            if (res.fmt == 3 && !noted_res3) { fprintf(stderr, "[qwen36] packed INT3-g64 expert CPU residency active via expert store (1.38 MB/slot)\n"); noted_res3 = 1; }
+            else if (res.fmt == 4 && !noted_res4) { fprintf(stderr, "[qwen36] packed INT4 expert CPU residency active via expert store (1.77 MB/slot)\n"); noted_res4 = 1; }
+        }
         trace_emit("DEMAND", "INSERT", g_trace_tok, layer, eid,
                    res.fmt, res.bytes, res.ms, ar->victim_eid,
                    (int)pub.slot_hint);
@@ -3433,7 +3561,10 @@ static void pilot_realload(Model *m, int layer, int eid) {
 
 static void *pilot_worker(void *arg) {
     (void)arg;
-    while (1) {
+    /* Lifecycle: observe the stop flag BEFORE claiming; an in-flight job
+     * runs to its terminal publish/abort, then this loop re-checks and
+     * exits. Unclaimed entries are never consumed once shutdown begins. */
+    while (!__atomic_load_n(&g_workers_stop, __ATOMIC_ACQUIRE)) {
         unsigned w = __atomic_load_n(&pilot_w, __ATOMIC_ACQUIRE);
         unsigned my = __atomic_load_n(&pilot_r, __ATOMIC_ACQUIRE);
         if (my >= w) { sleep_ms(1); continue; }
@@ -3601,9 +3732,7 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out) {
      * prompt's prefill can contaminate the deltas. */
     {
         if (g_window_armed) {
-            g_win_adm_ms    += g_demand_expert_admission_ms - g_win_adm0;
-            g_win_wgt_ms    += g_demand_weight_ms - g_win_wgt0;
-            g_win_scl_ms    += g_demand_scale_ms - g_win_scl0;
+            g_win_adm_ms    += g_dem_load_ms - g_win_demload0;
             g_win_slot_ms   += g_moe_sub[1] - g_win_slot0;
             g_win_lock_ms   += g_eg_lock_wait_ms - g_win_lock0;
             g_win_lookup_ms += g_eg_lookup_ms - g_win_lookup0;
@@ -3673,8 +3802,7 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out) {
         g_rep_layers = c->n_layers; g_rep_topk = c->topk;
         if (!g_window_armed) g_prefill_acq = g_acq_hits + g_acq_miss;
         g_win_hits0 = g_acq_hits; g_win_miss0 = g_acq_miss;
-        g_win_adm0 = g_demand_expert_admission_ms;
-        g_win_wgt0 = g_demand_weight_ms; g_win_scl0 = g_demand_scale_ms;
+        g_win_demload0 = g_dem_load_ms;
         g_win_slot0 = g_moe_sub[1];
         g_win_lock0 = g_eg_lock_wait_ms; g_win_lookup0 = g_eg_lookup_ms; g_win_victim0 = g_eg_victim_ms;
         g_window_armed = 1; g_window_fold_armed = 1;
@@ -4077,7 +4205,11 @@ static void print_exact_memory_accounting(Model *m) {
     uint64_t fixed_post_quant_bytes = embed_bytes + unreg_f32_bytes + qdw_int8_bytes + qdw_scale_bytes + dn_state_bytes;
 
     /* Stage A: slot/format composition comes from the store's emeta scan
-     * (container-level truth) and live byte counts from its stats. */
+     * (container-level truth) and live byte counts from its stats.
+     * F1 hardening: the four previously-conflated quantities are now
+     * reported separately — container expert census (how many experts the
+     * CONTAINER holds), cache slot capacity (the per-layer cap budget),
+     * and live residency bytes from the store's own stats. */
     int total_int3_slots = 0;
     int total_int4_slots = 0;
     int total_int8_slots = 0;
@@ -4091,12 +4223,18 @@ static void print_exact_memory_accounting(Model *m) {
                 else total_int8_slots++;
             }
     }
-    uint64_t total_allocated_slots = total_int3_slots + total_int4_slots + total_int8_slots;
+    uint64_t total_container_experts = total_int3_slots + total_int4_slots + total_int8_slots;
+    uint64_t cache_slot_capacity = 0;
+    for (int l = 0; l < c->n_layers; l++) cache_slot_capacity += (uint64_t)m->cache_cap[l];
     uint64_t allocated_expert_bytes = 0;
+    uint64_t store_capacity_bytes = 0;
+    uint64_t store_pinned = 0;
     {
         ColiExpertStoreStats xs;
         m->xstore->ops->stats(m->xstore, &xs);
         allocated_expert_bytes = xs.resident_bytes;
+        store_capacity_bytes = xs.capacity_bytes;
+        store_pinned = xs.pinned_count;
     }
 
     fprintf(stderr, "\n=======================================================\n");
@@ -4119,8 +4257,14 @@ static void print_exact_memory_accounting(Model *m) {
     fprintf(stderr, "POST-QUANT FIXED RESIDENT FLOOR:           %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
             (unsigned long long)fixed_post_quant_bytes, (double)fixed_post_quant_bytes/1048576.0, (double)fixed_post_quant_bytes/1073741824.0);
     fprintf(stderr, "ACTIVE EXPERT CACHE FORMAT:                %s\n", fmt_str);
-    fprintf(stderr, "ALLOCATED EXPERT SLOTS (%llu slots: %d INT3, %d INT4): %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
-            (unsigned long long)total_allocated_slots, total_int3_slots, total_int4_slots,
+    fprintf(stderr, "EXPERT CONTAINER CENSUS (%llu experts: %d INT3, %d INT4, %d INT8)\n",
+            (unsigned long long)total_container_experts, total_int3_slots, total_int4_slots, total_int8_slots);
+    fprintf(stderr, "CACHE SLOT CAPACITY (%llu slots: %d layers x cap budget):  %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
+            (unsigned long long)cache_slot_capacity, c->n_layers,
+            (unsigned long long)store_capacity_bytes,
+            (double)store_capacity_bytes/1048576.0, (double)store_capacity_bytes/1073741824.0);
+    fprintf(stderr, "STORE RESIDENCY (live, pinned %llu):       %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
+            (unsigned long long)store_pinned,
             (unsigned long long)allocated_expert_bytes,
             (double)allocated_expert_bytes/1048576.0, (double)allocated_expert_bytes/1073741824.0);
     fprintf(stderr, "TOTAL COMPUTED LIVE RESIDENT:              %12llu bytes (%7.3f MiB / %6.3f GiB)\n",
@@ -4280,15 +4424,16 @@ int main(int argc, char **argv) {
 
     /* coli serve mode: speak the gateway wire protocol instead of argv generation */
     if (getenv("SERVE") && getenv("SERVE")[0] == '1') {
-        if (!g_tok) { fprintf(stderr, "[serve] tokenizer.json required (put in SNAP or set TOK)\n"); return 1; }
+        if (!g_tok) { fprintf(stderr, "[serve] tokenizer.json required (put in SNAP or set TOK)\n"); background_workers_shutdown(); return 1; }
         serve_loop(&m);
+        background_workers_shutdown();
         return 0;
     }
 
     const char *corpus_path = getenv("CORPUS_FILE");
     if (corpus_path && *corpus_path) {
         FILE *cf = fopen(corpus_path, "rb");
-        if (!cf) { perror(corpus_path); return 1; }
+        if (!cf) { perror(corpus_path); background_workers_shutdown(); return 1; }
         fseek(cf, 0, SEEK_END); long cflen = ftell(cf); fseek(cf, 0, SEEK_SET);
         char *cbuf = malloc(cflen + 1);
         if (fread(cbuf, 1, cflen, cf) != (size_t)cflen) {}
@@ -4321,6 +4466,7 @@ int main(int argc, char **argv) {
             else break;
         }
         free(cbuf);
+        background_workers_shutdown();
         const char *census_out = getenv("CENSUS_OUT");
         if (census_out && *census_out) dump_routing_census(&m, census_out);
         double tot = m.hits + m.miss;
@@ -4360,6 +4506,7 @@ fprintf(stderr, "Coalesce diagnostics: demand waits=%ld pilot skips=%ld | max lo
                 printf("%-24s | %10d | %10d | %10.4f nats\n", dom, s_np, scored, s_nll);
                 free(s_p); free(s_f);
             }
+            background_workers_shutdown();
             double t_all1 = now_s();
             double dt_all = t_all1 - t_all0;
             double agg_nll = (total_scored > 0) ? (total_weighted_nll / total_scored) : 0.0;
@@ -4376,6 +4523,7 @@ fprintf(stderr, "Coalesce diagnostics: demand waits=%ld pilot skips=%ld | max lo
         } else {
             double nll; double t = now_s();
             int scored = tf_nll(&m, full, nfull, np, &nll);
+            background_workers_shutdown();
             double dt = now_s() - t;
             double tot = m.hits + m.miss;
             printf("TF-NLL: %.4f nats/token over %d tokens | ppl = %.2f\n", nll, scored, exp(nll));
@@ -4410,6 +4558,10 @@ fprintf(stderr, "Coalesce diagnostics: demand waits=%ld pilot skips=%ld | max lo
     double t = now_s();
     generate(&m, prompt, np, n_new, out);
     double dt = now_s() - t;
+    /* Lifecycle boundary: join background workers before any report is
+     * printed or trace stream closed — their contributions are final and
+     * no thread can touch model/store/FILE state past this point. */
+    background_workers_shutdown();
 
     /* DUMP=<path>: write last-token logits (raw float32, vocab) for a torch-free
      * cosine comparison against tools/_ref_dn.py --dump. */

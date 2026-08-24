@@ -903,6 +903,9 @@ tests/test_qwen36_i4_kernel$(EXE): tests/test_qwen36_i4_kernel.c
 tests/test_qwen36_ctx$(EXE): tests/test_qwen36_ctx.c qwen36.c st.h json.h compat.h expert_backend_pread.c expert_backend_pread.h admission.c admission.h expert_store.h expert_store_registry.h tensor.h
 	$(CC) $(CFLAGS) $< expert_backend_pread.c admission.c expert_store_registry.c -o $@ $(LDFLAGS)
 
+tests/test_qwen36_lifecycle$(EXE): tests/test_qwen36_lifecycle.c qwen36.c st.h json.h compat.h expert_backend_pread.c expert_backend_pread.h admission.c admission.h expert_store.h expert_store_registry.h tensor.h
+	$(CC) $(CFLAGS) $< expert_backend_pread.c admission.c expert_store_registry.c -o $@ $(LDFLAGS)
+
 inkling$(EXE): inkling.c st.h json.h compat.h $(INK_CUDA_OBJ) $(METAL_OBJ)
 	$(CC) $(CFLAGS) inkling.c $(INK_CUDA_OBJ) $(METAL_OBJ) -o inkling$(EXE) $(LDFLAGS)
 
