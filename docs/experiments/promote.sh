@@ -63,7 +63,7 @@ fi
 say ""
 if [[ $FAIL -eq 0 ]]; then
   say "VERDICT: PROMGATE_LOCAL_GREEN — ref $(git rev-parse HEAD)"
-  say "Stage C real-container A/B + independent verification still required before deploy."
+  say "Stage C real-container A/B is complete; fresh independent verification is still required before any merge or deploy."
 else
   say "VERDICT: PROMGATE_RED — do not promote"
 fi
