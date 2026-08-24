@@ -399,6 +399,7 @@ static void model_init(Model *m, const char *snap, int cap, int bits) {
         xd.scales_name_template = "model.layers.%d.mlp.experts.%d.qs";
         xd.drop_pagecache = g_expert_drop;
         xd.slots_per_layer = cap;
+        xd.expert_numel = (long long)c->inter * c->hidden * 3;
         if (coli_expert_backend_pread_open(&xd, &m->xstore, err, sizeof(err)) != 0) {
             fprintf(stderr, "Error: olmoe pread expert store open failed: %s\n", err);
             exit(1);

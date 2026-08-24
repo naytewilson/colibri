@@ -1713,6 +1713,9 @@ static void model_init(Model *m, const char *snap, int cap, int bits) {
          * capacity_bytes derivation would over-provision on mixed containers
          * (its max-slot estimate uses one class), so pass slots directly. */
         xd.slots_per_layer = cap;
+        /* Adapter-declared geometry for classification: same math as
+         * expert_fmt (untrusted headers must not pick the format). */
+        xd.expert_numel = (long long)c->inter * c->hidden * 3;
         if (getenv("COLI_FUSED_LOAD") && getenv("COLI_FUSED_LOAD")[0] == '1')
             xd.fused_read = 1;
         if (coli_expert_backend_pread_open(&xd, &m->xstore, err, sizeof(err)) != 0) {

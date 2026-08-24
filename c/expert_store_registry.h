@@ -104,6 +104,12 @@ typedef struct {
      * capacity_bytes derivation (whose max-slot estimate can diverge on
      * mixed-format containers). 0 = derive from capacity_bytes. */
     int slots_per_layer;
+    /* Authoritative LOGICAL element count of one merged expert-weight
+     * tensor (adapter-computed from config, mirroring the frozen engines'
+     * expert_fmt math). When >0, format classification uses THIS instead of
+     * the container header's shape field — untrusted/mismatched headers
+     * then fail closed at open instead of misclassifying. 0 = trust header. */
+    long long expert_numel;
 } ColiExpertStoreDescriptor;
 
 /* Open a store from a model-neutral descriptor (v2). Zero on success with

@@ -871,12 +871,18 @@ int coli_expert_backend_pread_open(const ColiExpertStoreDescriptor *desc,
                          wnm);
                 goto fail;
             }
-            int fmt = pbs_classify(tw->nbytes, tw->numel);
+            /* Classification numel: adapter-declared geometry wins over the
+             * container header (untrusted input; mismatch then fails closed
+             * as unclassifiable instead of silently reading INT8). */
+            long long numel_eff = desc->expert_numel > 0
+                                      ? desc->expert_numel
+                                      : (long long)tw->numel;
+            int fmt = pbs_classify(tw->nbytes, numel_eff);
             if (!fmt) {
                 snprintf(error, error_size,
-                         "pread backend: %s (%lld B / %lld elems) is not "
-                         "INT8/INT4/INT3-g64 classifiable",
-                         wnm, (long long)tw->nbytes, (long long)tw->numel);
+                         "pread backend: %s (%lld B / %lld logical elems) is "
+                         "not INT8/INT4/INT3-g64 classifiable",
+                         wnm, (long long)tw->nbytes, (long long)numel_eff);
                 goto fail;
             }
             int64_t sb = 0;
