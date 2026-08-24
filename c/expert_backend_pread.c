@@ -681,6 +681,44 @@ void coli_expert_backend_pread_set_evict_notify(
     PBS_UNLOCK(bk);
 }
 
+/* Read-only policy preview: which RESIDENT EXPERT would (layer,index)
+ * displace if claimed right now? Mirrors pbs_pick_victim stages 1-2 without
+ * mutating anything or charging counters.
+ * Returns: -1 = no displacement (key resident / free capacity / bad args);
+ * -2 = every slot reserved (a claim would spin-wait);
+ * >= 0 = the prospective victim's expert id within that layer. */
+int coli_expert_backend_pread_would_evict(ColiExpertStore *store,
+                                          const ColiExpertKey *key) {
+    PreadBackend *bk = (PreadBackend *)store;
+    if (!bk || !key || key->layer < 0 || key->layer >= bk->n_layers ||
+        key->expert < 0 || key->expert >= bk->n_experts)
+        return -1;
+    PBS_LOCK(bk);
+    int r = -1;
+    if (!pbs_find_resident(bk, key->layer, key->expert) &&
+        bk->layers[key->layer].reserving[key->expert] < 0) {
+        PreadLayer *pl = &bk->layers[key->layer];
+        int lru = -1;
+        for (int i = 0; i < pl->n; i++) {
+            PreadSlot *s = &pl->slots[i];
+            if (s->state != PBS_RESIDENT || s->pinned_by_key) continue;
+            if (lru < 0 || s->used < pl->slots[lru].used) lru = i;
+        }
+        if (lru < 0) {
+            for (int i = 0; i < pl->n; i++) {
+                PreadSlot *s = &pl->slots[i];
+                if (s->state != PBS_RESIDENT) continue;
+                if (lru < 0 || s->used < pl->slots[lru].used) lru = i;
+            }
+        }
+        if (pl->n < pl->cap) r = -1; /* growth room */
+        else if (lru < 0) r = -2;    /* all reserved */
+        else r = pl->slots[lru].index;
+    }
+    PBS_UNLOCK(bk);
+    return r;
+}
+
 /* Pre-commit every slot's segment buffers to max size and touch their
  * pages (COLIBRI_PROBE_TOUCH_SLOTS semantics for store-owned memory). */
 int coli_expert_backend_pread_prewarm(ColiExpertStore *store) {

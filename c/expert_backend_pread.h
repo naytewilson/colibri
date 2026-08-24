@@ -58,6 +58,12 @@ void coli_expert_backend_pread_set_evict_notify(
     ColiExpertStore *store,
     void (*cb)(void *ud, int layer, int index, int fmt, long slot), void *ud);
 
+/* Read-only policy preview: which resident EXPERT would this key displace
+ * if claimed now? >=0 victim expert id; -1 no displacement (resident or
+ * free capacity); -2 all slots reserved. No mutation, no accounting. */
+int coli_expert_backend_pread_would_evict(ColiExpertStore *store,
+                                          const ColiExpertKey *key);
+
 /* Allocate and touch every slot's segment buffers at max size (RSS commit
  * probe semantics for store-owned memory). Zero on success. */
 int coli_expert_backend_pread_prewarm(ColiExpertStore *store);
