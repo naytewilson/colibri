@@ -31,17 +31,34 @@ for f in qwen36.c st.h json.h compat.h; do
   git show "$BASE:c/$f" > "$TDIR/$f" || { say "FAIL baseline extract $f"; exit 1; }
 done
 clang -O3 -Xclang -fopenmp -I/opt/homebrew/opt/libomp/include "$TDIR"/qwen36.c -o "$TDIR/qwen36_base" -lm -L/opt/homebrew/opt/libomp/lib -lomp
+i=0
 for arm in "" "PILOT=1" "COLI_FUSED_LOAD=1" "COLI_EXPERT_ASYNC=1" "COLI_BATCH_ACQ=1"; do
-  # engines may exit 1 on the known tiny-fixture mismatch; the gate is cmp
-  env SNAP=/tmp/kilo/qwen36_tiny_i8 OMP_NUM_THREADS=4 $arm DUMP="$TDIR/lb.f32" "$TDIR/qwen36_base" 16 8 /tmp/kilo/ref_qwen36.json >/dev/null 2>&1 || true
-  env SNAP=/tmp/kilo/qwen36_tiny_i8 OMP_NUM_THREADS=4 $arm DUMP="$TDIR/lp.f32" c/qwen36 16 8 /tmp/kilo/ref_qwen36.json >/dev/null 2>&1 || true
-  cmp -s "$TDIR/lb.f32" "$TDIR/lp.f32" && say "PASS logits identical [$arm]" || { say "FAIL logits [$arm]"; FAIL=1; }
+  i=$((i+1))
+  # FAIL-CLOSED parity: per-arm unique artifacts, pre-cleared; the known
+  # tiny-fixture nonzero engine exit is permitted ONLY if that arm actually
+  # produced a fresh nonempty DUMP. A stale/absent dump is a FAIL.
+  lb="$TDIR/lb_$i.f32"; lp="$TDIR/lp_$i.f32"
+  rm -f "$lb" "$lp"
+  brc=0; frc=0
+  env SNAP=/tmp/kilo/qwen36_tiny_i8 OMP_NUM_THREADS=4 $arm DUMP="$lb" "$TDIR/qwen36_base" 16 8 /tmp/kilo/ref_qwen36.json >/dev/null 2>&1 || brc=$?
+  env SNAP=/tmp/kilo/qwen36_tiny_i8 OMP_NUM_THREADS=4 $arm DUMP="$lp" c/qwen36 16 8 /tmp/kilo/ref_qwen36.json >/dev/null 2>&1 || frc=$?
+  fresh() { [[ -s "$1" && "$(stat -f %z "$1" 2>/dev/null || stat -c %s "$1")" -gt 0 ]]; }
+  if ! fresh "$lb"; then say "FAIL [$arm] baseline produced no fresh DUMP (rc=$brc)"; FAIL=1; continue; fi
+  if ! fresh "$lp"; then say "FAIL [$arm] forge produced no fresh DUMP (rc=$frc)"; FAIL=1; continue; fi
+  cmp -s "$lb" "$lp" \
+    && say "PASS logits identical [$arm] (rc b/f=$brc/$frc, $(stat -f %z "$lb" 2>/dev/null || stat -c %s "$lb")B)" \
+    || { say "FAIL logits differ [$arm] (rc b/f=$brc/$frc)"; FAIL=1; }
 done
 
 say "== trace replay =="
-SNAP=/tmp/kilo/qwen36_tiny_i8 OMP_NUM_THREADS=2 PILOT=1 COLI_MOE_TRACE="$TDIR/t3.tsv" c/qwen36 16 8 /tmp/kilo/ref_qwen36.json >/dev/null 2>&1 || true
-c/qwen36_trace_replay "$TDIR/t3.tsv" 2>&1 | grep -q TRACE_REPLAY_SELF_CONSISTENT \
-  && say "PASS trace replay self-consistent" || { say "FAIL trace replay"; FAIL=1; }
+rm -f "$TDIR/t3.tsv"
+trc=0
+SNAP=/tmp/kilo/qwen36_tiny_i8 OMP_NUM_THREADS=2 PILOT=1 COLI_MOE_TRACE="$TDIR/t3.tsv" c/qwen36 16 8 /tmp/kilo/ref_qwen36.json >/dev/null 2>&1 || trc=$?
+if [[ -s "$TDIR/t3.tsv" ]] && c/qwen36_trace_replay "$TDIR/t3.tsv" 2>&1 | grep -q TRACE_REPLAY_SELF_CONSISTENT; then
+  say "PASS trace replay self-consistent (fresh stream)"
+else
+  say "FAIL trace replay (missing/stale stream or inconsistent)"; FAIL=1
+fi
 
 say ""
 if [[ $FAIL -eq 0 ]]; then

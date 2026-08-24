@@ -70,8 +70,23 @@ tests/test_expert_backend_pread.c (all-reserved spin drain).
 
 ## 6. Known-open items at builder closeout
 
-- Stage C node-02 real-container A/B: BLOCKED on cross-lane memory contention
-  (anvil event #55624); resume via `/home/nayte/forge_f1/ab_pair.sh`.
-- olmoe end-to-end vs real model: same node dependency (UNMEASURED locally).
+- ~~Stage C node-02 real-container A/B: BLOCKED on cross-lane memory
+  contention~~ **CLEARED / SUPERSEDED** (anvil blocker #55624 cleared by
+  event #55760): A/B completed in a quiet window after two gdb-proven fixes
+  (`b2c337b` explicit slots_per_layer budget; `2620ca0` adapter-declared
+  expert_numel classification). Outputs IDENTICAL baseline-vs-forge across
+  run pairs; tok/s within run variance under contention conditions.
+- olmoe end-to-end vs real model: UNMEASURED (requires node-02; still open).
 - HF tiny fixture 6/16: pre-existing baseline property (regression-
-  equivalence discriminator only; identical on baseline and Forge).
+  equivalence discriminator only; identical on baseline and Forge). NOT an
+  HF-oracle pass.
+- Performance anchor: 4.98 tok/s warm median remains the HISTORICAL
+  idle-node anchor from the frozen campaign receipt. Today's A/B medians
+  (baseline 3.87–4.66, forge 4.37–4.50) are within-variance measurements
+  under sibling-contention conditions — NOT a new absolute anchor.
+- Promotion gate (`promote.sh`) is the LOCAL builder gate only. Independent
+  verification is a separate, not-yet-started step. No deployment or merge
+  has occurred; rollback reference remains frozen f04359a.
+- Canonical census (live git at d2801c6): TOTAL FORGE LINEAGE
+  f04359a..d2801c6 = 19 commits, 31 changed files; CONTINUATION-ONLY
+  66d4660..d2801c6 = 11 commits, 19 files.
