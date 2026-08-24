@@ -105,10 +105,14 @@ typedef struct {
 /* ---------- RAM-resident weight, quantized at load ---------- */
 typedef struct { int fmt; float *f; int8_t *q8; uint8_t *q4; float *s; int O, I, gs; } W;
 
-/* native compressed-tensors int4-g32 matrix, kept in the container layout */
+/* native compressed-tensors int4-g32 matrix, kept in the container layout.
+ * dense != NULL selects the EXACT track (bf16->f32 experts, no quantization):
+ * used by the correctness ladder so quantization drift never masquerades as
+ * a math bug; the serving artifact uses the native packed path. */
 typedef struct {
     uint32_t *packed;                       /* [O, I/8] words as stored on disk */
     float *scl;                             /* [O, I/32] f32 (converted from bf16) */
+    float *dense;                           /* [O, I] f32 exact-track alternative */
     int O, I, nw, ng;
 } Exp;
 
@@ -285,6 +289,7 @@ static void exp_load(Model *m, Exp *e, const char *base, int O, int I){
  * Scalar reference kernel; vectorized variant lands with the throughput wave. */
 static void exp_matvec(float *y, const float *x, const Exp *e){
     int O=e->O, ng=e->ng;
+    if(e->dense){ matmul(y,x,e->dense,1,e->I,O); return; }
     #pragma omp parallel for schedule(static)
     for(int r=0;r<O;r++){
         const uint32_t *pw=e->packed+(int64_t)r*e->nw;
@@ -342,8 +347,10 @@ static void load_cfg(Cfg *c, const char *snap){
     c->topk_group  =(int)req_num(tc,"topk_group");
     c->routed_scale=(float)req_num(tc,"routed_scaling_factor");
     c->rope_theta  =(float)req_num(tc,"rope_theta");
-    { jval *pr=json_get(tc,"partial_rotary_factor");
-      c->rotary_dim = pr ? (int)(pr->num*c->qk_rope) : c->qk_rope; }
+    /* modeling_bailing_moe_v3.RotaryEmbedding.__init__ force-sets
+     * head_dim=qk_rope_head_dim and partial_rotary_factor=1.0: RoPE covers
+     * the FULL 64-dim rope slice (config rotary_dim == qk_rope_head_dim). */
+    c->rotary_dim = c->qk_rope;
     jval *ep=json_get(tc,"rms_norm_eps"); c->eps=ep?(float)ep->num:1e-6f;
     c->qk_head=c->qk_nope+c->qk_rope;
     c->attn_scale=1.f/sqrtf((float)c->qk_head);
@@ -379,7 +386,8 @@ static void model_init(Model *m, const char *snap, int n_layers_env){
     if(n_layers_env>0&&n_layers_env<c->n_layers) c->n_layers=n_layers_env;
     st_init_multi(&m->S,snap,NULL);
     int is_int4 = st_has(&m->S,"model.layers.1.mlp.experts.0.gate_proj.weight_packed");
-    if(!is_int4) fprintf(stderr,"[L3] note: no packed experts in snapshot — BF16 parity mode (experts load-time quantized)\n");
+    if(!is_int4) fprintf(stderr,"[L3] note: no packed experts in snapshot — %s\n",
+        getenv("L3_EXACT_EXPERTS")?"EXACT track (f32 experts)":"bf16-emulated-int4 experts");
     int bits      = getenv("L3_BITS")?atoi(getenv("L3_BITS")):32;
     int hbits     = getenv("L3_HEAD_BITS")?atoi(getenv("L3_HEAD_BITS")):bits;
     double t0=now_s();
@@ -442,10 +450,26 @@ static void model_init(Model *m, const char *snap, int n_layers_env){
                     exp_load(m,&o->exps[e2*3+1],NM("model.layers.%d.mlp.experts.%d.up_proj",i,e2),c->moe_inter,c->hidden);
                     exp_load(m,&o->exps[e2*3+2],NM("model.layers.%d.mlp.experts.%d.down_proj",i,e2),c->hidden,c->moe_inter);
                 }
+            } else if(getenv("L3_EXACT_EXPERTS")){
+                /* EXACT TRACK: keep routed experts at bf16->f32 precision so
+                 * parity adjudication measures MATH, not quantization. */
+                for(int e2=0;e2<c->n_experts;e2++){
+                    static const char *mt[3]={"gate_proj","up_proj","down_proj"};
+                    int OO[3]={c->moe_inter,c->moe_inter,c->hidden};
+                    int II[3]={c->hidden,c->hidden,c->moe_inter};
+                    for(int mi=0;mi<3;mi++){
+                        Exp *ex=&o->exps[e2*3+mi];
+                        ex->O=OO[mi]; ex->I=II[mi];
+                        ex->dense=falloc((int64_t)OO[mi]*II[mi]);
+                        char full[700];
+                        snprintf(full,sizeof(full),"model.layers.%d.mlp.experts.%d.%s.weight",i,e2,mt[mi]);
+                        st_read_f32(&m->S,full,ex->dense,0);
+                        m->wbytes += (int64_t)OO[mi]*II[mi]*4;
+                    }
+                }
             } else {
-                /* BF16 snapshot: emulate the native-int4 Exp layout by
-                 * quantizing each expert matrix into the same g32 packed form
-                 * so both modes share one kernel (parity mode only). */
+                /* BF16 snapshot without exact-expert flag: emulate the native
+                 * int4-g32 layout by load-time quantization (shared kernel). */
                 for(int e2=0;e2<c->n_experts;e2++){
                     static const char *mt[3]={"gate_proj","up_proj","down_proj"};
                     int OO[3]={c->moe_inter,c->moe_inter,c->hidden};
@@ -531,6 +555,7 @@ static void model_state_reset(Model *m){
     }
 }
 
+static int g_debug=-1;
 /* ---------- KDA layer (chunk of C tokens) ---------- */
 static void kda_forward(Model *m, Layer *l, int li, const float *x, int C, float *out){
     Cfg *c=&m->c; Kda *a=&l->a;
@@ -541,6 +566,13 @@ static void kda_forward(Model *m, Layer *l, int li, const float *x, int C, float
     w_matmul(q,x,&a->q,C); w_matmul(k,x,&a->k,C); w_matmul(v,x,&a->v,C);
     w_matmul(gp,x,&a->g,C); w_matmul(graw,x,&a->f,C);
     matmul(braw,x,a->bp,C,c->hidden,H);
+    if(g_debug<0) g_debug=getenv("L3_DEBUG")?atoi(getenv("L3_DEBUG")):0;
+    if(g_debug&&li==0){
+        fprintf(stderr,"DBG xn[0:4] %.6f %.6f %.6f %.6f\n",x[0],x[1],x[2],x[3]);
+        fprintf(stderr,"DBG q[0:4] %.6f %.6f %.6f %.6f\n",q[0],q[1],q[2],q[3]);
+        fprintf(stderr,"DBG graw[0:4] %.6f %.6f %.6f %.6f\n",graw[0],graw[1],graw[2],graw[3]);
+        fprintf(stderr,"DBG braw[0:2] %.6f %.6f\n",braw[0],braw[1]);
+    }
     float qscale=1.f/sqrtf((float)hd);
     for(int t=0;t<C;t++){
         float *qt=q+(int64_t)t*P, *kt=k+(int64_t)t*P, *tv=v+(int64_t)t*P;
@@ -573,6 +605,10 @@ static void kda_forward(Model *m, Layer *l, int li, const float *x, int C, float
                 alpha[i]=expf(c->gate_lb*sigmoidf_(a->A[h]*(z[i]+a->dt[(int64_t)h*hd+i])));
             float beta=sigmoidf_(bt[h]);
             float *S=m->kstate[li]+(int64_t)h*hd*hd;
+            if(g_debug&&li==0&&t==0&&h==0){
+                float s0=0; for(int z=0;z<hd*hd;z++) s0+=fabsf(S[z]);
+                fprintf(stderr,"DBG S_abssum_before %.6f\n",s0);
+            }
             /* S' = Diag(alpha) S ;  v' = beta (v - S'^T k) */
             for(int kk=0;kk<hd;kk++){
                 float *row=S+(int64_t)kk*hd; float al=alpha[kk];
@@ -584,8 +620,8 @@ static void kda_forward(Model *m, Layer *l, int li, const float *x, int C, float
             }
             /* S'' = S' + k v'^T ; o = S''^T q */
             for(int kk=0;kk<hd;kk++){
-                float *row=S+(int64_t)kk*hd; float kv=kn[kk], vtk=vt[kk];
-                for(int vv=0;vv<hd;vv++) row[vv]+=kv*vtk;
+                float *row=S+(int64_t)kk*hd; float kv=kn[kk];
+                for(int vv=0;vv<hd;vv++) row[vv]+=kv*vt[vv];
             }
             memset(oh,0,sizeof(oh));
             for(int kk=0;kk<hd;kk++){
@@ -593,12 +629,26 @@ static void kda_forward(Model *m, Layer *l, int li, const float *x, int C, float
                 for(int vv=0;vv<hd;vv++) oh[vv]+=qq*row[vv];
             }
             double ms=0; for(int vv=0;vv<hd;vv++) ms+=(double)oh[vv]*oh[vv];
+            if(g_debug&&li==0&&t==0&&h==0){
+                fprintf(stderr,"DBG alpha[0:2] %.6f %.6f\n",alpha[0],alpha[1]);
+                fprintf(stderr,"DBG qn[0:2] %.6f %.6f kn[0:2] %.6f %.6f beta %.6f\n",
+                        qn[0],qn[1],kn[0],kn[1],beta);
+                fprintf(stderr,"DBG vh[0:2] %.6f %.6f\n",vh[0],vh[1]);
+                fprintf(stderr,"DBG oh[0:4] %.6f %.6f %.6f %.6f ms %.6e\n",oh[0],oh[1],oh[2],oh[3],ms);
+                fprintf(stderr,"DBG vt[0:4] %.6f %.6f %.6f %.6f\n",vt[0],vt[1],vt[2],vt[3]);
+                fprintf(stderr,"DBG S_after[0:4] %.6f %.6f %.6f %.6f\n",S[0],S[1],S[2],S[3]);
+            }
             float r=1.f/sqrtf((float)(ms/hd)+c->eps);
             float *dst=ont+(int64_t)h*hd;
             for(int vv=0;vv<hd;vv++) dst[vv]=oh[vv]*r*a->onw[vv]*sigmoidf_(gpt[(int64_t)h*hd+vv]);
         }
     }
     w_matmul(out,on,&a->o,C);
+    if(g_debug&&li==0){
+        fprintf(stderr,"DBG conv_q[0:4] %.6f %.6f %.6f %.6f\n",q[0],q[1],q[2],q[3]);
+        fprintf(stderr,"DBG on[0:4] %.6f %.6f %.6f %.6f\n",on[0],on[1],on[2],on[3]);
+        fprintf(stderr,"DBG out[0:4] %.6f %.6f %.6f %.6f\n",out[0],out[1],out[2],out[3]);
+    }
     free(q);free(k);free(v);free(gp);free(on);free(graw);free(braw);
 }
 
@@ -664,9 +714,20 @@ static void mla_forward(Model *m, Layer *l, int li, const float *x, int pos0, in
             }
             float *cx=ctxt+(int64_t)h*vh;
             float gate=sigmoidf_(gvt[h]);               /* head-wise gate */
+            if(getenv("L3_MLA_DEBUG")&&li==3&&tt==0&&h==0){
+                fprintf(stderr,"MLADBG Lc0[0:3] %.6f %.6f %.6f\n",
+                        m->Lc[li][0],m->Lc[li][1],m->Lc[li][2]);
+                fprintf(stderr,"MLADBG qabs[0:3] %.6f %.6f %.6f\n",qabs[0],qabs[1],qabs[2]);
+                fprintf(stderr,"MLADBG clat[0:3] %.6f %.6f %.6f\n",clat[0],clat[1],clat[2]);
+                fprintf(stderr,"MLADBG gate %.6f sc0 %.6f\n",gate,sc[0]);
+            }
             for(int d=0;d<vh;d++)
                 cx[d]=w_rowdot(&a->kvb,rbase+c->qk_nope+d,clat)*gate;
         }
+    }
+    if(getenv("L3_CTX_DUMP")&&li==3){
+        char cp2[600]; snprintf(cp2,sizeof(cp2),"%s/ctx_L%d.f32",getenv("L3_CTX_DUMP"),li);
+        FILE *cf=fopen(cp2,"wb"); if(cf){ fwrite(ctx,sizeof(float),(size_t)C*H*vh,cf); fclose(cf);} else perror(cp2);
     }
     w_matmul(out,ctx,&a->o,C);
     free(qa);free(qv);free(ckv);free(gv);free(ctx);
@@ -674,7 +735,7 @@ static void mla_forward(Model *m, Layer *l, int li, const float *x, int pos0, in
 
 /* ---------- grouped sigmoid top-k router (noaux_tc, exact) ---------- */
 static void route_select(const float *x, const Moe *o, const Cfg *c,
-                         int *idx, float *wsel){
+                         int li, int t, int *idx, float *wsel){
     float sco[4096], scores[4096], rt[4096], taken[4096];
     matmul(sco,x,o->router,1,c->hidden,c->n_experts);
     for(int e=0;e<c->n_experts;e++){
@@ -693,7 +754,10 @@ static void route_select(const float *x, const Moe *o, const Cfg *c,
         }
         gsv[g]=b1+b2; gsel[g]=g;
     }
-    for(int a=0;a<c->topk_group-1;a++)
+    /* full selection of the top-topk_group groups: a partial pass leaves
+     * slot topk_group-1 as an arbitrary leftover (measured at L3/t20: a
+     * group with gsum 0.194 lost its slot to a 0.108 leftover). */
+    for(int a=0;a<c->topk_group;a++)
         for(int b=a+1;b<c->n_group;b++)
             if(gsv[gsel[b]]>gsv[gsel[a]]){ int t=gsel[a];gsel[a]=gsel[b];gsel[b]=t; }
     unsigned char mask[4096]; memset(mask,0,(size_t)c->n_experts);
@@ -704,6 +768,27 @@ static void route_select(const float *x, const Moe *o, const Cfg *c,
         for(int e=0;e<c->n_experts;e++)
             if(mask[e]&&!taken[e]&&rt[e]>bv){ bv=rt[e]; best=e; }
         idx[kk]=best; taken[best]=1;
+    }
+    if(getenv("L3_DEBUG_ROUTE")){
+        const char *dp=getenv("L3_DEBUG_ROUTE");
+        int dl=atoi(dp),dt=atoi(strchr(dp,',')+1);
+        if(li==dl&&t==dt){
+            int ord[4096]; for(int e=0;e<c->n_experts;e++) ord[e]=e;
+            for(int a2=0;a2<c->n_experts-1;a2++)
+                for(int b2=a2+1;b2<c->n_experts;b2++)
+                    if(rt[ord[b2]]>rt[ord[a2]]){int tmp=ord[a2];ord[a2]=ord[b2];ord[b2]=tmp;}
+            fprintf(stderr,"RTDBG L%d t%d selected(score):",li,t);
+            for(int kk=0;kk<c->topk;kk++) fprintf(stderr," %d(%.5f)",idx[kk],scores[idx[kk]]);
+            fprintf(stderr,"\nRTDBG top12 rt:");
+            for(int j=0;j<12;j++) fprintf(stderr," %d(%.5f%s)",ord[j],rt[ord[j]],mask[ord[j]]?"":" MASKED");
+            fprintf(stderr,"\nRTDBG gsums:");
+            for(int g2=0;g2<c->n_group;g2++){
+                float b1=-1e30f,b2=-1e30f;
+                for(int j=0;j<Eg;j++){ float s2=rt[g2*Eg+j]; if(s2>b1){b2=b1;b1=s2;} else if(s2>b2)b2=s2; }
+                fprintf(stderr," %.5f",b1+b2);
+            }
+            fprintf(stderr,"\n");
+        }
     }
     float sm=0;
     for(int kk=0;kk<c->topk;kk++){ wsel[kk]=scores[idx[kk]]; sm+=wsel[kk]; }
@@ -720,7 +805,7 @@ static void moe_forward(Model *m, Layer *l, int li, const float *x, int C, float
     float *wsels=falloc((int64_t)C*c->topk);
     double tr0=now_s();
     for(int t=0;t<C;t++)
-        route_select(x+(int64_t)t*LT,o,c,idxs+(int64_t)t*c->topk,wsels+(int64_t)t*c->topk);
+        route_select(x+(int64_t)t*LT,o,c,li,t,idxs+(int64_t)t*c->topk,wsels+(int64_t)t*c->topk);
     m->t_router+=now_s()-tr0;
     if(m->routef) for(int t=0;t<C;t++){
         fwrite(&li,sizeof(int),1,m->routef);
@@ -792,6 +877,8 @@ static void dense_forward(Model *m, Layer *l, const float *x, int C, float *out)
 
 /* ---------- a CHUNK of C tokens through the stack ---------- */
 static float *g_x0=NULL; static int g_x0_n=0;
+static float *g_xl[128]={NULL}; static int g_xl_n=0;   /* per-layer injected inputs */
+static float *g_mi[128]={NULL};                        /* per-layer injected MoE inputs */
 static FILE *g_lfp=NULL;
 static float *step_chunk(Model *m, const int *ids, int pos0, int C){
     Cfg *c=&m->c; int D=c->hidden;
@@ -820,6 +907,13 @@ static float *step_chunk(Model *m, const int *ids, int pos0, int C){
     m->t_embed+=now_s()-te0;
     for(int i=0;i<c->n_layers;i++){
         Layer *l=&m->L[i];
+        if(g_xl[i]){
+            /* per-layer teacher forcing: restart the residual stream from the
+             * reference implementation's state so each layer is validated
+             * against identical inputs (defeats MoE routing chaos) */
+            if(pos0!=0||C>g_xl_n){ fprintf(stderr,"L3_XLDIR requires single-chunk prefill\n"); exit(1); }
+            memcpy(hidden,g_xl[i],(size_t)C*D*sizeof(float));
+        }
         double tn0=now_s();
         for(int t=0;t<C;t++) rmsnorm_(nrm+(int64_t)t*D,hidden+(int64_t)t*D,l->in_ln,D,c->eps);
         m->t_norm+=now_s()-tn0;
@@ -827,13 +921,22 @@ static float *step_chunk(Model *m, const int *ids, int pos0, int C){
         if(l->mla) mla_forward(m,l,i,nrm,pos0,C,att);
         else       kda_forward(m,l,i,nrm,C,att);
         m->t_attn+=now_s()-ta0;
+        if(getenv("L3_ATT_DUMP")){
+            char ap[600]; snprintf(ap,sizeof(ap),"%s/att_L%d.f32",getenv("L3_ATT_DUMP"),i);
+            FILE *af=fopen(ap,"wb"); if(af){ fwrite(att,sizeof(float),(size_t)C*D,af); fclose(af);} else perror(ap);
+        }
         for(int t=0;t<C;t++)
             for(int d=0;d<D;d++) hidden[(int64_t)t*D+d]+=att[(int64_t)t*D+d];
         tn0=now_s();
         for(int t=0;t<C;t++) rmsnorm_(nrm+(int64_t)t*D,hidden+(int64_t)t*D,l->post_ln,D,c->eps);
         m->t_norm+=now_s()-tn0;
+        if(g_mi[i]) memcpy(nrm,g_mi[i],(size_t)C*D*sizeof(float));
         if(l->sparse) moe_forward(m,l,i,nrm,C,mlp);
         else          dense_forward(m,l,nrm,C,mlp);
+        if(getenv("L3_MLP_DUMP")){
+            char ap2[600]; snprintf(ap2,sizeof(ap2),"%s/mlp_L%d.f32",getenv("L3_MLP_DUMP"),i);
+            FILE *mf=fopen(ap2,"wb"); if(mf){ fwrite(mlp,sizeof(float),(size_t)C*D,mf); fclose(mf);} else perror(ap2);
+        }
         for(int t=0;t<C;t++){
             for(int d=0;d<D;d++) hidden[(int64_t)t*D+d]+=mlp[(int64_t)t*D+d];
             if(m->trace) fwrite(hidden+(int64_t)t*D,sizeof(float),D,m->trace);
@@ -887,6 +990,38 @@ int main(int argc, char **argv){
         if(fread(g_x0,4,(size_t)g_x0_n*m->c.hidden,f)!=(size_t)g_x0_n*m->c.hidden){fprintf(stderr,"L3_X0 short read\n");return 1;}
         fclose(f);
     }
+    if(getenv("L3_XLDIR")){
+        char p2[600];
+        for(int i=0;i<m->c.n_layers;i++){
+            snprintf(p2,sizeof(p2),"%s/xin_L%d.f32",getenv("L3_XLDIR"),i);
+            FILE *f=fopen(p2,"rb");
+            if(!f) break;
+            fseek(f,0,SEEK_END); long nb=ftell(f); fseek(f,0,SEEK_SET);
+            int rows=(int)(nb/(4*(long)m->c.hidden));
+            if(g_xl_n&&rows!=g_xl_n){ fprintf(stderr,"L3_XLDIR row mismatch L%d\n",i); exit(1); }
+            g_xl_n=rows;
+            g_xl[i]=falloc((int64_t)rows*m->c.hidden);
+            if(fread(g_xl[i],4,(size_t)rows*m->c.hidden,f)!=(size_t)rows*m->c.hidden){fprintf(stderr,"L3_XLDIR short %s\n",p2);exit(1);}
+            fclose(f);
+        }
+        int nxl=0; for(int i=0;i<m->c.n_layers;i++) if(g_xl[i]) nxl++;
+        fprintf(stderr,"[L3] per-layer teacher forcing active (%d layers, %d rows)\n",nxl,g_xl_n);
+    }
+    if(getenv("L3_MOE_IN_DIR")){
+        char p3[700];
+        for(int i=0;i<m->c.n_layers;i++){
+            snprintf(p3,sizeof(p3),"%s/x_mlp_L%d.f32",getenv("L3_MOE_IN_DIR"),i);
+            FILE *f=fopen(p3,"rb");
+            if(!f) continue;
+            fseek(f,0,SEEK_END); long nb3=ftell(f); fseek(f,0,SEEK_SET);
+            int rows=(int)(nb3/(4*(long)m->c.hidden));
+            g_mi[i]=falloc((int64_t)rows*m->c.hidden);
+            if(fread(g_mi[i],4,(size_t)rows*m->c.hidden,f)!=(size_t)rows*m->c.hidden){fprintf(stderr,"MOE_IN short %s\n",p3);exit(1);}
+            fclose(f);
+        }
+        int nmi=0; for(int i=0;i<m->c.n_layers;i++) if(g_mi[i]) nmi++;
+        fprintf(stderr,"[L3] MoE-input teacher forcing active on %d layers\n",nmi);
+    }
 #ifdef _OPENMP
     omp_set_dynamic(0);
     if(getenv("L3_THREADS")) omp_set_num_threads(atoi(getenv("L3_THREADS")));
@@ -908,6 +1043,7 @@ int main(int argc, char **argv){
         while(*p&&np<cap){ int v=(int)strtol(p,&p,10); ids[np++]=v; while(*p==','||*p==' ')p++; }
     }
     if(g_x0) np=g_x0_n;
+    if(g_xl[0]) np=g_xl_n;
     if(np<1){ fprintf(stderr,"empty prompt\n"); return 1; }
     int maxt=maxt_env?maxt_env:np+ngen+8;
     kv_alloc(m,maxt);

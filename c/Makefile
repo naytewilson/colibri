@@ -419,6 +419,9 @@ kimi_k3$(EXE): kimi_k3.c st.h json.h tok.h tok_unicode.h tok_unicode_o200k.h com
 ling3$(EXE): ling3.c st.h json.h tok.h tok_unicode.h tok_unicode_o200k.h compat.h quant.h
 	$(CC) $(CFLAGS) ling3.c -o ling3$(EXE) $(LDFLAGS)
 
+ling3_check$(EXE): ling3_check.c json.h
+	$(CC) $(CFLAGS) ling3_check.c -o ling3_check$(EXE) $(LDFLAGS)
+
 # Use a baseline that matches the compiler target. macOS already targets a
 # portable baseline when ARCH is empty; forcing the x86 value there breaks
 # Apple Silicon. Unknown targets use native rather than an invalid x86 flag.

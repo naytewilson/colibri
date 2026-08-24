@@ -62,6 +62,11 @@ static int st_dtype_code(const char *s) {
     if (!strcmp(s, "F32"))  return 2;
     if (!strcmp(s, "U8"))   return 3;   /* dati quantizzati (int4 packed / int8) */
     if (!strcmp(s, "I8"))   return 3;
+    /* integer dtypes found in compressed-tensors containers (weight_shape I64,
+     * packed int32 words): indexed as RAW BYTES (dtype 3, byte-count reads).
+     * Consumers must know the real width; nothing auto-converts these.
+     * Affects: ling3.c native compressed-tensors intake only. */
+    if (!strcmp(s, "I64") || !strcmp(s, "I32") || !strcmp(s, "I16")) return 3;
     fprintf(stderr, "unsupported dtype: %s\n", s); exit(1);
 }
 
