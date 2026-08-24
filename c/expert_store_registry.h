@@ -87,6 +87,19 @@ typedef struct {
     void *engine_context;
     void *backend_config;
     void *backend_options;
+
+    /* --- v2.1 additive: expert-slot layout + I/O knobs for descriptor-
+     * driven out-of-core backends. Zero/NULL keeps backend defaults.
+     * Tensor-name templates are printf strings with %d layer, %d index —
+     * caller data, never hardcoded model specifics. */
+    const char *weights_name_template; /* required by storage backends */
+    const char *scales_name_template;  /* empty/NULL = weights-only slots */
+    int drop_pagecache;                /* fadvise DONTNEED after reads */
+    int fused_read;                    /* single-pread contiguous [scales][weights] */
+    /* Optional store-layer -> container-layer remap (borrowed, length
+     * n_layers). NULL = identity. Engines whose containers index experts
+     * under an active-subset layer id use this instead of forking names. */
+    const int *layer_map;
 } ColiExpertStoreDescriptor;
 
 /* Open a store from a model-neutral descriptor (v2). Zero on success with

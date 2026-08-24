@@ -243,11 +243,18 @@ static inline void coli_expert_unpin(ColiExpertStore *store,
         store->ops->unpin(store, key);
 }
 
+/* destroy() requires zero active leases and reservations (debug builds
+ * report both); double-destroy is a safe no-op. */
+static inline void coli_expert_destroy(ColiExpertStore *store) {
+    if (store && store->ops && store->ops->destroy)
+        store->ops->destroy(store);
+}
+
 static inline int coli_expert_lookup_batch(ColiExpertStore *store,
                                            const ColiExpertKey *keys,
                                            size_t count,
                                            ColiExpertView *views) {
-    if (!store || !store->ops) { 
+    if (!store || !store->ops) {
         if (views) memset(views, 0, count * sizeof(*views));
         return 0; 
     }
