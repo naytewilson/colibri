@@ -1,0 +1,793 @@
+sha,date,segment,is_merge,dominant_subsystem,class,subject
+0b789e06eb6448cd16bf904b23cc66e565f44295,2026-08-24,FORGE_F1,no,DOCS,DOC_RECEIPT_ONLY,docs(forge-f1): real-container paired A/B evidence for liveness closure
+f25d3c6c095beb085118fdf95694c5b9ccef42dc,2026-08-24,FORGE_F1,no,DOCS,DOC_RECEIPT_ONLY,docs(forge-f1): liveness/lease defect closure receipt; self-contained promote gate
+b7d3faf345823749dd457c402b5f3bb350c76783,2026-08-24,FORGE_F1,no,SHARED_STORE,FORGE_CORE_REQUIRED,fix(admission): acquire_batch transfers unique job leases; SATURATED coalescing
+b1e0709e18cdc13113fdad7c15e3ad436689e2c5,2026-08-24,FORGE_F1,no,QWEN36,QWEN36_REQUIRED,fix(engines): never hold g_xorder_mx across reserve (qwen36 + olmoe)
+f75719d25f9d43476d9f39ee571a71944e8e367a,2026-08-24,FORGE_F1,no,SHARED_STORE,FORGE_CORE_REQUIRED,fix(expert-store): F1-LIVE-1 liveness - non-blocking reserve with transient saturation
+486f557dc8e1c4bfb10ff7382dcb7c10a7602cd7,2026-08-24,FORGE_F1,no,DOCS,DOC_RECEIPT_ONLY,docs(forge-f1): correct canonical census provenance before verifier
+d5cc9c23c14d4fd566e70e3146600e7a8c97b7c2,2026-08-24,FORGE_F1,no,DOCS,DOC_RECEIPT_ONLY,docs(forge-f1): reconcile promgate closeout status before verifier
+fcb95f2e67aeb3b9e4db00635b9ad67d8d21b784,2026-08-24,FORGE_F1,no,DOCS,TEST_VALIDATION_REQUIRED,fix(promgate): fail-closed parity arms + receipt reconciliation (pre-verifier closure)
+d2801c65562decbb67645ace856175a69fed47c7,2026-08-24,FORGE_F1,no,DOCS,DOC_RECEIPT_ONLY,docs(forge-f1): continuation closeout receipt - Stage C A/B results; verdict
+2620ca0e395aae9fad7271e5ee4ab420e2f243e7,2026-08-24,FORGE_F1,no,SHARED_STORE,FORGE_CORE_REQUIRED,fix(expert-store): adapter-declared expert_numel wins over container header in format classification
+333a3eeeb7f4b8f57d58907419948bbe0109bf37,2026-08-24,FORGE_F1,no,DOCS,TEST_VALIDATION_REQUIRED,fix(promgate): tolerate known tiny-fixture engine exit-1 (gate is the cmp; not token count)
+c1982814f76915201c881b3f020aceadb256975d,2026-08-24,FORGE_F1,no,DOCS,TEST_VALIDATION_REQUIRED,fix(promgate): deterministic per-file baseline extract via git show
+e002918d44bf05947ab807687a32ff4d52148e25,2026-08-24,FORGE_F1,no,DOCS,TEST_VALIDATION_REQUIRED,fix(promgate): git archive from toplevel (worktree-safe)
+efa9ad080aa66ff773dbb8066236568adf645d71,2026-08-24,FORGE_F1,no,DOCS,TEST_VALIDATION_REQUIRED,fix(promgate): cd to repo root (script lives two levels deep)
+ef9666aa27fcb8dc3348d62955b448890e63a7ec,2026-08-24,FORGE_F1,no,DOCS,DOC_RECEIPT_ONLY,docs(forge-f1): Phase 8 deliverables - operating laws + ownership map; promotion gate script; promgate receipt banked from ANVIL 2f41cdc
+531e8be83f6b2fdd5b0eb925464cc03aa1f3e31f,2026-08-24,FORGE_F1,no,SHARED_STORE,OLMOE_REQUIRED,feat(olmoe): Phase 7 second-consumer port onto shared pread/LRU store - duplicate machinery deleted (~500-line class)
+b2c337b215462fbc7e484a40cf258160f9c25467,2026-08-24,FORGE_F1,no,SHARED_STORE,FORGE_CORE_REQUIRED,fix(expert-store): explicit slots_per_layer descriptor budget - fixes Stage C real-container over-provision
+ca7e9e49e5a8b03a8b5b1485757cf6675f2d4020,2026-08-24,FORGE_F1,no,SHARED_STORE,FORGE_CORE_REQUIRED,feat(qwen36): Stage B - batch + async finish concurrency routed through shared admission runner
+dda965f341fe8828c568c3e387201eb4ce93cbda,2026-08-24,FORGE_F1,no,QWEN36,GENERATED_OR_ACCIDENTAL,chore(forge-f1): untrack stray build binaries (qwen36_trace_replay; qwen36_policy_sim) + gitignore
+66d4660f85cf90fd5bb32a973708825ae8223818,2026-08-24,FORGE_F1,no,DOCS,DOC_RECEIPT_ONLY,docs(forge-f1): Stage A handoff - gates; mechanics invariants; exact continuation plan
+a54f834f2e2eccef40b0abaa0d3c3c2578dde41c,2026-08-24,FORGE_F1,no,SHARED_STORE,QWEN36_REQUIRED,feat(qwen36): Stage A port onto shared pread/LRU store - live cache extracted; bit-identical vs baseline
+3bd496ebab45ffd6c3f9963843fb1a0446c55c6f,2026-08-24,FORGE_F1,no,QWEN36,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,feat(telemetry): engine-agnostic v3/v4 stream writers + counters aggregate; qwen36 emitters rerouted with zero format drift
+77c117cfd49b38d3cedb7c9860bba3dc7c49af76,2026-08-23,FORGE_F1,no,SHARED_STORE,FORGE_CORE_REQUIRED,feat(admission): scheduler policy layer over ExpertStore reservation state
+61b819ab26017891f4d2d5cfad0cb0317586717c,2026-08-23,FORGE_F1,no,SHARED_STORE,FORGE_CORE_REQUIRED,feat(expert-backend): shared pread/LRU backend extracted from qwen36 - full store+reservation seam
+35e947551abc232d3281922915a53aec8f166a45,2026-08-23,FORGE_F1,no,DEEPSEEK,FORGE_CORE_REQUIRED,feat(expert-store-registry): de-couple from DeepSeek - model-neutral ColiExpertStoreDescriptor + v2 open interface
+e8cc76ea405765d39d54e92c423a14eb6d8d1f16,2026-08-23,FORGE_F1,no,TESTS,FORGE_CORE_REQUIRED,feat(expert-store): v1.1 additive reservation surface - reserve/publish/abort; pin/unpin; batch lookup; widened stats
+518965ffe8e09f68a7ac33867a8ed595d7517c5a,2026-08-23,FORGE_F1,no,DOCS,DOC_RECEIPT_ONLY,docs(forge-f1): phase 0 - parity container pinned (mixed_low; sha256 banked) + qwen36/olmoe mechanism census
+f04359aab31a388cc47d36e96c3ea36400061cb6,2026-08-23,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,feat(qwen36): prefillbatch residual instrumentation + QD saturation finding
+0016fd38e6d1d62486df1bfd1229386113f63066,2026-08-23,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,tools(qwen36): argmax-prune discriminators (falsified) + krs/adj probes banked
+784fc3c9f2b23128fc0dd0371227ee1b8e1a1582,2026-08-23,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,fix(qwen36): W9 STRUCTURAL repair - ACQ_MODE_DEMAND/PRELOAD threaded through AcqRes
+96746637cc4d68eddec37fa18af48475e1a21eea,2026-08-23,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,fix(qwen36): W9/W10 repairs - g_acq_silent telemetry mode for batch preload (canonical pass owns all DEMAND events exactly once; silent loads classify to pilot buckets) + K<=8 fail-closed guard on batch scratch width. Post-repair: units pass; parity EXACT; 20-run 2x2 factorial A/B/C/D wall means 70.48/65.70/59.78/56.76s (fused -6.8%; batch -15.2%; both -19.5%; interaction +1.76s sub-additive; dispersion <1.5%). Receipt: QWEN36_FUSED_BATCH_PROMGATE_RECEIPT_20260823.md
+653ec6397440ccc14f3dc8657d6fee4fa748a6d1,2026-08-23,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,feat(qwen36): FUSED_EXPERT_LOAD + PREFILL_BATCH_ACQUISITION - +16.6% warm median; parity exact
+5e463e4e5096d078a74b5772960e5847bf323020,2026-08-22,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,fix(qwen36): spechash scale diagnostic - hash only verified-size reads; drop dead loop (adjudication hygiene)
+9ac18b61636f444e1729d92e4fee2f6a42c472dc,2026-08-22,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,fix(qwen36): SHADOW_POINTER_ROOT_CAUSE - propagate *out=ss in spec_serve branch
+38c68d8da5ce90640497eb7cd203ccb6c8395c4f,2026-08-22,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,feat(qwen36): SPEC_SHADOW_RING_W1 - staging speculation behind COLI_SPEC_DEPTH (default OFF)
+57b2444b1f519012aabf70f34e9c67391eccef09,2026-08-22,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,feat(qwen36): LEADTIME_HARVEST_V1 + storage forensics + early-router analyzer
+418e7489b2245422edb341aedf2491be4ff65cc4,2026-08-22,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,feat(qwen36): ASYNC_EXPERT_ACQUISITION_V1 - acquire/finish split + env-gated discriminators
+5dc15f4ed8e6c86b08cd18f1ada247d571a8de3d,2026-08-22,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,docs(qwen36): tournament terminology per adjudication - negligible/below-materiality replaces noise; materiality threshold made explicit
+b7e823a40f0c0a8754480e841cbbf496ff5069aa,2026-08-22,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,feat(qwen36): CACHE POLICY TOURNAMENT P1 - offline screening; no runtime changes
+4917db5a36ae5fb73e1dc519847ac1fff13043e4,2026-08-22,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,fix(qwen36): COUNTERFACTUAL REPLAY V4R.2 - real ordinal divergence + policy-independent EOF scoring
+400c3875bccbd36ab9d4616ca81d7bc28f6b3b5d,2026-08-22,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,fix(qwen36): COUNTERFACTUAL REPLAY V4R.1 - exogenous clock + real oracle gate
+3d55e925e89c42c60430ea41360a152011de6f1e,2026-08-22,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,test(qwen36): adversarial fixtures for the counterfactual simulator (V4R gates)
+00d845d505a02c2c0332205064d2f31fcd266b2b,2026-08-22,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,fix(qwen36): COUNTERFACTUAL_REPLAY_V4R - policy-independence repair
+03fd7609afa4e97fe7446c74c4daddb4aaf7d8dc,2026-08-21,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,build(qwen36): add qwen36_policy_sim Makefile target
+947fa30e9dad9f24ac473fd3aba67d62804d7b83,2026-08-21,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,feat(qwen36): COUNTERFACTUAL_CACHE_REPLAY_FOUNDATION_V4 - policy-independent request stream + native simulator
+2abb9cf487fe4eb927f72022d677746672be06a6,2026-08-21,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,fix(qwen36): PILOT_DUPLICATE_RESIDENCY_CAUSAL_REPAIR - per-expert loading registry coalesces concurrent admissions
+bdfe26b18cc0f84673eb3f42ebdf0e0bbe7f30d8,2026-08-21,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,fix(qwen36): TRACE_REPLAY_READINESS_REPAIR - slot-indexed mutation trace; local load results; replay gate
+a6899c2614f85e5a134b9612f01f7d97a1d96cd8,2026-08-21,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,feat(qwen36): ADMISSION_INSTRUMENTATION_PHASE1 - decode-window admission decomposition + cache-replay trace
+702a95804496f90eb19c7f1e8bf3fbc4bc96ae13,2026-08-21,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,feat(qwen36): wire MoE high-resolution profiling timers and implement reversible top-8 expert-parallel execution
+15a2bee0943cb4d786af064d2f1aee411efb8fc7,2026-08-21,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,Phase 1-5: MoE high-resolution profiling - 15 counters + 3 per-token tallies; OpenMP parallel region counter; expert cache format tracking
+bfea1917550410a316a6b8444df38ea705e82c95,2026-08-21,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,Phase 0: Durableize DeltaNet observability - g_dn_sub[4]->[12] named buckets; aggregate expert count overlap labeling; exact allocated_weight_bytes accounting
+4fc4772915c9962d759999988527f39a5edeaea0,2026-08-21,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,feat(qwen36): direct-BF16 GEMQ mixed precision closeout with multi-domain quality evaluation
+d66951654d9c3882a6db84f661b4cf8270bdb6ad,2026-08-21,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,feat(qwen36): implement GEMQ-style mixed INT3/INT4 heterogeneous expert precision runtime and tooling
+a3e3db361152fcd6d23ab2b92489f446ee1ceea5,2026-08-21,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,feat(qwen36): add pure C direct BF16->INT3 converter; validator; and evaluation harness
+cdf506da3fa778d9aa8b246622589d12e23e71fa,2026-08-21,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,feat(qwen36): native FP16 embedding residency + fmt=5 INT3-g64 AVX-512 decode
+7f27fa14914ede0ca9ab843d1b0a8b4e9f306e17,2026-08-21,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,feat(qwen36): true current-RSS telemetry; exact memory accounting; and expert admission metrics
+db5e082e572b868f98c2e8bb40d66cef345542ca,2026-08-21,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,feat(qwen36): packed INT4 expert CPU cache residency with AVX2 grouped GEMV
+046842e478f6b6b7c79f1de4da502ce6be209312,2026-08-18,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,ci(qwen36-tiny-check): the sanitizer step asserts memory safety; not tokens
+7e226fc6dc5c17510c01021ad32e81bdeb87ad13,2026-08-18,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,docs(qwen36): fix two stale references
+67c7490143306f724de2248e88e044b59fbb011c,2026-08-18,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,qwen36: drop the packed int4 buffers this engine never reads
+e755280fa6a78b8288e9592ba0b34c590f22d085,2026-08-18,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,qwen36: the remaining cheap items from the review's C list
+ca96e128868611eadfc55009bd95ccd4db75e861,2026-08-17,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,fix(qwen36): refuse a container whose tensors do not match the config (A3+A4)
+4e0dc889f5f0d0d8b3b4edcc29df02382b6d9dbc,2026-08-17,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,fix(qwen36): validate every config dimension before the forward pass uses it (A1+A2)
+e84005e01fb28c1f8e0186ad89df51af4cbfdc52,2026-08-17,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,ci(qwen36-tiny-check): make the gate deterministic and actually exact
+9ae0c8a8c50b7c817cd748286870373f9e86765f,2026-08-17,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,ci: build and ship qwen36; and gate it against a tiny oracle (B5 + B5b)
+3252675c9461df6ba1a1e2384eddfaa9cce23324,2026-08-16,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,fix(qwen36): expert_get must not evict an in-flight slot (A5)
+c30c5457bbe89c1a7349f8794c8f4ab0c04750a1,2026-08-13,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,fix(qwen36): heap per-thread attention score rows — 8k context smashed the stack
+6a9f2930c45863957a9ebe36acdef6c9a0928c33,2026-08-03,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,feat(qwen36): qwen chat-template family in the gateway
+342f1042c1aef28cb65e4b0eefb792f8d7e7854e,2026-08-03,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,fix(qwen36): serve EOS ids from the tokenizer; not the 151k-vocab constant
+2ff73e0494194c19f08032d1465dbc0d0f8fcb88,2026-08-03,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,fix(qwen36): serve mode must not require an argv prompt file
+24d3c89e55204a7f5650bd85eff7401a86cc6d47,2026-08-03,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,docs(qwen36): user-facing page — prebuilt containers as the easy path
+5a0715e744da1e36f713ddf684d7bdd71e8210eb,2026-08-01,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,feat(qwen36): group-scaled int4 (gs64) containers — converter flag + CPU read path
+9c901b54031f1aa7ae6db0631ab699dc636e69f0,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,feat(qwen36): make engine drivable by coli + SERVE=1 gateway protocol
+fc52d73ed8c0cb44ba11b1c347db8bd43b16572c,2026-07-30,PRODUCTION_CAMPAIGN,no,QWEN36,QWEN36_REQUIRED,feat(qwen36): add Qwen3.6-35B-A3B engine (CPU): hybrid Gated Attention + Gated DeltaNet + streaming MoE
+a0d7cfbe57872c24cd9fb6485598a6ae12e5df06,2026-08-18,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1087 from terrizoaguimor/refactor/serve-codec-olmoe
+256bbe998bf1324fc725f8ff11e3dead957892fb,2026-08-18,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1088 from JustVugg/perf/k2-union-tile
+4da41bf852991558b93437bdb25d18724c13ac07,2026-08-18,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1089 from JustVugg/fix/exactness-avx512-gate
+19afc84ae25d5799df2fde64b60426d5761cdb91,2026-08-18,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,fix(test): the f32 planar assertion must mirror planar_on() exactly
+3cb832f2330e27e9af6fc22010d5a77f40c87fc4,2026-08-18,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,perf(colibri): K2 — 1x4 union tile in the planar IDOT matmul (bit-identical)
+0ad0ca73190c1304afe46d5baf075db7022b5aa4,2026-08-18,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1086 from JustVugg/fix/k1-followup
+1de2939cd435e47fd6b79ac29598cdc7b2cfcdff,2026-08-18,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1085 from JustVugg/docs/changelog-summary
+b04d60207ae86318560333cbb238dc6cfed930a1,2026-08-18,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1084 from JustVugg/fix/web-triplet
+6104bbb3b0b92438b334200dbaaa58e535b3cd1e,2026-08-18,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,refactor(serve): share framing with OLMoE
+feb9dba78c2797d01113561f3027b92801614de4,2026-08-18,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(k1): planar off on non-AVX2 builds; drop WIP loop; f32 planar in the exactness gate
+2d2d92d02c72f51c411a88e0cbaff70adb94ff31,2026-08-18,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1083 from JustVugg/ci/arm-oracle
+a8e0a5f13ade6751329d8eb33c13e25f8a9c8498,2026-08-18,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,docs: CHANGELOG catch-up v1.2.0–v1.6.2; SUMMARY.md was an experiment report
+6c630912a1605da15836cced1cd7b40eee34dae9,2026-08-18,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(web): auto-connect in useEffect; atlas from engine origin; drop inert ternary
+438d09a45d09818e9e9dbec122c4e2a82d57dfba,2026-08-18,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1082 from JustVugg/perf/fused3-olmoe
+62b8d6324387fda2a4c2462c09163c4fc70dcf48,2026-08-18,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1080 from JustVugg/fix/inkling-idot-optin
+a2ce84e3887ed06580027c9995262311bb04d158,2026-08-18,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,ci: ARM oracle job + integer-kernel bit-exactness gate (closes #1081)
+d2d9fd673d39910bba8eb480909f667d7ac818d4,2026-08-14,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,feat(moe): FUSED3=1 opt-in AVX2 expert matmul — vectorized activation quant + gate/up pair
+fae9553f735e2c11d065720412eeb9123b7ad98c,2026-08-18,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1079 from JustVugg/perf/k1-planar
+01d59ae6ed20f4c3b76825a2311a9f96f78b11a3,2026-08-18,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(inkling): IDOT opt-in — the fast path is x86-only and not token-equivalent
+6132a67df66cf72b3c9d86dfba9b487f4ac3138d,2026-08-18,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1073 from bherald/fix/k3-prefill-cancellation
+aa053647ef0f30d1dee017a010c693db141bd8ec,2026-08-18,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1074 from bherald/fix/server-cancel-accounting
+73cc7e1c581b5ccd4890775012110de9396f7dfc,2026-08-18,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1072 from bherald/docs/k3-mmap-rss-accounting
+d8ea56f031f272cf532b864daac6dad972235c6a,2026-08-18,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,perf(colibri): K1 — plane-nibble int4 layout + unsigned-VNNI dot (bit-identical)
+63b803677f9efe7632650d257826065547ed11a0,2026-08-18,PRODUCTION_CAMPAIGN,no,OLMOE,UNRELATED_BUT_INTENDED_PRODUCTION,test(serve): freeze OLMoE wire framing
+17be735252e9f1fec4e61019066671b9f1eb1f42,2026-08-18,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,wip(k1): planar int4 kernels — dot_i4p_u; matmul_i4p_idot; matmul_i4p + planarize_i4
+57eeb7314f03c448f87aadd95a4cf0a18fda7ca9,2026-08-18,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1058 from zh-Processor/main
+377a6ebe6e4497005051965a1458a0688bc69706,2026-08-18,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1077 from JustVugg/perf/qrow-hoist-v4b
+f70b1edb536f8b5757ef57efcf5ef40c0a025889,2026-08-18,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1076 from JustVugg/perf/qrow-hoist-v4
+7c6cdc8f4697b422012414fb8cceb054d2ab5bcd,2026-08-18,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,perf(deepseek_v4): qdq the attention input once — wq_a and wkv share it
+45e0f991c43029c41ce41bc0eeef1ba24533e966,2026-08-18,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,fix: extend the qdq scratch to the DUAL and BATCH units too
+19fba39e12d2cb182461813ce99d0a127f12cf00,2026-08-18,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge branch 'dev' into main
+853a90a4895f3a019ac982696e7c45bd2d1147f8,2026-08-18,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,perf(deepseek_v4): thread-local scratch for qdq activations (bit-identical)
+5d0986cdadd2fa4e9f12b8bc4ab7963236342f8e,2026-08-18,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1075 from JustVugg/perf/qrow-hoist-k3
+a7f2f64e49d4db6006df2b6b0fb77a95f797306c,2026-08-18,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,perf(kimi_k3): hoist expert activation quantization to layer level (bit-identical)
+c945cd51bcaede2c8e62c56100b6b250983e4b76,2026-08-18,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1071 from JustVugg/perf/qrow-hoist
+85123689f2c1d0704243f35d4cc96d906bb1c4e3,2026-08-18,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #964 from 8PotatoChip8/v4/expert-store-registry
+e5ff623aa8fa389008300502fcb9da0d2aa2bbf9,2026-08-17,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(k3): cancel prefill between layers
+c3e3eddc3cf2d9618f2b8d7c308298c86a0e6e35,2026-08-17,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(server): account admitted client cancellations
+804732e9423e6fa40efc920fa210394d32754654,2026-08-17,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs(k3): clarify mmap RSS accounting
+5e8e99debbd0c1b0ba6e5552752db7c7a08cb1b3,2026-08-17,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,perf: hoist expert activation quantization to layer level (bit-identical)
+d4894f03d442854f04708c8fcf77afc2ab09a184,2026-08-17,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1036 from lineape/pr551-rebased
+f4dcbed61fa015a073e6fd2988de57a6b74182bd,2026-08-17,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1017 from weber-software/dev
+58e6c4478634dee28dc1a7cad0d79eb5b3e61d52,2026-08-17,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1068 from terrizoaguimor/refactor/family-registry-dispatch
+ca17810802ee43992b0fa0afbe82e1ee74802eb8,2026-08-17,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,perf: byte-identical CPU/startup optimizations
+89365ae6b49fd457c8dbd5347d4f02a0b7d9f044,2026-08-11,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,v4: pluggable expert-store backend registry
+2ecb5d472434559f0b3bda627346e2838d98f8fd,2026-08-16,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,refactor(core): finish registry-owned family dispatch
+6bfbd3e94d97ae1b978b3715ea08de9d24d688b0,2026-08-16,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,build: install cluster.py; complete test_cluster_protocol prerequisites
+7875c214811a33369dc607aa5de910eab66387aa,2026-08-16,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix: check the model directory before resolving its family
+723c1bbe80539ab00f4c977dee6f8fe360664a96,2026-08-15,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,feat: allow cross-host workers to register via --allowed-host
+6608dcaca545cd9b1ebe3e85f3345ed40e11486a,2026-08-15,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,docs: correct the fmt=6 down-rotation accounting in the expert_ffn comment
+cea3779ade4704ea9a344657cad3643b02e6f4be,2026-08-15,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,ci: exercise the cluster parity gate against the fmt6/fmt4 fixtures
+4982f660b38a16c91ac0d4c46b27d0889337cc55,2026-08-15,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,test: token-exact parity gate — local vs cluster-delegated sharding (#7)
+99fec32b56b31837038f1eff24af241a1fb8d67a,2026-08-14,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,tools: de-duplicate fmt6/fmt4 quantizer in make_glm_oracle.py
+edcfd05480e4f4626945159da00a4741fe69d77d,2026-08-14,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,tools: quantize glm_tiny routed experts to fmt=6 (E8/IQ3) and fmt=4 (grouped int4)
+43ed2a73a6230edce518f93602f7d64733d4e4c8,2026-08-15,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix: reload worker expert slot when slab is missing (use-after-free after failed load)
+e270be1ea668130efc7416fb06227e545f825def,2026-08-15,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,test: COLIEX01 cluster wire-protocol round-trip test
+fa92f96c2f22360bc97b47af424c80a80adff62c,2026-08-15,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix: invert cluster_connect_one success check in cluster_init
+cf872b0ec4854dc203872e118bd93ebcdf38ed17,2026-08-15,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix: route cluster worker through expert_ffn and rotate fmt=6 input
+a380a046a5a8b0d64ba2f69fdf358e7e8cdcf16c,2026-08-15,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,feat: worker init parity — st_init_multi + COLI_MODEL_DIRS; clean unresolvable-expert error
+4626a50446fb356e6c0ae026844de0263c81ab6a,2026-08-14,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,refactor: reuse openai_server HTTP hardening in cluster registry
+0998991d160b49828583a4d651a8a7fcb550f62a,2026-07-23,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,feat: add distributed expert workers
+1cc0be2c56d0040ecb90444c95c8fda5693f5eaf,2026-08-17,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1067 from JustVugg/fix/olmoe-converter-test-numpy-mock
+b84154d39a0e1758b68ef498333d09a5ad957eec,2026-08-17,PRODUCTION_CAMPAIGN,no,OLMOE,UNRELATED_BUT_INTENDED_PRODUCTION,fix(test): stub numpy in the OLMoE converter import mock — dev CI is red
+ed75a25b03188d1669333e8ed98fd6efd215ee8c,2026-08-17,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #965 from bherald/feat/k3-mmap-prepared-weights
+36e8397c69ab6abbf0986c47450b03b877cabf38,2026-08-17,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1048 from sami7969/fix/olmoe-numpy-and-size
+4d51576f092c1938e7c807a3a648943363fb2553,2026-08-17,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1064 from jerome-benoit/fix/doctor-deep-dtypes
+eeaa6b678b670c89b5814890163d8acfb99a2e6a,2026-08-17,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1065 from jerome-benoit/feat/flake-all-engines
+12368b7aa19fa274dd4a5d87607d0d3b2e1b994e,2026-08-17,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1063 from terrizoaguimor/refactor/family-registry
+0fd5228f807f36c5b1533847505a76c7828d9c29,2026-08-16,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,flake: build every supported engine; unpin COLI_ENGINE
+8c5f0466c790214b14865db3ff7edcaf624bf832,2026-08-16,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(doctor): accept engine-supported I64/F8 dtypes in --deep validator
+fe3879cd94af58e98dd9a7494a29930965c81919,2026-08-16,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,refactor(core): make model families registry-owned
+0578bba1f11cfaee3d4e46cf27248010a88f64b8,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1035 from lineape/pr551-prefactor-shared-ffn
+85951efdba403e82fa38485ee15b489bc9950cf8,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1047 from sami7969/fix/windows-build-blockers
+2410c6e4938bdab88c64322e0c923e5e4bf798e8,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1061 from nadiadatepe-eng/fix/olmoe-idot-default-off
+9e10ebda2063d6b74a8fbf4683eb64c14f281718,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1059 from JustVugg/fix/windows-stop-and-orphan-engine
+dd39c4e3d25267d18ff7b525e443741677f7bc48,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1055 from dcutugno/pr/v4-cuda-tier
+ca657ce18df58e26bc5bbad7b3100be4622e161d,2026-08-16,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,test: fix the Windows job test — never put the runner in the job
+5eb9b327d4648cf0c5b18d3755f94e0b67b5f919,2026-08-16,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,docs(v4): CUDA tier — build (Windows DLLs; Linux CUDA=1); serve line; VRAM budget + per-card settings; performance; GPU coverage; environment reference; validation
+66fca1e7b89ecc4d3929cc5d91e71c93f3800510,2026-08-16,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,feat(v4): the CUDA tier wired into the engine — every stage CPU-canonical with per-stage fallback
+4eddc628cd617a6f94cbc8ea7c0285fd3493d2be,2026-08-16,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,feat(v4/cuda): the DeepSeek V4 CUDA kernels the engine tier needs — generic sm_80+ + opt-in DeepGEMM; Windows DLL export/loader
+35349e1e01cda695c7769bd48b5fe4821c1175b2,2026-08-16,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(windows): make coli stop actually find the serve; and stop orphaning engines
+d44b09631ce38c7f4fd9776951ad649b2c166bbf,2026-08-16,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(plan): match DeepSeek V4 expert tensor naming (layers.N.ffn.experts.M)
+623f6c17ac1934b344330cfe8490010daf604544,2026-08-16,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,docs(v4): prefill segments/chunks/checkpoints; env additions; what CPU-path output identity means
+62be01bac42eea262e03608b722ae3a1463b5666,2026-08-16,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,feat(v4/serve): prefix hint in SUBMIT; hold admission until the engine acks a CANCEL
+51638e85a46160f5f4cbc396589d615d28500088,2026-08-16,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,feat(v4): prefix checkpoints (memory + disk); resumable 4096-token prefill segments; cancellable prefill; batched indexer selection
+af48fe8cddee7d82e8b137d6723d52618e747115,2026-08-16,PRODUCTION_CAMPAIGN,no,OLMOE,UNRELATED_BUT_INTENDED_PRODUCTION,olmoe: make IDOT opt-in on x86 and NEON; and add the test that was missing
+03e8677ca0c0781ac93befd91a47a64b6253ba17,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #827 from monotophic/kvb/fmt-gate-notice-r3
+3d5200df5f46f2f8d0e507b299bcce31eec98c4e,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #934 from Nanetnounou/pr/neon-e8
+a568db1dbf3afd494e6382b1425945d91b4e8e10,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #830 from dpanelli/swa-kv-ring-buffer
+1a8e09198e88d520efd0ee608123bcca535804e6,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1038 from 8PotatoChip8/fix/fma-contract-grouped-int4
+c64fc669287fae9a9edebe90446504d66c5e2b4b,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1010 from gcaponi/v4-tools-e2e-tests
+9371b17d616aaf6b992c9d2a33d54957bf7a2432,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #988 from dcutugno/pr/v4-ssd-mirror
+b1d34038d8250bf88d3ad6a72c2297848caf4c57,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1054 from JustVugg/zach/deepseek-v4-cuda-tier
+e36a1c739d281c55511b56a552b4cf0f60f8bbac,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1023 from gouravkargwal/fix/v4-rows16-pack-outside-store-mutex
+db0720c511c69eb47d34d65efb793887f64cba91,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge dev (keep $(NVCC_STD) and -ftz=false)
+abbb8dee0804adf0fcbbc0f5e6bc2e86382fd916,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #931 from Kenneth-Javier/fix/amd-discovery-windows
+4f86057f7fa721c6156a39358e9fe1bdb7b5db90,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1037 from monotophic/cuda-f8-warp
+a720c806ab498480e7bb0e5b044ad55fa34687dd,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1041 from monotophic/fix/mxfp4-exp255-refmirror
+ff30465a67e2c50e7c55317d87c89e20219397de,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge dev into the DeepSeek V4 CUDA tier (resolve c/Makefile)
+7a671f03e4ddab0e9055088fb502616d1d95f86a,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge remote-tracking branch 'origin/dev' into pr/v4-ssd-mirror
+255e8aa4eee98ccd89ff55d287bd0ca009ab68d1,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1051 from JustVugg/fix/discord-invite
+1b1a8228b9c2d971c8604c60f9cd87c7ce0e1d3d,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1025 from Blakeolson21/blake/docker-v4-dsml
+a49509a2df3e19add638de6a5267bac7a8fb28ec,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1026 from Blakeolson21/blake/atomic-fp8-shards
+c243b4c6166928777f0b298795bcc1353efcd365,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1027 from Blakeolson21/blake/atomic-olmoe-shards
+f1bb9c39cd31400000855cc7cb5d5ac901bf8332,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1028 from terrizoaguimor/fix/k3-mirror-plan
+6d5ceffb02ec417715b202d118b968bc9cd482c5,2026-08-16,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1033 from terrizoaguimor/docs/tool-calling-matrix
+e230ae6f921abceb5e4e4af52506afc2e2ab031e,2026-08-16,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,docs: refresh the Discord invite (the old one expired)
+dc3f8fd7b7b3e9a710c2d0725501fe9576904592,2026-08-16,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(windows): set _WIN32_WINNT floor for FILE_ID_INFO under MinGW
+cc2d039ca90b2c69c609f33c72fe868049f9354e,2026-08-16,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,fix(build): detect Windows from uname when $(OS) is unset (MSYS2/MinGW)
+fa8b211174b99a39f91a0dc0a62ff6e69114bf0d,2026-08-16,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(convert): declare numpy in the OLMoE guard; and correct the OLMoE size in the README
+d35fe81be075f64d7726908ad02390eff469b7b9,2026-08-15,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,test(cuda): ISA-robust exp-255 shapes and mixed-scale coverage
+84c6154b9fc0e31c1fef8089c4daad53eef10892,2026-08-15,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,test(cuda): make the mxfp4 compare NaN-aware
+a53e108e308122c1cdf8f828c1c387ae73e7dcb2,2026-08-15,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(cuda): mxfp4 group scale applied per 32-group when the scale is inf
+b6af434b1af2b07d1d839cd6658b11584b3e74e4,2026-08-15,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(quant): pin the grouped-int4 group accumulate as an fma
+84c85e5bff989ead5516c21c1caf257a385d9662,2026-08-15,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,tests: qualify host isnan as std::isnan (HIP cmath host overload wart)
+17bfc3e5f7256f460763d3a994de8b4045f6aebf,2026-08-15,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,tests: drop direct cuda_runtime.h includes (hipcc has no such header)
+7aaf9d28b45bcd57b463d1c358a576154c6f1562,2026-08-15,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,build: close the compute_121 gate when nvcc version is unparsable
+aabe37187d0cc8a4eaa6a1d113baaa81c1b36877,2026-08-15,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,tests: dense accumulation-convention bite through coli_cuda_matmul
+8ab17dc99ee233a8cb1252f574ef114640abb242,2026-08-15,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs: COLI_CUDA_F8_WARP entry matches per-vendor default and mode semantics
+669b488e5524f4587788904f0aab222b66a2e9bc,2026-08-15,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,tools: commit run_f8_bench.sh (BENCH_PEAK_GBPS=273 default for GB10)
+77833778c0b28ad948c7203ad0d25b15d5a0dfdb,2026-08-15,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,build: gate compute_121 on nvcc >= 12.9; run fp8_warp_test before mxfp4
+1419dff969a44ce06bd7987490a524ce58f176ad,2026-08-15,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,bench: roofline from BENCH_PEAK_GBPS only; report raw memory attributes
+1b6de085b858e008ad66e23d44ee73ff10a49345,2026-08-15,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,tests: grouped accumulation-convention bite and vec/byte load-path parity
+cb73d1af48007c464a6d6b185cffce30b8c77cf2,2026-08-15,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,cuda: dense fmt=8 honors COLI_CUDA_F8_WARP; unify vec/byte product sequence
+87d4d984ce5b9a61af5cf251dd74748f5a298a64,2026-08-14,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,refactor: extract shared routed-expert FFN helper
+9bf565d65c98f45e017df0e980b51bb001691bbe,2026-08-15,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,bench: query roofline via device attributes (cudaDeviceProp members gone in CUDA 13)
+3e9af13a4801307ac146f88c0ef485692d8523dd,2026-08-15,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,tests: keep the old-vs-new census compare informational
+71f921bf42f7fcbd05ffab93b2e0bee04914adda,2026-08-15,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs: register COLI_CUDA_F8_WARP in the environment table
+a6fb69a553b0800ab0cb5c0f91997224161f7519,2026-08-15,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,bench: fmt=8 old-vs-warp kernel bandwidth harness (JSON; fp8-bench target)
+9aa32f2bfb9acb934709a46dac264036f20a4868,2026-08-15,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,tests: fmt=8 warp-kernel oracle (sweep; census/tail shapes; S-invariance)
+268c74fdd8c9843eb66bbe1c9d53b5cee3dde5cd,2026-08-15,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,cuda: warp-per-row fmt=8 kernels with reference-mirroring accumulation
+600a3e05dcb5298631b3b1c0691b58ae0368ef7d,2026-08-15,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,build: add sm_121 gencode to the portable fatbin and pin -ftz=false
+248734270d2262b7c3d532369ba849246daba718,2026-08-15,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,docs(api): map tool calling support by engine
+e27c37e7753978b89b0b0d9a068e4d8b38b4030c,2026-08-15,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #969 from terrizoaguimor/fix/v4-usage-route-trace
+d1653ca8dbcd5b5bd11363c3d9ecc198e9e74190,2026-08-14,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,fix(mirror): recognize Kimi K3 expert shards
+efce7a922afc91a7fcc1c4210125e4b8983145e6,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge origin/dev into fix/v4-usage-route-trace
+7072c049a7b3529ca780853934df93f93faf4c0a,2026-08-14,PRODUCTION_CAMPAIGN,no,OLMOE,UNRELATED_BUT_INTENDED_PRODUCTION,fix(convert): publish OLMoE shards atomically
+345bc6c8953b4cb51ba73f48929fdf909e39c2ff,2026-08-14,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,fix(convert): publish resumable shards atomically
+a35e30aa90624c9b7c237d09dffbb6a646d93610,2026-08-14,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(docker): package the gateway's DSML module
+0f335e53279414f3bd5076e08937c91fd37bb08b,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #958 from Blakeolson21/fix/openmp-team-launch-paths
+7065f2040a92d54cfee45d031bda75be14bfc591,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #947 from gouravkargwal/ci/metal-test
+e53018cd81476e670f81bda8e35d9cc64ab52867,2026-08-14,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,fix(v4): pack hot pinned experts outside state->mutex (issue #900)
+6546cdde7296f28771e2ba1a1d7c1d4b0cb550aa,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1022 from JustVugg/dev
+5ca91614d5ef14deddcf72305b74f0ff70d11b80,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1021 from JustVugg/fix/release-package-v4dsml
+90894cd63cd89c9bdd492430234bdb353cb8228b,2026-08-14,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,fix(release): package v4_dsml.py so the archived openai_server imports
+a4d7c7799e08f589dfd7a3e6357368d3efe14b31,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1019 from JustVugg/dev
+a99d41c7cf69a7e3cdc5c5eae012ddce525ce802,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1020 from JustVugg/chore/version-1.6.2
+6aa3069e93ff7480cc91a19a09dcf907c5a35d0a,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge remote-tracking branch 'origin/dev' into pr/v4-ssd-mirror
+1c884f0724e22756dd046d6ea53cec2bc20f4bba,2026-08-14,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,chore: version 1.6.2
+3d963761f56708b525031d52624c2108bce382ea,2026-08-14,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,fix(v4/mirror): review follow-ups — serve telemetry; per-replica O_DIRECT; config-sized routing
+7248d53eff8914eea750e3e7cb35fa5eff7a4cfe,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1018 from JustVugg/security/fix-six-advisories
+bbaf16137fef9dbc9621e5c0619b2236a90cea15,2026-08-14,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,security: resolve six loader/serve advisories in one pass
+042d21f9b5f7e3132d9ec69338a5d9a2bea5f75f,2026-08-14,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,performance: use coli_v4_route_bf16 in moe_token
+d81284aa37652b0e5c040cbca5bae8df3e41ff29,2026-08-14,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,test(v4): end-to-end OpenAI wire tests for V4 DSML tool calling
+90a6e1f9476567a8052d3f468c6772a0b427b234,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1005 from JustVugg/fix/v4-phase-telemetry
+574aac11d59983dc5412da8c897324caf05ba983,2026-08-13,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs: recompute FORMATS.md line anchors for post-#989-wave dev
+dc99ce844f4d5c5f3057b058245c7405a6835ae6,2026-08-13,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,metal: mode-aware kv_b remedy; accurate MTP rationale; notice-test hardening
+ddf5cbbd2ebe6425647fe66f544263c0c7bf8193,2026-08-13,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,metal: widen the fmt-gate notice to all fused-bound tensors; share the gates' predicate
+b78431fa11f4133cb781a3ab4a2246d40114462b,2026-08-14,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,fix(v4): report expert-matmul phase in serve telemetry — web dashboard (#890)
+1658b1f8d462713ffd45acb00149a11a60f2b807,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1003 from dcutugno/refactor/v4-dsml-vendored-encoder
+12eccb4bae7e2a8af9eaf142c3c6bf7de88d2125,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #950 from terrizoaguimor/bench/gemv-stream-regime
+6fe6c9988a7c258d2c8deb9db7109698016cb1bb,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #952 from gouravkargwal/tools/datapoint-runner
+c3de36a586263623f59e750a939d7ed128f99189,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #966 from martinm86867-ops/main
+76ed063ed59ef63cb219c3ed124f84237066834b,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #991 from IgorLalak/fix/msys2-deepseek-utf8
+9710d874471f6f1a5f9974f9563e14bfb3bb7a8a,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #994 from BerndLoecke/feat/german-dashboard-translation
+c2e1c3c88a07de0c4dcb578a74b2034c0ef8d600,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #973 from martinm86867-ops/feat/v4-dashboard-telemetry
+a1648c81105453ee61ae47149431c8563a4e75d4,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1002 from Blakeolson21/blake/stop-port-scope
+87ae717ce2b8213a6ca624c2857b1610b801d122,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1000 from Blakeolson21/blake/supervisor-scope-converter
+087746d45154fc7f738eb94ee1d983de2b0781d1,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #986 from Blakeolson21/blake/sib-server-temp-default
+7204e620dd4af695cb378c178e07c032da52a5bc,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #987 from Blakeolson21/blake/sib-inkling-omp-sizing
+01f08fae6c30732ef28a5e85a11e88e1a33e9294,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #996 from Blakeolson21/blake/download-incomplete-exit
+8d1d17f7047c6d2a97575a301a21da1cce57a95d,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #995 from Blakeolson21/blake/cuda-test-openmp-probe
+e92f3893187993a97fa0850bbcf5a93d442b7f79,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #997 from Blakeolson21/blake/kimi-vulkan-warning
+b4b182b5c8b63fcdde7aa936216f1b8422a4fd6e,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #989 from ZacharyZcR/fix/933-eslot-inflight
+df2c248506ddc731c782bb215fc6e8b4b47599b8,2026-08-14,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1001 from JustVugg/dev
+3d1c3bec35355202f58bb2d12bcf15a7dd0b2ff7,2026-08-13,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,refactor(v4): vendor the checkpoint's DSML primitives behind #948's tool calling
+6707d1a26c829d7c05c41f6ddd5e0a7722d77b1c,2026-08-13,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(stop): scope shutdowns to the requested port
+2fa965645a19b9ba0ede7ac33b7c06b683d07470,2026-08-13,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,chore: version 1.6.1
+cbbfd62b9e430d206b049bb745c130704c79484a,2026-08-13,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(download): fail when checkpoint remains incomplete
+04affbf396a3c51ad369942066d6dcf1567ae1ce,2026-08-13,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(supervisor): stop only its own converter
+948cf0237d710754fffe3c97426a12afffd066b6,2026-08-13,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(kimi): guard the Vulkan-only state
+020239e8570007a62d7fffbae3cbbf4a1e0c6887,2026-08-13,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,feat(web): add German dashboard translation
+cdd82c7f2e1f0199a55f3463d038b0f9aac4ba86,2026-08-13,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,test(cuda): link the MXFP4 OpenMP reference
+c9867a72b2117e67c990e90e40035b8e69739fda,2026-08-13,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #993 from JustVugg/fix/host-allowlist-wildcard
+02e5b0b17494a471e614287bedae18db50c5c71a,2026-08-13,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(server): let an operator reach a public bind — --allowed-host '*' (#990)
+9917e42719e51cb3a97c3f309cb8d552d8a721ab,2026-08-13,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(msys2): use UTF-8 prompt file for DeepSeek V4
+0537e1adf1510716dd2893ba33e30cd3db516f17,2026-08-13,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,cuda: keep async expert slots alive through completion
+763dac7882da71e043204374abe5eda6df2ceeb9,2026-08-13,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,Remove vendored DeepSeek V4 CUDA paths
+3cc24202feb6e8fc26d9a9192ab5669f725902b1,2026-08-06,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,DeepSeek V4: the CUDA kernels; as a tier rather than an engine
+22ef387c3207230f226df245dc296f6967ca5bf7,2026-08-12,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,fix(v4/mirror): update test for v4_read_expert_record with rep parameter
+bb92d80f9079b9f1938ac8be4a7d7b3e2e248b4f,2026-08-12,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,fix(v4/mirror): count primary direct reads in mirror stats
+725ead5c73db1b3ad636de268514feac337b7987,2026-08-12,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,fix(v4/mirror): use linear-index hash for balanced expert routing
+2e65c13f4817751fde68b5fde874eac5b6aa6a68,2026-08-10,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,feat(v4): dual-SSD mirror (COLI_MODEL_MIRROR) for the expert store
+353638d95cee6ccf631e0b871941342ab2eced6a,2026-08-12,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(omp): size direct Inkling runs by physical cores
+d7972b78f46591ea9ec8d52b64586be9cc09b4e8,2026-08-12,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(api): honor COLI_TEMP as the request default
+417620d467b543b8979fceec55a88bcb9b33e2f6,2026-08-12,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #985 from JustVugg/fix/olmoe-stream-drop
+88a75657f3016bf440eeb95d799fdabebc445b75,2026-08-12,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(server): OLMoE streaming dropped the answer into reasoning (#984)
+7647a3b73d34d0457852c9e14271ef8b11d7666e,2026-08-12,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #980 from JustVugg/fix/chat-reasoning
+de0f71f7ae3e7eb15268ac15e24cac0ef04a7dd6,2026-08-12,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,fixup: fork+exec the pty child — bare fork from a threaded test deadlocks
+64eb7acc444680a9880d90ad3bba1d1b1f931d28,2026-08-12,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #967 from terrizoaguimor/fix/pilot-lru-sentinel
+c874fff89396059abcb641042abf115c278be0a4,2026-08-12,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #974 from Blakeolson21/blake/ci-windows-focused
+7677695835732717d05691b059919a5e5da11642,2026-08-12,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #982 from Blakeolson21/blake/v4-print-omp-team
+5a3c126e36f387e09275314707e770b5e25d5ad5,2026-08-12,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #978 from mgua/dev
+517ec602f14efb5128653856999d0b820ba986a5,2026-08-12,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #951 from gouravkargwal/docs/m3-olmoe-datapoint
+2b8bf82d96607178d4eff0b6a777924abbbcf13f,2026-08-12,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,fixup: skip the pty harness on Windows — no termios there
+bb310d42360fe2626ffb75c34ab82ea8501b5a32,2026-08-12,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #981 from JustVugg/fix/cuda-test-fmt7
+c98d25ab4580737c9e631bfdf8ea1fc667cd4d1e,2026-08-11,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,deepseek_v4: print the effective OpenMP team at startup
+36378ea185d13959cd42b5f22f9eca6460fc5ddd,2026-08-11,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(doctor): keep the Windows linkage probe portable in tests
+dd6c22d5c165312d31102b75007c77c1ef4acf94,2026-08-10,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,docs(plan): clarify Windows unified-memory discovery
+9ffa28bcf470584adbab93da0932fb2af0437424,2026-08-10,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(cli): exclude unqualified GPUs from auto-enable
+ad8a75be4155f3062e0d09af9b8a02205f9f3d74,2026-08-10,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(doctor): recognize the expected Windows GPU backend
+80370ed9759e123ce466a09b4dc3ce049fc807ed,2026-08-10,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,feat(plan): discover Windows AMD GPUs via hipInfo
+b5a8bacf5efe58a13b54a1f075b56f0be8c07da0,2026-08-10,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,refactor(plan): isolate unqualified GPU discovery
+071e0412dc4c65cdbe1d2e91f54659d82ee0a3f6,2026-08-12,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,fixup: lockstep pty harness — macOS libedit eats pre-written input
+35a6037ddceb68d5e6c3893bf30c61233c90ae7b,2026-08-12,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #948 from dcutugno/feat/v4-dsml-tool-calling
+1850bd1336fef8c4d7aa59709e6b58af105730b0,2026-08-12,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,test(cli): drive chat_attached under a pty against a fake SSE server
+27f3f6ccb34617c319445d82abc8d7baa57928af,2026-08-12,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,fixup: <vector> for the fmt=7 smoke buffers
+d954ad4033cdffc1af70882206400c8a7516f240,2026-08-12,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,test(cuda): fmt=7 is real now — fix the stale negative case (#971)
+185868f5ace70a5bbd74561e0c6fdf87a14396ab,2026-08-12,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,feat(cli): COLI_SHOW_THINK=0 hides the thinking box
+0eef2fc789e408757ed772e00f542483bd7736f2,2026-08-12,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(cli): stream the model's thinking in chat; dim and boxed (#979)
+8d1d96afde1042d837efa8853ad34c3846fd99c7,2026-08-12,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #976 from JustVugg/fix/v4-ngen-clamp
+fadd9b56a5a5a6485304648229c8f405f71f8cdf,2026-08-12,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,fixup: CONTEXT_EXCEEDED speaks the gateway's format
+8c40fbddc74d3204a4660bc1d8d2b1af477fb4e6,2026-08-12,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,v4: max_tokens is a ceiling — clamp to context instead of rejecting (#975)
+6568305823e8d8c9bef15786749e016914067135,2026-08-12,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,fix(test): update V4 tool render test for DSML tool support (#916)
+360c57d2809961f0818cd564a23d62d8fef550a3,2026-08-12,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(build): gate glibc compat header on __GLIBC__; not __linux__
+863c4e6f796330c1ad0dccb5e9d6344f7c00381a,2026-08-12,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(build): compile CUDA backend on glibc >= 2.41
+7b504376d6d54d2165e2dbf913a745d8762411cd,2026-08-12,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,feat(v4): emit dashboard telemetry (EMAP/HITS/TIERS/PROF/HWINFO)
+72cd9f7709d6805443145b92d9d0494da685eae5,2026-08-12,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #943 from JustVugg/dev
+3147248c4652d1a67c44261db621f65017148f42,2026-08-12,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #968 from terrizoaguimor/fix/olmoe-temp-and-inflight
+1ba6f225da1897d7badab03baf9fcc003995f3ef,2026-08-11,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,ci: run focused Python tests on Windows
+fa3a86b66d8d48dfb2f70fdad9c772493ca082ea,2026-08-11,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,feat(v4): the expert history lives in route_trace.h now — #700 completed
+3780c4e8f700e5e877ecf4a0e6b2694798133def,2026-08-11,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,fix(olmoe): COLI_TEMP channel; and never evict an in-flight slot
+afad8b730345ff8b170d4157f4c6bd1f286c216d,2026-08-11,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(pilot): free the recency sentinel when a speculative load fails
+34513ccabdfe21032ee10825dce6ad997b02cc96,2026-08-12,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #957 from gouravkargwal/fix/omp-macos-tuning
+600c1a0f33171aeca666ed2514192c0ddb41ca19,2026-08-12,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #956 from gouravkargwal/fix/server-pre-first-frame-cancel
+58ac189684f540481fe9c496fc9834b2cc32e05e,2026-08-12,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #960 from Blakeolson21/blake/inkling-windows-lock
+f158906eccb267ca7d29237257189881998ce25f,2026-08-12,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #961 from Blakeolson21/blake/coli-windows-venv-python
+1d21eaadb94b5cac325ed966d2b5e63c243f071c,2026-08-12,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #962 from Blakeolson21/blake/convert-windows-positioned-write
+50dae22081cdc4e064f493a5a23dcdb10f5e2da8,2026-08-11,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,mgua: added info about cpu optimizations
+d19b16102b21878319305bf6bd346c3252a578c7,2026-08-11,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,convert: make multistream shard writes portable on Windows
+e47bf006117646783ed223e5790bbec5fe732115,2026-08-11,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,coli: select python.exe from Windows project venvs
+1b10ddc0c2096cc1d5c3357a9dd3a642dae01b25,2026-08-11,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,convert_inkling: support output locking on Windows
+7eaa95fb95511b35d186f3a8cfdbebb48efa6b27,2026-08-11,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,test(k3): close mapped fixture handles
+06dd05455475b45f55fbd4a4331292e8e0cd47f7,2026-08-11,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(v4): delegate OpenMP sizing through launchers
+a20c7aad274f29e2fad5822daed9300b1380db1d,2026-08-11,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(omp): skip the spin-wait tuning on macOS — measured slower (#707)
+aa4c51a14c32c918cdf408d5ef7ee45926eef3a3,2026-08-11,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(api): cancel a generation that disconnects before the first frame (#908)
+279379dd2c9d27ca9ae58cde3f07b8ef0acd2fdb,2026-08-11,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge remote-tracking branch 'upstream/dev' into ci/metal-test
+6e5f36a1657b792e1b8d697dbc3c629ebe0d7cfa,2026-08-11,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,feat(k3): map prepared weights read-only
+fc8020e4d14ae3f823c3eaf8f3babd7cfabb5a4e,2026-08-11,PRODUCTION_CAMPAIGN,no,SHARED_STORE,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,feat(st): add read-only tensor mapping primitive
+1654f396b15ee9bd3669dd3f14a1c54cecb4164d,2026-08-11,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,ci(metal): guard the macOS step against the paravirtual hang
+40394586d592e40345f7edce3755fd96cb986ff0,2026-08-11,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs: add Apple M3 16 GB OLMoE datapoint row
+7e96e5a0e12bc3cec894ef9dbed89d1d12843a0c,2026-08-11,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,bench: decode-regime GEMV bandwidth vs the read ceiling; with a frozen A/B baseline
+46cb37cfc51283146a41840a9bf2406690712746,2026-08-11,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,bench: decode-regime GEMV bandwidth vs the read ceiling; with a frozen A/B baseline
+971b3f6610be48b211a318157dffe0b2ef1c6eee,2026-08-11,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,tools: add one-command datapoint runner
+33302b82daaeba895ef8c21a61d6030bdb305a9d,2026-08-11,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #946 from JustVugg/v4/macos
+f03bcea13a22eab78896ac4ea00c88587baa08f3,2026-08-11,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,fixup: keep Windows in the torch pin — +cpu wheels exist there too
+59e40e26ab0103a109eb47774d30a43f74f56f59,2026-08-11,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,fixup: torch +cpu wheels are Linux-only — split the pin by platform
+54c970f5151249eca0206363d7d94c785d379ff3,2026-08-11,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #944 from benmaster82/fix/glm-topk-bounds
+a169bec8d4b7ccd42c361916a01edd2a157f68a0,2026-08-11,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,fixup: the tiny oracle regenerates its fixture — give macOS the pinned deps
+c281dba6fb7e5ed8fa86d9590a8496ba5008c631,2026-08-11,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge branch 'dev' into ci/metal-test
+6c91350ff063217970502d5a1f5e30f097082312,2026-08-11,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,feat(v4): DSML tool calling for DeepSeek V4 (#916)
+0574ece521db23e5b27f9b2894936b271fc03a44,2026-08-11,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,ci: run Metal backend tests on macOS
+25bd8b76c6f59393944474ed388ded55153fe946,2026-08-11,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,fixup: the Makefile.deepseek-v4 internal gate never got the Darwin arm
+57f0abd0be5cd3eda8a1e3ef084ed825637ace4a,2026-08-11,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,v4: support arm64 macOS — one mach branch; the rest was already portable
+52482d77539170d067b008c6eb4b8f6a478e5f1a,2026-08-11,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,chore: version 1.6.0
+11fe383fafc228e8e4f77c6d280fca6bf3fd8689,2026-08-11,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,style: add trailing newline to top-k test
+639d0c0033e9346a7278f8481c88cfc80b37e1d0,2026-08-11,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix: reject GLM top-k larger than expert count
+c40924e0de014409a5d4bdc24644620f28771976,2026-08-11,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #942 from dcutugno/fix/cli-attached-reply-tail
+2c8ce27d27537f54a1fbdafdbeee45b57bd2c71b,2026-08-11,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #930 from terrizoaguimor/fix/cnre-simulator-accounting
+4b9b47d738e4bd2c3cf37ae77dee96ad12778d0c,2026-08-11,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #941 from JustVugg/v4/expert-union
+b00e3535bb917d6517a9ed6a0fd14272e30eeff2,2026-08-11,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,v4: expert-major prefill — read each distinct expert once per chunk
+e6f014da6c87e18340cda1730bc65b2708cdcb59,2026-08-11,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(cli): close the markdown stream before stopping the spinner
+6d445983d700a719a79acc2e55afa52ea4d17cba,2026-08-09,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,quant: ARM NEON path for matmul_e8 (fmt=6 E8/IQ3)
+b93e52436c3487ec674d62d1be53593cd4b5b36e,2026-08-10,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,fix CNRE cost and capacity accounting
+5fd53a92f9000d14c72337a47190e637d632ff02,2026-08-10,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #928 from JustVugg/fix/chat-history
+114c5ada4ea1a991e5ac0c53ea9fc73980c44f92,2026-08-10,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #927 from JustVugg/v4/loader-lanes
+cab0108e0d24ba08971caa750ee656f8d21eca19,2026-08-10,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #926 from JustVugg/quant/avx2-matmul-i3
+360da8c196e56c3d5ba2c9a45f0e31a375140f49,2026-08-10,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(cli): activate readline so UP/DOWN recall previous prompts
+48db9579da848aa988580823cbca456bf52240da,2026-08-10,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,v4: enable the expert-loader pool and make its depth runtime-tunable
+982b8276f8046f9e16a9790f7c78976a85b1ac62,2026-07-24,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,quant: AVX2 kernel for int3-g64 matmul (was scalar on x86)
+e3f4f7f0b06337f069e2ed0bd155a504810e7be5,2026-08-10,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #897 from Blakeolson21/v4-omp-loader-reservation
+afc771a7288ee43353b630004a2f764b65865cbb,2026-08-10,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #903 from terrizoaguimor/pr/placement-accounting-clean
+ed6b475b7551d88ee2fad3c38bd99f7cb1bab00c,2026-08-10,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #909 from SulimanAbdulrazzaq/fix/907-multiline-prompts
+1e2b29350d026d8218578517fb54abc7cd828ddf,2026-08-10,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #904 from Blakeolson21/v4-cli-ctx
+8ee7bf23fcc597a1f3825f8c86f5216599e03af4,2026-08-10,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge branch 'dev' into swa-kv-ring-buffer
+72497b01b16555668edc0c29352f2ced0df7b188,2026-08-10,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #915 from mgua/dev
+b2364e513b15e70ed07b99f7775ebba5578a7e94,2026-08-10,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #902 from terrizoaguimor/pr/cnre-simulator-clean
+b347ba45fd6f5d8558e71406e4b3b0e3435f1590,2026-08-10,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #914 from bherald/fix/mixed-width-pin-budget-885
+fbdef20883cb237a9d9fcfd268cec0ffce3f013d,2026-08-09,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,mgua: added a revised section for cuda enabled builds on laptop; minimal installs; mingw64 gcc and make and nvcc. no edits on *precious* previous text.
+bc99ebfa2ab9677ce9aa3067528dc3657d24b65e,2026-08-09,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix: account real row widths in pin budgets
+6ada7bdf850d76e234fe4ea38101ce284712b544,2026-08-09,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(cli): preserve pasted multiline prompts
+47a749d8225b815adc9622c964ba386639320973,2026-08-09,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #901 from JustVugg/fix/tune-arch-guard
+6ff57659df4a3114c6f8a3ab39daeed005b692ac,2026-08-09,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #896 from JustVugg/feat/web-markdown
+febdba860e34dcd189ffe524487e980fd823564b,2026-08-09,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #895 from JustVugg/ci/vulkan-lavapipe
+549f9f11e7d7c43da0c37a7d2c4f689148445b9e,2026-08-09,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #899 from JustVugg/diag/pin-budget
+71ef303c4cd74472df72d9ed9dbefff410aa36e7,2026-08-08,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,deepseek_v4: honor CTX in the generate CLI
+39e5f0c21fb35ff076042396736c3fa41f8c7cf2,2026-08-08,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix: make placement accounting backend neutral
+cc18bfbb3f440a36aa3e086072ff52372c9f8d91,2026-08-08,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,experiment: add offline residency simulator
+bac9bd73079cc3be486a4257b6c5ca46f6285096,2026-08-08,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,tune: dispatch per architecture; and give every engine a throughput line (#898)
+591eacedbb2d3fb7c217105d86f58772f61b270f,2026-08-08,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,plan: print every placement term; and a switch to A/B the slab shrink (#885)
+1684e8954a5e2c41e01652764ebf67db33a4ac2b,2026-08-08,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,deepseek_v4: size the OpenMP team around the expert loaders
+6e9024234f7214dea7021c0daaa4dc06a58b7215,2026-08-08,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,web: render markdown in the chat pane; and stop clamping it to 1024 tokens
+0e5510b57b55e4701cf0a8999ea689490adca8a9,2026-08-08,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,ci: build and RUN the Vulkan backend; under Lavapipe
+98cab3b6622eddd5ad4c9defa728b797b697c840,2026-08-08,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #587 from RDouglasSharp/metal-attn-fmt4
+77619b044c32e350d43d7f8648eb4221e2f3aeb2,2026-08-08,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #886 from shujaanazhar/olmoe-serve-mode
+a1260675ab6acc60ac481b2d088c7a3ad8176a67,2026-08-08,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #836 from boblaublaw/fmt_2_m1u
+184b3a56320ac388a28cdf94d0d6bef44437cd7e,2026-08-01,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,test: reconcile test_backend_metal with post-rebase dev (qgs=0 at fp8/e8 call sites; rename local fp8_nblk to avoid quant.h clash)
+e3bccc48bc3ba8150999153948948e2aa4342720,2026-07-28,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,metal: scope COLI_METAL_MOE_EXACT by path; not format
+36a555a721ffdee5ec4ab8e57e0249f3f69e4c3b,2026-07-26,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,metal: COLI_METAL_MOE_EXACT covers all fmt=4 GPU paths (attn/layer decode + dense)
+4427dab3ceb2454263a2933407800c1db827d72a,2026-07-26,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,metal: COLI_METAL_MOE_EXACT — opt-in CPU-exact fmt=4 experts; fast batched default (#587 gate-2)
+32dc3f95e94cf2481edf226fa620fdc5c375a154,2026-07-25,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,probe: env-gated top-2 logit-gap dump at greedy selection (COLI_LOGIT_GAP)
+3be4753df1aa3ae0f34b730eae4636eab5e64ea7,2026-07-24,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,engine: kv_b fmt-gate notice; re-derived for post-#587 two-format gate (r3)
+95fdfda2ca5770126c55703bbd2a1a69ff034e1b,2026-07-24,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,moe: gs-consistency guard for fmt=4 GPU batches (review F2)
+19d400489aeff9c8bf9c187db739fc67cbb4f9fc,2026-07-24,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,metal: adapt #587's fmt=4 kv_b + moe_block coverage onto our #457 base
+5684d3f691d15e2ec35ecf8fd909fa1d462dd893,2026-08-08,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,feat(olmoe): implement the SERVE protocol so coli chat/web/serve work
+8d06bd174226c6b99e99f715750b7d9d95063bf5,2026-08-07,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #880 from JustVugg/test/release-dispatch
+f02a335e30bf5f604ca32266d3cf7266025d5ed4,2026-08-07,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge remote-tracking branch 'origin/dev' into test/release-dispatch
+207532f38198f0313bfef9616d2ab04d8cf04551,2026-08-07,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #881 from terrizoaguimor/fix/olmoe-run-dispatch
+54dea3a6e821140e93c8d4e8cdd6f324ab96af36,2026-08-07,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,fix(cli): dispatch OLMoE one-shot runs
+08a499e6b52d541500ce40a133afdffa7932fd0e,2026-08-07,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #875 from waizuichougou/fix/deepseek-v4-dspark-cache-profile
+9d7cddd44083ff9656d8715a62ef99a649ced586,2026-08-07,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #878 from terrizoaguimor/fix/kimi-first-request-state
+487b99cadc38a5ce02e5432ff0253a33cdfd80d4,2026-08-07,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #877 from ZacharyZcR/fix/k3-vk-tier-fill
+561a9426b54e63ecfd7378be7a9f46af14632da0,2026-08-07,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,test: assert the launcher DISPATCHES every engine it ships; not just that it packages them
+3f0ccc9fc936100d7f06afc076c729824d2c03ec,2026-08-07,PRODUCTION_CAMPAIGN,no,SHARED_STORE,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,compat: provide unsetenv on Windows
+2089fb87acf4f13bc8872f913ce969871ff3d565,2026-08-07,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,deepseek_v4: avoid reserving unsupported DSpark cache
+453e2f3a58fd5556b3fd966c1a6c6c147546c865,2026-08-07,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(kimi): allocate state after prefix miss
+2d14d6da4b6b82a349d46c9007a5d6b8752ece66,2026-08-07,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #849 from ZacharyZcR/fix/cuda-failure-not-permanent
+5e02b9bb256f13bfcbd7a1a4f438b0251ded7cb7,2026-08-07,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,The VRAM expert tier could only be fed by disk reads
+aacf25d06138d271d336a3b1209d7b435b34639c,2026-08-07,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #874 from ZacharyZcR/fix/gitignore-build-dir
+52019c66ddfc841d41403d2a35bce9bd3b12b682,2026-08-07,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,.gitignore: the four ownership objects #868 did not reach
+0830495b60d2d0cbf374b297ea78f773ee97f8f9,2026-08-06,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,A CUDA fallback is a property of the call; not of the tensor
+cefe9e19ede939e57e5eeae0b8b483e8b5141b85,2026-08-07,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #873 from JustVugg/docs/logo-tagline
+2b1cb6f78cf4a0b4f36d5201b6b1340f190e9a05,2026-08-07,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,docs: pixel wordmark on the README logo
+667c1cfb9fec559b255e46266c9824599070e17d,2026-08-07,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #819 from ZacharyZcR/feat/kimi-cuda-mxfp4
+8076bbb11b591e7690b303b09e9f690dedba7320,2026-08-07,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #801 from ZacharyZcR/feat/sanitizer-ci
+69db498625c84dd6950220312c03d4d4a8b84988,2026-08-07,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #872 from JustVugg/fix/k3-ram-budget
+0f974224414932aa35745754656f314a2e8b4149,2026-08-07,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,kimi: a RAM budget; and make --ram mean something (#855)
+1eb8b0dd1b5007646945b5c6192fab3f97e93a7b,2026-08-07,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #870 from waizuichougou/pr/deepseek-v4-bounded-rope
+aa46e7b937c15b80af6d2c5764708e1c1f263079,2026-08-07,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #871 from JustVugg/fix/k3-web-open
+4c35c2134396cc7a9fd95afe1ba9695afb655092,2026-08-07,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,web: open the dashboard when the engine is ready; however long that takes (#854)
+0f4598b2bd425c8a40501f6c912c4f58c5ba5a3c,2026-08-07,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #869 from JustVugg/fix/cap-mixed-width
+b5bd711eecac445b1f7dd824e46120c0db4ff573,2026-08-07,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,deepseek_v4: bound RoPE computation to requested positions
+f9e3890ef8ae1c73b5d83760e3bee9eda6bb20b2,2026-08-07,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #868 from JustVugg/fix/release-deepseek
+7c9762523056a6ec278e904e98308ddc8c9e14db,2026-08-07,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,plan: price each expert row at its own width; not the container's widest (#856)
+c9e0211eecc4a44b28f3d281bd676b2b866abc99,2026-08-07,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #862 from terrizoaguimor/fix/k3-repack-cumulative-index
+c6d860e943cc3cbb9309eb7d5b715aa0f76e2371,2026-08-07,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #861 from terrizoaguimor/fix/anthropic-architecture-rendering
+ee7d761bf06e48f6a840f0f5292afbdc0cd40e09,2026-08-07,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #852 from dyKiU/bugfix/autotune-throughput-precision
+f6a0260c2e97f70113e636d7dc55c72be05fa348,2026-08-07,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #850 from ZacharyZcR/fix/sigterm-graceful-stop
+0b1ea31e7c1c442a536a7b29ef8e36c71e98b6f3,2026-08-07,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,ci: build deepseek-v4 in engines-all-platforms too
+48c22224c69e4580a6ebadde1281936102f02d33,2026-08-07,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,release: ship deepseek_v4 in the archives (#858)
+49994a294308a2190fd67894b944964c30f402e7,2026-08-06,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,fix(k3-repack): rebuild cumulative index on resume
+140d91c4859102004ee037d01644cdff70585a89,2026-08-06,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(api): render Anthropic prompts per architecture
+6509ae280fac20a7092f3a70d09c4e38c5ae894f,2026-08-06,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,Handle SIGTERM; and drop the SA_RESTART that would have made it useless
+a54b4da97f3a4b2934e256af37e3dd00e6458a09,2026-08-05,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #847 from JustVugg/fix/doctor-names-shard
+e64b4834e5b5b0eb9deef7043684e97bcb2d3813,2026-08-05,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(doctor): name the shard that failed to read
+c7ae787335512c20fee4a4a7f39a23a549e42977,2026-08-05,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #844 from JustVugg/fix/release-idempotent
+9bdb0d4d3403951a6cf92859d50ba83f7daf1e38,2026-08-05,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #846 from JustVugg/fix/reasoning-effort
+552c2eb2b87f5d35c3c7cc962539bc7f1e3bf8df,2026-08-05,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #845 from JustVugg/fix/metal-test-fp8-nblk
+3c6788ab9126f118d6be1e779016d1dced79d756,2026-08-05,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(api): reasoning_effort rendered Max for every level except high
+c7aaaf7e0fbd4339448ec1ea32ba106853501b11,2026-08-05,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,fix(metal-test): rename test-local fp8_nblk; which quant.h now also declares
+256b8fb795b6c54ffdaa4de9aa46535bd896514e,2026-08-05,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,ci(release): attach to an existing release instead of failing on it
+8f512fc8c2f48ffa18cd624cd4a5bcaae4a4abfc,2026-08-05,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,chore: version 1.5.0
+09bf2fc8d123015d807b14616b950a843ab5ae31,2026-08-05,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #843 from JustVugg/dev
+e323575801b999ba3b2d5c76a0a477cda97ab2c0,2026-08-05,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #842 from JustVugg/docs/readme-roster
+388fdf7d52721b94566c5cc32954fa1393a9fc79,2026-08-05,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,docs: DeepSeek V4 joins the roster; and the repo layout matches the repo
+65b3b1af36a0a94fd2b65ff3f4536c8e9fc925aa,2026-08-05,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #841 from JustVugg/sec/hardening
+edcdd4e36b2d0f0800b6f71c0e8c59b725ba8f66,2026-08-05,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,security: six advisories — loader bounds; router NaN; serve limits
+133925e6be48bc923c7117b298bed3c15c4e5117,2026-08-05,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #839 from JustVugg/feat/deepseek-v4-perf
+2e45ad362c62016854e88059f85f99d37ac15157,2026-08-05,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #835 from ZacharyZcR/fix/tracked-bench-binary
+53b99591bf8cd4cc07007859fd645e13d423a579,2026-08-04,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,Move the no-CUDA-flags guard from kimi_k3 to olmoe
+db0c80f0d3688630ee49fc4cb02bdb8b3869a4e9,2026-08-04,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,Decode MXFP4 (fmt=7) on CUDA; so Kimi K3 has a CUDA expert tier
+63a2c8d966285c59b6f37cbff20530406a4e4750,2026-08-05,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,deepseek_v4: release aligned slabs with compat_aligned_free; not free()
+b7117bfd7cf2629df424e21ea5ccbe1b895211bf,2026-08-05,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,deepseek_v4: AVX2 kernels; direct expert I/O; warm pins; verified drafting
+bccdcb52bebdcd5a8524154f5a876becf01c720c,2026-08-05,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,inkling: make kv_alloc grow-with-copy ring-aware (#786 collision)
+7fefa8ccda0024f990ba6cd732fff1d2102c8a7e,2026-08-04,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,inkling: ring-buffer KV cache for sliding-window layers
+f2f745ccd62c45e372baef1b4efa0904213fc239,2026-08-04,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs(fmt2): M1 Ultra fmt=2 report + benchmarks row + fmt4->fmt2 converter
+9fc95f9e0b91adccc4d09e79c97f9c1059be2d58,2026-08-05,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,Untrack the bench binary my own PR committed
+ca13cce69390f46bf45a01f667d9eac819442ace,2026-08-03,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,Run the test suite under ASan+UBSan; and fix the clean that hid it
+1ccdd58f41ce2f553415bcb4abdaccc1895c2b5a,2026-08-04,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,wip(fmt2): snapshot fmt=2 benchmark workspace — logs; plans; harness; converter
+80b887ebe50673759af5c5f30236ac5540b886f9,2026-08-05,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,test(banner): stop asking Windows for a 372 GB file
+ecc94ee8cf72f28c986f8c62748ea2aafcb2324c,2026-08-05,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #833 from JustVugg/fix/serve-broken-pipe
+f5fcbc1a36ed818ed57181dffccfa20ab05bccd4,2026-08-05,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,serve: a client hanging up is not a server error
+cc658792de15d0c269ca0d924abcf5ad73ee7952,2026-08-05,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #832 from JustVugg/feat/banner-model
+e2fe0fe23b2a5bcfcfb356bb50b09d5cdc143333,2026-08-05,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,coli: the banner said GLM-5.2 over every model
+f2c3c559384ff3dec6c9400da1a8c1408934ff96,2026-08-05,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,test(loader): the ABI tripwire counted 46 symbols; dev has 47 + 3
+ecd4cc8a7f66475cfa3827e9c2de6a90dcaa2a22,2026-08-05,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #831 from JustVugg/feat/v4-kv-prefix
+f6dc66e60c3fdcb9fe1f8640e4403b0a1a6c85d1,2026-08-05,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #788 from Kenneth-Javier/feature/windows-hip-native
+9d096dca32477524b7a63f593211fe7770734a00,2026-08-04,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #799 from ZacharyZcR/docs/environment-coverage
+903820128db8e4e427a0da25721977db41b5ac03,2026-08-04,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge dev into docs/environment-coverage
+3ad9672d14e777d2765659cbcaf6e1f12fb67720,2026-08-04,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #808 from ZacharyZcR/ci/efficiency-gate
+95176c8af716d8b8f928369fb69eb58568911875,2026-08-04,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #803 from ZacharyZcR/feat/docker-ci
+280fe8aecb347c9879fbd527d89d41d533d64d0f,2026-08-04,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #794 from ZacharyZcR/docs/glm52-inference-research-closeout
+2f3dc01f7ac52a01afce6c5227e4f0b584010a9d,2026-08-04,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #795 from ZacharyZcR/feat/paged-ragged-kv-research-runtime
+dc0c979211830c61e04877e0e44ee52823ebf792,2026-08-04,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #817 from kreuzzelg/cuda-fp8-e4m3
+19462f4303f72a5ceacc2372c1ec1893c0eb336a,2026-08-04,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #828 from monotophic/docs/formats-rans-registration-r1
+8df3fbc7896e33cf926e0895c26831fde49dea76,2026-08-04,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #757 from rgbkrk/t2-overlap
+18d7c3a4f3ae4c18007f46f8b1bf0f3be8949ade,2026-08-04,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #567 from winklemad/fix/stateful-ngen-kv-tail
+978808589e4869f5f133b88392fcc01b07477bdb,2026-08-04,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #764 from ThefloorMiner/experiment/glm52-4xa6000
+c80960c57ca92ec7544cfb4463f3737256762ae8,2026-08-04,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #796 from ZacharyZcR/docs/research-acknowledgements-current
+c08dd23be29a57e1d56a3ff8ba459709081e1f13,2026-08-04,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,deepseek_v4: reuse the KV prefix instead of re-prefilling every turn
+aa60f7b632f443bf784d5b7870b8696c69905feb,2026-08-04,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge branch 'dev' into feature/windows-hip-native
+1743054e489f8d4f664e171e30913d9e735bcba7,2026-08-02,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs(fmt2): M1 Ultra fmt=2 benchmark context — issue/PR summaries; plans; scripts
+c024a46868859c795a1596f40707086056c53d43,2026-08-04,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #165 from whale-agent-lab/dev
+9f30f38bbd543cf3047f634671d9601f1442ef0e,2026-08-04,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #802 from whale-agent-lab/codex/st-shape-rank-sizes
+83b06ac028ea718e303d1edb77da3b1796562d95,2026-08-04,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #806 from ZacharyZcR/perf/omp-grain-guard
+1e12047bfebc1b5cd7a93d83eb29d9254d7076a6,2026-08-04,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #818 from ZacharyZcR/test/kimi-tokenizer-gate
+a4d7b908bacf7f4cb00cb64f042b0a988a9371d8,2026-08-04,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #815 from bherald/perf/autopin-preserve-lru
+2e3c47524a92874f9d12e88ff4eb4533ed2d6b50,2026-08-04,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #805 from ThefloorMiner/fix/omp-threads-all-platforms
+8e1902c6d2c7cafbeee63948fdf8a8f6736adb7d,2026-08-04,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #804 from ZacharyZcR/fix/stale-engine-names
+bfd27ca631c29ed79244486370bdbafb42b17146,2026-08-04,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #807 from ThefloorMiner/fix/metal-builds-without-libomp
+7cb3e680663f47d33112d92361758f638091ed64,2026-08-04,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,tests: registry parity covers ordinal-less FORMATS.md rows
+e14b00a113e9f4c6d86942b74bc8a6e664113eec,2026-08-04,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs: sync int4-rans256-g0.md's registry-row stub with the landed row
+662692520d598f179082275bc255184e5b46fe27,2026-08-04,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs: register int4-rans256-g0 in FORMATS.md (merged tools-only tier; no public ordinal)
+3a297840782020c44792dbb580c3dbdc178a21cc,2026-08-04,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,Gate the Kimi pre-tokenizer; which nothing was watching
+81ef1a9d278ada270929e0c398971bf08a094a86,2026-08-03,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,perf(cache): preserve adaptive LRU during autopin
+dbb4b0251776f1d9d5c1f6d291f767e9eeb22dc9,2026-08-02,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,cuda: fmt=8 (fp8-e4m3) kernels — dense matmul + expert groups; block-scale aware
+f60e3be9b7f9473d29b340c9868a1ea9cfea7469,2026-08-03,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,merge: sync st shape validation tests
+764c450a9a821fdaa7e836422320802b533a5b30,2026-08-03,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,test(st): cover hostile shape rejection
+9402d8b538a232abf069fb34d3666d3505326d00,2026-08-03,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs(experiments): the tuning campaign; and why PIN_GB=all is not a safe default
+00129d2ecbf4db31f990890c55ae4cef8f216a39,2026-08-03,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,Run the structural efficiency tests in CI
+4dbada96a6999d769bf58830ff54fa893499137d,2026-08-03,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,Add the benchmark the previous commit's numbers come from
+6e9af36fbcddda0003d3045ade986982a537ed44,2026-08-03,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(metal): METAL=1 could not build on a stock macOS
+230b75fd82e679997bb104a821a55494156bc787,2026-08-03,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,Do not fork an OpenMP team to run one iteration
+aef8552b84975025ce83e897a92585b71954a078,2026-08-03,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(omp): set OMP_NUM_THREADS from physical cores on every platform
+12e172cda7780effe9c20c77bd9bf6977f704dcc,2026-08-03,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,refactor(v4): complete target-only engine migration
+8b3553dfe7bc82a244dd3706cd0231e085dad50d,2026-08-03,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,docs: acknowledge the engineering the tree actually builds on
+38fd944e990a2f5517d3a71b40220e2127bb30cc,2026-08-03,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,Point the efficiency tests at the engine's actual name
+a98067a30baf4a147648b6f685d67649cfbd92ad,2026-08-03,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,Build the container image in CI
+e68058d232c0a3b2c2868499f7b36512be6d8dbb,2026-08-03,PRODUCTION_CAMPAIGN,no,SHARED_STORE,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,st: retain tensor shapes and shard sizes
+01e078fa4227090b153bac303e53eb575cb539f0,2026-08-03,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,Document the 79 undocumented environment variables
+1f76e498cc346a0c324a946711ea799ef953250a,2026-08-03,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,test(loader): compare paths as paths; not as strings
+22210a244635cc5f5f23cb29a267f4ad19a79612,2026-08-02,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,ci(windows): run the backend-loader contract tests on Windows
+c6102228657e31032ac49fe710fff961cc4263ec,2026-08-02,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs(windows): document the HIP toolchain pin; runtime isolation and residency check
+219b5edc9af457160b381860f16948cba7b19023,2026-08-02,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,docs(gpu-backends): retire the Windows HIP "build only" status
+d27e182c68ecfa380e0b183501816ece2ebaa3f2,2026-08-02,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,docs(windows): document isolated GLM oracle tooling
+a5ef3d7a63fc6660ea03322f5a10c8a9f2017ec0,2026-08-02,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(windows): enforce exact HIP runtime binding
+c5f5922d3cccc29324e7add4d02b37beae584422,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,refactor(windows): add HIP runtime binding foundations
+7d1fa40f33f8b44cfd125fca4b5c3ca25ebf97c8,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(windows): report truthful backend load failures
+fc21992a2caf4c4e742d5e7e099d402fc91d2aa2,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(windows): validate the configured HIP runtime directory
+c1bda85d0a4f83e0ebfac5bf77a1ad5b71b9ccd2,2026-08-01,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,test(loader): prove same-process HIP runtime binding
+78d2a39febb7a2c2171a5d99490b4e9d98befadb,2026-08-01,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,test(loader): add controlled Windows HIP DLL fixtures
+75cfda88aaa5bc4e285fc55efaaa32b24b5a75a1,2026-08-01,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,test(loader): give the backend-DLL contract its own owner
+f1e47aa7ec290e76221eb65f4c9e6415b7e03f8a,2026-08-01,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,test(cuda): assert the real COLI_CUDA opt-in contract
+841ee23f665560680900de8f4df7b8e0977aaaf5,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(windows): select the HIP backend DLL in HIP mode
+6efd3c97271f8e75a0a11cb01341a0e79044f2d5,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,build(windows): add an opt-in native HIP DLL build
+3159c0f7c9a46ade69e5233d3f999f9de0042dd5,2026-08-03,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs(experiments): the CPU read ceiling; llama.cpp; determinism; and a refuted hypothesis
+7fb11595245b6f320b3cfef9565fdbe6da92442b,2026-08-03,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #792 from JustVugg/feat/kimi-usage-history
+0797f186edbc2b33ce2708f4406fd560ae3fb38f,2026-08-03,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #793 from ThefloorMiner/fix/expert-bytes-probe-widest
+de4aa66bae5ea7bc6800d779ec34cbed4130f547,2026-08-03,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,cuda: forward device telemetry through Windows loader
+99cd64007ec89f9de61d0f40d2d6f601c225f4f2,2026-08-03,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,docs: acknowledge inference research foundations
+56c03a1ee3e66e79b5bf5ef687f86b3d363c7b35,2026-08-03,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,docs: publish GLM-5.2 inference research closeout
+2c5be24fb818473f890c35b9db13aed680dddfa6,2026-08-03,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,cuda: add paged ragged KV research runtime
+36a34c5a358a6aca72a7c35a3aca65f9171daaee,2026-08-03,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(kimi): serve blamed the payload for a tokenizer without XTML tokens
+7c28e18f99d94165a70ed28971f02000e0ebd0f4,2026-08-03,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(plan): size the expert slot by the widest width the container holds
+9212eff2f3c2e185f4925f4b983c08e1b5e866bc,2026-08-03,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,feat(kimi): learn from use — .coli_usage; autopin and decay; as GLM has
+44d795829e03d299b5b614575832d898edd0378f,2026-08-03,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #784 from dyKiU/bugfix/inkling-cache-capacity-regression
+8c8e2c733ed9df2781c1500e13bed55de72c065d,2026-08-03,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #762 from kreuzzelg/cuda-async-grouped-int4
+d3bc866c6b73c8369b77954d960be0495bd9dadf,2026-08-03,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #787 from JustVugg/feat/kimi-kv-prefix
+2f8957ce597ffab92fe4752878839414c0cdd8b1,2026-08-02,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,test(inkling): enforce cache capacity invariance
+5b79fc95f2820c7e57bc27a0aaf8c942a8c99336,2026-08-03,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #763 from RDouglasSharp/metal-prefill-on-dev
+863139e5ea3442d5f8b633675aa12c636facb4f6,2026-08-02,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(kimi): grow Lc/Rc instead of restarting them; or reuse never fires
+d14b09dbf468ca0d77853b6c8e40135329cba6bc,2026-08-02,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,feat(kimi): reuse the attention state a previous turn already built; stop leaking Lc/Rc
+89472cb2105710aeef4721fa286f6f04621dfd9d,2026-08-03,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #791 from bherald/fix/omp-physical-cores
+846b148437111f10131e8eb90ed1f85842352c98,2026-08-03,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #786 from JustVugg/feat/inkling-kv-prefix
+414c0271e0d8b45f324ea12e9d2d3ed272e650cd,2026-08-03,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #785 from JustVugg/fix/783-engine-aware-doctor
+7fad5913eb0d67a23205226f71b1aefc535c9776,2026-08-02,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #782 from mgua/dev
+e6b88994af100d4a2a6187aba2e50b3c39174850,2026-08-02,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #781 from terrizoaguimor/harden/st-read-raw-contract
+9278a215e277e6fc50f2cc7ed57f075b3bb307c6,2026-08-02,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,fix(test): keep the generated payload as bytes; never as str
+c7f7f8cefef7380f72df1c03d4573e0ce8081983,2026-08-02,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,diag: say why a turn did not reuse; and capture stderr reliably
+b4c4f613e94b1a4b1ed9debf9bc65f95f6237243,2026-08-02,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(inkling): grow the KV instead of restarting it; or reuse never fires
+64ee54e70542fd2b9028879b75f42d3ab34cb59b,2026-08-02,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,fix(test): detect the CUDA recipe by fact; not by error message
+120e52f2a3d073feb5f24747cd0dab1f34aed268,2026-08-02,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,test(inkling): give the tiny fixture a byte-level tokenizer for serve mode
+c3e251eb88e447ef6db73501fcedc0d793d421dd,2026-08-02,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,test(inkling): prove prefix reuse is token-identical; end to end; in CI
+948e7b134ed45ec04a6db96f347074454d8add5f,2026-08-02,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(omp): size GLM threads from physical cores
+2ade55326c8f134d888efda2a85e16c78bb7c366,2026-08-02,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs(experiments): the engine's own profiler; and the DRAFT re-test
+639e3c32c0c4c7186f7e417738bcdb9ebac5b7d3,2026-08-02,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,feat(inkling): reuse the attention state a previous turn already built
+73da98f2dd471f72bed7d61fe92381e3ffbd7105,2026-08-02,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,fix(test): skip the CUDA=1 recipe assertions where CUDA=1 is rejected
+a1f9e8ebf46f26ffd85d2050b0c7f56d41b98192,2026-08-02,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,fix(783): doctor inspects the model's own engine; CUDA=1 stops decorating kimi_k3
+d9ef4caaaf64b874d109284055570cd4f2e0a8f2,2026-08-02,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,cuda: refuse non-per-row formats in the expert-group fallbacks
+59b303a1137661b5a98bbedf6d07b3e50408c3d4,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,cuda: dispatch grouped int4 (fmt=4) in the async expert-group path
+374577d4be530f3302763bbd566fed695f10d03f,2026-08-02,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,some edits in mission; introducing inference multitiering concept
+42ac78dec9422a95189ce3542ee138a1717a0910,2026-08-02,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,st: document st_read_raw's caller contract; and add the capped sibling
+de2b3171b64e3fec055d7898f422e29354a7ed70,2026-08-02,PRODUCTION_CAMPAIGN,no,SHARED_STORE,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,st: document st_read_raw's caller contract; and add the capped sibling
+0436bd25b9e11a3eca5054d2151f6ce434419099,2026-08-02,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs(experiments): fold the retractions in; add the controlled measurements
+1709febf76b48d98add46d3dd3f822d3df63b5ab,2026-07-23,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,metal: GPU attention for S>4 prefill (single command buffer; opt-in)
+72ddb673b454f5132482ebfffffa9faaa98ae070,2026-08-02,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #780 from ThefloorMiner/feat/usage-decay
+a1725b38854a69c978442a5e786eb1e228bfc487,2026-08-02,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #771 from ThefloorMiner/docs/prefill-chunk-and-cuda-dense
+b50621e258c7feb4988d84c96359fae96b0d865d,2026-08-02,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #770 from ThefloorMiner/fix/plan-warns-when-vram-is-already-in-use
+965652f3d5cc9c2104e59fc66f07cf2e0638a530,2026-08-02,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #777 from mgua/main
+fddb30adef92d2537feba047387cad86b4d3ecea,2026-08-02,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #761 from terrizoaguimor/docs/serve-carries-the-dashboard
+fd5d72e6050fc6ed8fff2629801725a3bf002c6b,2026-08-02,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #779 from JustVugg/feat/fmt8-ue8m0
+57bf04e2d0b0a92e3f3c8c317cfaeb4c6a126ade,2026-08-02,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #778 from JustVugg/feat/st-fp8-dtypes
+413434781f7ddc2df07f7569a3e88e680930a9ae,2026-08-02,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,feat(usage): COLI_USAGE_DECAY — give the learned expert history a half-life
+c19206d0b87123489861dce0de1cfbd91f3d9e7c,2026-08-02,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fmt=8: accept UE8M0 block scales alongside the f32 ones
+d567972fb36c0b5f5f2a9c4e134b999f47e0261d,2026-08-02,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,test: pin the UE8M0 decode and the dtype table
+2171adf7d17666d1bc7d1eee64ba051613bc76ef,2026-08-02,PRODUCTION_CAMPAIGN,no,SHARED_STORE,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,st.h: index F8_E4M3; F8_E8M0 and I64; and refuse them in the float readers
+ec52bc3b68041f0ddad54298510fe4516b486824,2026-08-02,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,mgua@tomware.it added a small clarification for windows invocation from powershell
+a25539ea9266951ecdb3bd497db4db3120ee2040,2026-08-02,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs(env): document COLI_PREFILL_CHUNK; and what CUDA_DENSE is worth
+0588021a93864ba5e902cba1ffd10ef535790e4d,2026-07-23,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix: commit capped final token to stateful KV
+3e2a261e02dabe9b93aa81ca4bbf20d7eaba7757,2026-08-02,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(plan): warn when VRAM is already in use
+e982047b192e7a510d58ca3dd5b5888fd3c115fb,2026-08-02,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs: add GLM-5.2 experiment report on 4x RTX A6000 (Ampere) + EPYC 7402P
+aa1ec162770398dd5f180ce7ce5a169979577982,2026-08-02,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,docs(v4): describe target-only engine split
+f8888ae50b480b29029b0a48e82f64ef32e86647,2026-08-02,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,test(v4): generate target-only oracle in CI
+43c5db89e86ade5dcaa964a67b39082f8e19e50d,2026-08-02,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,feat(cli): route DeepSeek V4 through coli serving
+8245eeae1dd77a82c0af63c4178d05836932625c,2026-08-02,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,refactor(v4): preserve target-only runtime
+98690949806a7bf2f9aa8b03271212b0775cac38,2026-08-02,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,feat(st): support V4 checkpoint metadata
+fddb786a597da2b0fcf9e126307d6a65f27a2c2f,2026-08-02,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge remote-tracking branch 'upstream/dev' into dev
+c2158805d5592461897ccb56c024dcbbf1c35f02,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(tune): minimize replay compatibility change
+af737e47903ca6a3c3ae6aa2abcad0d66a1060ed,2026-08-01,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs: `coli serve` carries the dashboard too; and says so for headless hosts
+e064837f55fd45b5ae5e04b51f3ffcb1f960334f,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,docs: `coli serve` carries the dashboard too; and says so for headless hosts
+8430c3801ab8811befa62ec89b75d53a5aa5aeae,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(tune): retain legacy throughput parsing
+fe308c98a79687dcc92d4555ca0e4d78a2e689a5,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #754 from terrizoaguimor/feat/olmoe-route-trace
+a570e8680a8ca5c7b4c550b0d865ed1a2be3b2bf,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(tune): derive throughput from replay timing
+bec15468d9bf8dfc3b4f25de388ac52147afa702,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #756 from rgbkrk/docs-inkling-audio
+b6f4dfc29081c500250eb7df72b92a9768bee4c9,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #755 from anrasi/fix/makefile-linux-aarch64
+b9ee0edbb050ab97a9ce236c35f578fbf0799bd8,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,metal+inkling: shared experts on the GPU as a bf16 block
+cda2e4ee03d8478addbfbc2814550f2a310a0f23,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,inkling: overlap shared experts with the last GPU round
+46da5ce49b994414392b1cc50864c868add41e60,2026-08-01,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs: inkling audio input; including the 10 MB sidecar fetch
+4705448c44197c9a073c3ce80dabececeba2497d,2026-07-28,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,build: Linux/aarch64 branch in the Makefile — probe DOTPROD/I8MM; don't trust native (#631)
+8e13a0cfe706834925426058bff4f12b1900483d,2026-08-01,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,olmoe: adopt route_trace.h — the last engine on the shared history
+ba5c44a35f68704f0b12ab12a169b31be5b1a57f,2026-08-01,PRODUCTION_CAMPAIGN,no,OLMOE,UNRELATED_BUT_INTENDED_PRODUCTION,olmoe: adopt route_trace.h — the last engine on the shared history
+ee0c668b5b662345d9c7f4001585233ad4b1b8d5,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #752 from JustVugg/docs/plain-language-191
+b41282a2a89d5e6ebaa3f7e30c0a0095ac90e599,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,docs: plain language for the words that stopped three engineers (#191)
+5b8ae129c2f639272650d715b7af46e11760b1b0,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #750 from rgbkrk/shrinkling
+113bc0fd43d6a1b58670d77a262c14f031d44758,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #749 from JustVugg/fix/serve-binary-mode-windows
+d14e292d1ed38bf3d5f82419057c974ce179e819,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(win): put stdout in binary mode before the serve handshake (#748)
+e57083f4ae0b6b8c0fbbd977bee888ce6a3b76c5,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,inkling: Apple defaults from the measured sweep
+d7b18c007703c1abe368b5e31c3bb29d51247526,2026-07-31,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,inkling: keep Metal off the decode path
+e5807c847ac1ad6000ef36125c1bb71097697149,2026-07-31,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,inkling: DMel audio input + Metal expert MoE
+779ce88d44865b8630fdd007ce382271e59afabe,2026-07-31,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,gateway: DMel audio input for Inkling over the OpenAI API
+9ad5764316b7f8e5808d7093d346455a5812ca45,2026-07-31,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,tools: keep audio tensors through conversion + multimodal tiny oracle
+27637f0b579c38316e154a045a8707d3a74fa7fa,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge upstream/dev and resolve PR #165 conflicts
+5091374434f03ed5d0e4fb061ca34e282de3ff0d,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #1 from anrasi/gb10-aarch64-v4
+b085b48888a88d9a1c00b151a9979774b72cdbfd,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #747 from JustVugg/dev
+06f31b243792e02174a0c343021e5543d5072be4,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #746 from JustVugg/fix/release-verify-encoding
+72cf894758e03e6525cdd7f81a0a7412e510f78f,2026-08-01,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,fix(release): read the packaged tokenizer as UTF-8; not the Windows ANSI page
+e05878855c274fd0af164f9597a2acb046600dd2,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #745 from JustVugg/dev
+029989ab450f312cdee5b577963219ca11456aee,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #744 from JustVugg/chore/bump-1.4.0
+9340979613f547fd9954c30c3e491b5c768a10d2,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,chore: gitignore .claude/
+a489e1bab0891bc9da3ea2738a737fc2c3c993a7,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,chore: bump version to 1.4.0
+7513ef549f9cff9acc59080772c2977798212773,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #711 from JustVugg/dev
+c946780b9cdf9eb05c92cf8dcc47092452a3bef8,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #743 from JustVugg/fix/fp8-e2e-test-openmp-linux
+9d240ab332c441ad9f6ef8dc9ec884ed2ce2dc88,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #742 from terrizoaguimor/feat/inkling-route-trace
+8861d97e87868bf729b91470a935b178c5771751,2026-08-01,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,fix(test): build the fp8 e2e harness with -fopenmp on Linux
+f6ae8587936d8a76ab098a7ce35fdcc27634c9a3,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #741 from JustVugg/fix/cuda-tier-staging-rss
+42835b685c3b061158a85f29267b3f8d3368170c,2026-07-31,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,inkling: adopt route_trace.h; keeping the IKU1 history readable
+e542108366c07c5f06527a4036fdf5b3d3de717c,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(cuda): stage the VRAM tier in rounds so host RSS is bounded (#730)
+926705df944e1f9c4d26d73c279ad4553a38ec8d,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #740 from JustVugg/docs/site-four-families
+d2b565ef199269d955ac5763ff63ae36e754b14a,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #739 from JustVugg/fix/coli-cuda-value-not-presence
+3cf82f6472c6e912fa50090bce0067a775ea5067,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,site: four model families; not one — and two cards that were plainly wrong
+207d3548f377d25470bf9942afb7e760801b3072,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(omp): COLI_CUDA/COLI_METAL are state; not kill-switches — test the value
+2dcd5e1f4c5bc04259e2990ca8c462681c9bb1bf,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #738 from JustVugg/feat/omp-thread-sizing
+fd8fae93a08e95fca3674f9d0d75dcb91fe2a054,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,feat(omp): size the OpenMP team by physical cores on kimi_k3 and olmoe
+f8e31f639632590dabaccc281a9e16e13d831579,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #737 from JustVugg/feat/release-ship-all-engines
+9080a3720ed1d58b66644ccf75ddcbbbaf31f7f0,2026-08-01,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,feat(release): ship every engine in the archives; not just GLM
+233fae69abdbd379be2851a766e4fef5598bba2f,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #736 from JustVugg/fix/windows-serve-stdin
+fbd45349a050e6b7bed9d13e1cafbdf7933669c1,2026-08-01,PRODUCTION_CAMPAIGN,no,SHARED_STORE,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,fix: place the select include correctly and drop the STDIN_FILENO dependency
+f8823030e55c473e688a5da494d167335aad6974,2026-08-01,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(win): inkling and kimi_k3 now build on Windows; CI covers every engine
+41b838a786fbd26ebc937f366bcf5e83d8ac2e49,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #735 from JustVugg/fix/mirror-plan-test-macos
+53b654382f88225271e04b1a467395ad4dda1601,2026-08-01,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,fix(test): resolve the temp root so test_mirror_plan passes on macOS
+09c4d96237b8ea0c80176b03e372da10e2a8885c,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #536 from bherald/contrib/partial-mirror-planner
+570deac8554fa90be372c1846bb6368c53328686,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge dev: keep both the mirror and tune subcommands
+d1f41c34f89bbc613862ed1c5f90770a302e2f6c,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #725 from t83714/codex/claude-code-system-role-fallback-dev
+618b5e966275f8c7fe84eee2901a68760300e834,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #732 from michael-denyer/m5-metal-fmt6
+ba66ae54d32d1d06a7f3dce18ed30f642ddd366d,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #621 from jeswr/causal-ablation-harness
+9458439412c8ecb5f5b18c419af612aac42dc59b,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #529 from monotophic/fmt7/stamp-registry
+77f6f51125a741133c65b4736906c3db9108d103,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge dev: TEST_BINS is derived from build rules now (#733)
+0ffd1a935d5bfd7dc858de676c209cfaa803e609,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge dev: TEST_BINS is derived from build rules now (#733)
+6669ee98a96262991c69c99bcc4ef8373723f615,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #620 from jeswr/docs-api-tools
+20db8f6e467939d4a57827942541ddef8e313799,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #511 from CooperSheroy/catalina/oracle-near-ties-docs-20260722
+3e6fdfff6be83c117dd781ebf89e029b8e57c125,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #719 from terrizoaguimor/kimi-k3-telemetry
+c5bfea791e5550dfb39e897d15c1ee74f258a0ce,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #716 from terrizoaguimor/route-telemetry
+d2d6f6fd1cd58489b422d76141293909fac15543,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #528 from monotophic/fmt7/fp8-passthrough
+00a0ffc8a43cc236269b378088edee9a16f60b66,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge dev: document tool-calling; and keep dev's stop-sequence correction
+c154cf24496f8d7f8691d16f14fb7ca5e1bac5c8,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge dev: keep the softened oracle expectation; on the current binary name
+1a7d65bc6be0cb513d148e354ae0e6e09df70fc0,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge dev: TEST_BINS derives from build rules (#733); keep abl.h in the colibri rule
+116f65ab3b2e2f5362390c7db00d1917203505a8,2026-07-30,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,feat(kimi_k3): adopt the shared routing telemetry (#700)
+b9564726cd6fe28631d7e0ffa4c0c0c04047bb64,2026-07-30,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,refactor(telemetry): one expert history for every engine (#700)
+6a4165ceae2b2b90d7b7eec73b1c9cc48beebd1a,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge dev: TEST_BINS is derived from build rules now (#733)
+1eb37d0bbd84c942e2e9ef31bb3a0246ecd06df2,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge dev: TEST_BINS is derived from build rules now (#733)
+ca3d1db88ddc4021e8ab6fec7f46f4da059d730b,2026-08-01,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #733 from JustVugg/build/test-bins-from-rules
+1d8d19beb020b2d0f26529a699d5a398110d79f9,2026-07-31,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,build: derive TEST_BINS from the build rules; not from the .c files
+4b915597f7ee6f4cb603063e19263f44efe3f532,2026-07-31,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #673 from ZacharyZcR/feat/coli-tune
+b877e938ad1b27e367b6f657c957842202ab3ecf,2026-07-31,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #728 from terrizoaguimor/fix-hardcoded-paths
+3d4f8485055a594935ba4441e8246c0301698772,2026-07-31,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #726 from ZacharyZcR/fix/e8-cuda-real-shape
+f90ca862de51b70aacc3f67758f29a0c36c671b7,2026-07-31,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #723 from ZacharyZcR/fix/e8-converter-selftest
+ea24cb0a9ab5dad99c950b3ed646b483eccec263,2026-07-31,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #651 from ZacharyZcR/feat/cuda-ans-expert-tier
+3bce2f0c94d030ea31efb711863575076230fe27,2026-07-31,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #386 from monotophic/defaults/metal-cache
+cec4b1874bf159e8a183bc4a1f725ff0d2e9a64a,2026-07-31,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge dev into defaults/metal-cache — resolve TEST_BINS in favour of the wildcard
+2c6ef58d47ed7a62fffdd52ec6dcecc8cfebc9b4,2026-07-31,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #731 from JustVugg/build/test-bins-autodiscover
+b7c1173c191f59beab19e71730d39f74b71a0f99,2026-07-31,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,build: derive TEST_BINS by wildcard so adding a test stops causing conflicts
+d93be65e45adbed943392c3645b3402292c42570,2026-07-31,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix(cli): convert needs its own guard — --model is its destination
+b3d7826aa1379b3fd3e239c5f95886f464ba4b8f,2026-07-31,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,fix(cli): no invented model path — say what is missing instead (#724)
+a842d5088f46a162bf246ca74ed3345f9a7d9f1f,2026-07-31,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,cuda: add native grouped E8 expert kernels
+1584b8575eb008ed47aa25bc6ff8268a501d5693,2026-07-31,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix: keep E8 experts out of unsupported CUDA group kernels
+7f3b9e74d20928c0e390565e1368a8987e7677b7,2026-07-31,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,serve: trigger Claude Code system-role fallback
+cdd6ed4df947d23ebb7c099fee1d256a4fb3990d,2026-07-24,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,metal: fmt=6 (E8/IQ3) expert path — GPU decode + on-GPU FWHT rotation
+217c83236bd4e2283c251b6b20ef27441f252ce5,2026-07-31,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,fix: allow converter selftests without a model source
+a89520376a6162337c3f78c276e7c923d6b9b747,2026-07-29,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,test: run tuner fixtures portably
+4bc8d0da71a19b850c0a78c9b82e060ca3601f16,2026-07-29,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,feat: add measured machine autotuning
+a6def3bb2d1649659cf66763c7d901f8dde620e8,2026-07-28,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs: clarify compressed tier output semantics
+2e4cd63534d20913f3b65548b1ede2ceae488d16,2026-07-27,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,cuda: pipeline compressed sidecar loading
+3d586d7a79d6fbd0c057238c838268bc63ec31f3,2026-07-27,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs: document compressed CUDA expert tier
+8cc534cbfb10bc4ba9fb36db3b7993d9860de04e,2026-07-27,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,cuda: add lossless compressed expert tier
+66211fa9a7af461ae35dd57931a2874c5d2a722f,2026-07-27,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,Reclaim detached expert arena pages
+ca05b77b91da2c312c098322ef0a9b352e0b726b,2026-07-27,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,cuda: reuse decode activations across attention projections
+38c2185fd3e54d44299351613baa3092cd1a56fd,2026-07-30,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,stamp: conflicting duplicate claims refuse at ingest (was first-wins)
+bda0ed00d83a997141b8404f2a6d672af9a01a8c,2026-07-30,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,metal: positive fmt allowlist for the fused decode gates + fmt=7 unreachability sweep
+575612c9cb90a113187cbbde4e059ce2577dbaa8,2026-07-30,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,registry+tests: fix round 1 -- name parity; MXFP4 row precision; collision-family pinning
+8bc825a203e962addc03490e7ffbf9c856eee8e0,2026-07-30,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs: FORMATS.md records the 7 -> 8 renumber; the MXFP4 row; and ID assignment
+aad075072aa0e0d389ef6976a8d481cba2f7534c,2026-07-23,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,tests: drain child stderr to EOF in the stamp-test capture helpers
+0c1ab6b1c73c62d3f36e248464e0c4a58fd19fb7,2026-07-23,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,docs: fix stale pre-INVERSION collision narrative (FORMATS.md + repack tool)
+1a18eb6feedebcce9027a8da023eb8c7503c3cb1,2026-07-22,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs+stamp: non-retroactivity; stamp-map cap; discovery-time abort; .qs scope
+92fbb00dc0a4a0a43116354aabb707e2d5ff2808,2026-07-22,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs: fix FORMATS.md's colibri.c line/commit references after the #528 restack
+24c1ab368cca60fd16d426d16078eba7fa14a65a,2026-07-22,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs: add FORMATS.md; the quantized-format registry (fmt=6/fmt=7 + convention)
+69b99a7875e836aedc7ffa812305154f0f031d4a,2026-07-22,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,fp8: qt_resolve_fmt lets a metadata stamp resolve byte collisions
+3a0f01fa3b6c7e8955b96bdec8dd82098ba16689,2026-07-22,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,fp8: self-describing __metadata__ stamp; trust-verify-refuse reader
+388a62dc08c1ab160481054814db9b7b62ef05b2,2026-07-30,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,fp8: renumber our format fmt 7 -> 8 (#705 claimed 7 for MXFP4)
+e83117e8453b6a99422b3b4a80ff9645bfbb95c1,2026-07-23,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,tests: drain child stderr to EOF in fork-capture helpers
+18fe6d1dafe7a0b099117918fe1c316863e9c52e,2026-07-23,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,fp8: repack tool refuses loudly on zero repack-target tensors
+70cc5941a00b1b0bb8bffa9601692caedc3c47fd,2026-07-23,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fp8: refuse (not crash) on fmt=6/7 in qt_addrow/qt_matvec_rows
+9fdc6bb86145d0db72d34e94dcb4b97dd0d91fc2,2026-07-22,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fp8: fmt=6 (E8/IQ3) branch in qt_scale_bytes()
+363342d491a5942e7b9906312fe59153ad59d0e9,2026-07-22,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,fp8: site-level wire regression test for qt_wire_mmap/qt_unwire_mmap
+5b797cbc492c0bc6a99ae55ad004fd6aa8521c7f,2026-07-22,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fp8: correct stale Metal fmt=7 guard comments
+5528589558d3e1625a89c93132e1248b6b89a748,2026-07-22,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fp8: wire qt_scale_bytes() into qt_wire_mmap/qt_unwire_mmap
+c709a443d0c981c92d2f79e19852e8d655052a73,2026-07-22,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,fp8: invert THE DESIGN LANDMINE ambiguous-shape collision to fmt=1
+633013f266b4ee78867efcf3154511651e81a8b9,2026-07-22,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,fp8: end-to-end test; real repack tool -> real C loader
+e621f6d26101e3c9b7ea9286f26fc09c1b839fd6,2026-07-22,PRODUCTION_CAMPAIGN,no,TOOLS,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,fp8: repack tool (Z.ai FP8 shards -> byte-preserved fmt=7 container)
+6ca61a1ba26755291ee3897ce2ed9675aca2205d,2026-07-22,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fp8: Metal mm_gemv kernel for fmt=7 native FP8-e4m3 passthrough
+41fe5a7a76550c0d36a6a8331e9fae783efe9d27,2026-07-22,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fp8: CPU read path + matmul_fp8; as fmt=7 (public ordinal; #524)
+292ed4c6164886adfa1b5ede54ecf15c917e1c0b,2026-07-30,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #709 from JustVugg/docs/readme-multi-model
+2dbfdc179fa2e66e71a48d932c3f8a6d73077b69,2026-07-30,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,docs: the README is about four model families; not one
+df5486ca540b83f88c16e555c3bb0cdbb1eb605f,2026-07-30,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #457 from monotophic/metal/grouped-gemv
+0d15ba29b0f2a6102e685129338b9b4bb9d014a3,2026-07-30,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,tests: byte-exact .coli_ssd fixtures; pin CRLF rejection in the shared vectors (#379)
+543a8e66bd6973ff73c193fb2de745edad84af76,2026-07-30,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,test_ssd_probe.c: pin the largest-shard picker; unhook the sparse arm's precondition (#379)
+7e7f0a6f7210df3292fac22302d3f3b8a8eeafbd,2026-07-29,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs: st_dev volume identity is best-effort; document the new veto reasons (#379)
+d6115981411c0ca7c9462c90624513abbe75c0f9,2026-07-29,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,resource_plan.py/doctor.py: say why a cache is pending; not "no probe yet" (#379)
+1d3862fb44a57e19df81fe5c2d48fd854fd49cb5,2026-07-29,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,openai_server.py/coli: key the cap shim on model arch; --cap absent means absent (#379)
+56ab8890a03969ef76c896044155a2efd0d06dad,2026-07-29,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,colibri.c: veto under-allocated shards; name the veto honestly; largest shard (#379)
+0f3bffc17b314a630846b2ff23823619557a8f7d,2026-07-29,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs: the .coli_ssd probe cache -- v2 format; veto; volume identity (#379)
+b9114f4ca75c710123a4fde7bb464a730e646f22,2026-07-29,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,openai_server.py/coli: keep the cap-0 sentinel away from non-glm engines (#379)
+04e85d98418429bd3fa2c4f444fb3f20a6470de0,2026-07-29,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,resource_plan.py: trust only a v2 SSD cache recorded on this volume (#379)
+a3d76fc49e4160712f8cfcdec1e146cdfcb67d2e,2026-07-29,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,colibri.c: steer the storage probe to verified-cold ranges; strict v2 cache (#379)
+42d72bc30ee90adf1d4fbf690398ae470c8016f6,2026-07-18,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,doctor.py/resource_plan.py: surface the cached SSD probe (#379; S4)
+2e3cf86270eb62c26751f785257c23a4b2daef31,2026-07-18,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,colibri.c/coli/openai_server.py: platform-aware cache defaults + precedence (#379; S2/S3)
+2ae40d72b6f71a45b48e5643e6529f4f1bf66e89,2026-07-18,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,colibri.c: honest F_NOCACHE storage probe (#379; S1)
+c9ab660a6dfff33dc5362094535e062c6df086e7,2026-07-30,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #705 from steve-m/vk-kimi-mxfp4
+5c267d336d450f7d5ea31f74be95146646c4ef7d,2026-07-30,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #418 from steve-m/vulkan-backend
+b61089a812f9bcaf3b86eb65a22a244f654e60cc,2026-07-30,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,kimi_k3: Vulkan tier (K3_VK) — shared experts resident + fill-once MXFP4 routed-expert tier
+d4bf04139fa65cef33af8937c09538cf0922d0b9,2026-07-30,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,vulkan: fmt=7 MXFP4 decode (e2m1 nibbles + per-32 group scales) for Kimi K3 experts
+c666d431fc2d2d8d004f50fb35e48c2083e1fc4d,2026-07-30,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge remote-tracking branch 'origin/main' into dev
+74112da6c817426777ccd179f52a00f6d1bab09f,2026-07-30,PRODUCTION_CAMPAIGN,yes,NONE,UNRELATED_BUT_INTENDED_PRODUCTION,Merge pull request #542 from opxyc/feat/olmoe-chat-mode
+0b73b395d940b6880af300c02bce9df2ae9e3d94,2026-07-23,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,docs: qualify the ROCm-comparison claim in README
+d60ce6442c8a0d360de10c4da0f2c0300a42ab85,2026-07-23,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,vulkan: skip the cross-layer WILLNEED hint for VK-tier-served experts
+ca89f11ea6d4ce48a20f096174e0fc892881d45d,2026-07-23,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs: vulkan ReBAR requirement; shader resolution; cross-backend benchmarking notes
+809a8476a26a120ea8a6125bbb356922d1f52045,2026-07-23,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,vulkan: warn when ReBAR leaves VRAM host-invisible; find shaders next to the binary
+3cba6ce121f5cc9060517b10b5a14c5de09ae53c,2026-07-22,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,vulkan: VK_PROF phase split for dev2 issue + worker/join timers
+ec3cdc7f40544bad8abeeae51dfa0e59b19ff2e3,2026-07-22,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,vulkan: issue dev2 expert group on a worker thread
+f4290b26ea438c4b1f8566256961629f47e5060d,2026-07-22,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,vulkan: second-device expert tier (COLI_VK_DEV2) — e.g. an RX 580 beside the primary
+b5af8a9f833090a1098a3a0027406d915a24a1a0,2026-07-21,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,pilot: multi-worker PILOT_REAL prefetch (PILOT_WORKERS) + #474 guard; rebased on current dev
+c048ad85c20a23e6aa9c1416db1ea9f851915301,2026-07-21,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,mirror: stripe O_DIRECT demand reads across all replicas (COLI_MIR_STRIPE)
+0e90776539c2d1b08b9f8fe57594f39222f7e042,2026-07-21,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,vulkan: spin-then-block fence waits on the sync paths
+75175efb4d6d0b7f8624622b9c4155bbb9b0d8cb,2026-07-21,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,vulkan: preload the dense working set before the tier fill
+2737ee6e7d4f636bd83154745843e3d018eb6d04,2026-07-21,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,mirror: N-way multi-SSD read replicas (COLI_MODEL_MIRROR dir list)
+b0b7f7bc0eb3031b6948fba769d8c2672c31438d,2026-07-21,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,vulkan: single-submit q-prep chain — q_a+kv_a -> on-GPU rmsnorm -> q_b
+4d21d8af75a19ea5be484911741075c3ad58c8b6,2026-07-21,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,vulkan: fmt=4 (grouped int4) decode with #298 per-group scale semantics
+2d13ab400df9235c8c282baf7faa0f4a0ba9d24d,2026-07-20,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,vulkan: global submit/wait VK_PROF totals across all sync paths
+40043922cd947bfa4eaefc04cb02a1f87fd49caa,2026-07-20,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,vulkan: VK_PROF phase split for the dense matmul (localize the tier-linear submit tax)
+b055ca95b8d94335094c840a9a894edb7c99991f,2026-07-20,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,vulkan: suballocate weight tensors from 256 MB arenas — the tier-size submit tax
+048ccbc91e810a8eb25d798c3e61d8fe6f74ec0f,2026-07-20,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,vulkan: VRAM pressure-proofing — priority-classed allocations + budget-capped tier fill
+22b26aa06e03a31d1f8055cdd206f84c7ce801a2,2026-07-20,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,vulkan: PROF anatomy of the expert block (VK-BLOCK line)
+da8149da1edde71a0ac2060d27145e310717a395,2026-07-21,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,vulkan: readiness-ordered CPU expert share + kernel-only t_ecpu
+0341174c06a28453934830d67e725fa34f5a581e,2026-07-19,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,fix: expert_load grew a demand parameter in #438 (DISK-CLASS) — classify the VK-path call sites
+4222bf11a2bf45b3d49bd820916b79a65834c470,2026-07-19,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,vk-int3 hardening from first real-container runs
+eab1593f4bbfca9811aa03e815629d781367c35f,2026-07-19,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,vulkan: int3-g64 (fmt=5) decode in all three shaders + tier plumbing
+50b3b3f53ed13300bdd3c3bb221b426b93a951c3,2026-07-19,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,vk: open the colibri.c gates for fmt=5 experts
+1b0a89cb3fd1e282eab610dbbf19940a8f598ea1,2026-07-19,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs: Vulkan backend (vulkan.md; ENVIRONMENT.md table; README pointers)
+125e9a93e6b48ff8e98c0aeb3642fb8c8548d3da,2026-07-19,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,VK attn: require the f32 KV cache (Lc/Rc non-NULL) before mirroring
+4285198a828f631af6540ba85aad69b4bba9e8dd,2026-07-19,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,VK: default COLI_VK_EXPERTS to 320 (sweep optimum on a 16 GB card)
+3a6f0ba85feb9664f857a0a0bb93d939aeb23729,2026-07-19,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,VK tier fill: expert_load returns 0 on success — the transient-load path was inverted
+7c4d7af7684ce8465ef26dfacd7d0124ab5b6612,2026-07-19,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,VK tier: registry-served experts skip RAM slots; disk loads; and prefetch entirely
+dd024ecc1ac2660b66ae54c44195a019669cec5b,2026-07-19,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,VK: pinned+async expert tier — heat-ranked startup residency; GPU batch overlapped with CPU rows
+35fc6e71224d100e982bc94489e3aeed37d8a708,2026-07-19,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,VK: fuse the q_a+kv_a prologue pair into one submit
+363c37659608805959335cb9e3c1187fefbec96f,2026-07-19,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,VK: fix o-proj OOB staging (correctness); fuse absorb+o and shared expert (1 submit each)
+936d13e081fad51089851111a8c1e43cc809d760,2026-07-19,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,glm: COLI_VK_EXPERTS=0 disables the VK expert tier (experts stay on the parallel CPU loop)
+559383daf67195a4f862afc0ff87de459f3a3597,2026-07-19,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,glm: VK MLA absorb attention core (COLI_VK_ATTN) — the last CPU compute piece on Vulkan-only machines
+7c2f45f93cb6e44d013121edd584c83d7795d0d6,2026-07-19,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,glm: VK dense offload (COLI_VK_DENSE) — attention projections + shared expert on Vulkan
+22eb4e9597a007c405597a8ab7c9191a92381f26,2026-07-19,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,glm: wire the Vulkan expert tier into moe() (COLI_VULKAN=1)
+811c427c2c7b9bb8ddcff67b405d351007b762fd,2026-07-19,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,Makefile: VK=1 target builds the Vulkan backend + SPIR-V shaders
+49c84d6375135a9536df660fdaf818c1e23682fc,2026-07-19,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,Vulkan backend: cached readback buffers -> per-call expert_group beats ROCm
+aac63559a14e250c657127cdaa563998ed1f7eee,2026-07-18,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,Vulkan backend: full coli_vk_expert_group (gate_up->down; on-device; one submit)
+e354ded7069ab51c139927b0fde1064066d9033d,2026-07-18,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,Vulkan backend: fused gate+up+silu kernel -> beats production ROCm expert
+3e41761bba23d76defdebe4189113880d06547ce,2026-07-18,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,Vulkan backend: subgroup shader + overhead caching + batched probe
+38af749a6eee247b919d098677c2e8a098d18ac7,2026-07-18,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,Vulkan compute backend (from PR #84); M1: builds + correct on RX 9070
+4aaf5644ac8509b1a68518e1e2212c34358fe909,2026-07-19,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,quant: NEON rows16 fp4 kernels for aarch64
+4eadd93847cf5043c9efe2ef1b66e5d9501a1c8d,2026-07-19,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,build: enable DeepSeek V4 engine on aarch64 Linux
+b09ab5df556776c5a74e5843787fc54d1b0ee0f7,2026-07-27,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,fix(v4): support Pro and decouple resident tiers
+ae81fa791806dd92d726d2e3fcc3d8c2aa606836,2026-07-25,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,Add opt-in per-expert causal-ablation harness (ABLATE_SCORE) for moe()
+a4af80725520264d75a71e5e038c1f3de4e8030c,2026-07-25,PRODUCTION_CAMPAIGN,no,DOCS,CAMPAIGN_EVIDENCE_ONLY,docs(api): OpenAI server supports tool-calling
+649b55271e7954d4960182c9c20a0a8a850658fa,2026-07-22,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,review: pass gs=0 in #488's large-batch gemm calls; document the falloc->qalloc trade-off
+991eba45dd4477f8c3cf482de96636b69445c2f5,2026-07-20,PRODUCTION_CAMPAIGN,no,TESTS,TEST_VALIDATION_REQUIRED,metal-test: fix two blind spots in run_attn_grouped (review round 1)
+98eb8811435e4d09a79f4bdd050cf1b09fecc953,2026-07-19,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,colibri: fix fmt=4 scale-buffer allocator (falloc -> qalloc)
+5407494ed772d50698829b5247444fe939975a27,2026-07-19,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,metal: fmt=4 grouped-int4 GEMV support (mm_gemv + host plumbing) + tests
+052fd67474db5bec94fb589840d5d727c90b17cc,2026-07-23,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,fix(v4): support standard non-DSpark checkpoints
+fbcef6628e1c6e6e21f253df5cc8e8d1485c7329,2026-07-23,PRODUCTION_CAMPAIGN,no,OLMOE,UNRELATED_BUT_INTENDED_PRODUCTION,olmoe: interactive CHAT=1 mode with a growing multi-turn KV cache
+0324d1081fbca9fbfeaaa8831ac27a3f56bee816,2026-07-22,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,feat: add learned partial mirror planner
+83522db15488d0d990c8d0dff24eafc736fe2b5f,2026-07-21,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,fix(v4): harden production DSpark config parsing
+db1463ee85aa1a8d9af5a5730ac596f0e0d26fad,2026-07-21,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,docs(v4): track dynamic DSpark tuning
+0c17d025897553a956132467cb688f4c7acafb01,2026-07-21,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,docs: add Chinese DeepSeek V4 guide
+94ef1beabd7f94f4a2fd831192e6421742f1d226,2026-07-21,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,build: validate the full V4 oracle from the make target
+968427915e97b86fa1b739d7a8ec04a72a97758d,2026-07-21,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,docs: update DeepSeek V4 build and validation instructions
+29f7a3cff19d214c5d25a5bd309f1e463b270025,2026-07-21,PRODUCTION_CAMPAIGN,no,BUILD_CI,GENERIC_RUNTIME_PREREQUISITE_REQUIRED,ci: run the tiny V4 oracle on supported platforms
+68d9f7ce18e3a52ab21685b9c7bcb04f0cef8abd,2026-07-21,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,tests: restore the tiny token-exact V4 and DSpark oracle
+2430625d99044fceeb221a606f28fbbf8bd70215,2026-07-21,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,build: integrate V4 targets and tests with the current colibri tree
+433a2f91e5a27dc53b42be66fdce1707a5b20be4,2026-07-21,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,v4: forward-port DSpark drafting and verification
+ca6b8bbb04eba5ab5da16df2a318a9cac3902e1c,2026-07-21,PRODUCTION_CAMPAIGN,no,DEEPSEEK,UNRELATED_BUT_INTENDED_PRODUCTION,v4: forward-port the DeepSeek V4 target engine
+1e7701603571b24d163bf8a7c6a2257155cc3b49,2026-07-21,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,v4: restore model-specific tensor; safetensors and native-quant infrastructure
+f82a84f53208dc1a21a6f894ca82dac7cdbcbf3a,2026-07-22,PRODUCTION_CAMPAIGN,no,OTHER,UNRELATED_BUT_INTENDED_PRODUCTION,docs: soften tiny oracle self-test expectation
