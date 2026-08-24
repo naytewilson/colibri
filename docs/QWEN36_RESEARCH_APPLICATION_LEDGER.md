@@ -1,6 +1,6 @@
 # Qwen3.6 Research Application + Model-Finish Ledger
 
-> Durable controller ledger for deciding **what gets applied, when, and why** in the Qwen3.6-35B-A3B campaign.
+> Durable controller ledger for deciding **what gets applied, when, and why** in the Qwen3.6-35B-A3B campaign and its successor Qwen lanes.
 >
 > This file complements `docs/QWEN36_CAMPAIGN_LEDGER.md`. The campaign ledger preserves historical measurements; this ledger controls the forward research/application queue.
 >
@@ -8,17 +8,25 @@
 
 ## 0. User directive / campaign north star
 
-The 35B source model is **not** intended to remain physically oversized forever on a 16 GB node.
+The 35B MoE source model is **not** intended to remain physically oversized forever on a 16 GB node.
 
-The order is deliberate:
+The user's preferred long-term Qwen destination is **dense**, not MoE.
 
-1. finish the exact serving/runtime baseline correctly;
-2. freeze a trustworthy full-size control;
-3. structurally reduce the model/expert footprint using the best supported research;
-4. re-optimize the runtime for the new smaller residency regime;
-5. promote only after quality + throughput + rollback evidence is complete.
+That changes the product destination but does **not** invalidate the current MoE campaign. The current Qwen3.6 MoE work is the control specimen and runtime proving ground from which Colibri has learned low-memory serving, quantized execution, residency, I/O, telemetry, promotion, and rollback discipline.
 
-Do not spend indefinite effort polishing the full-size model after the exact-runtime frontier is already measured. The full-size artifact remains the control/oracle, not the permanent destination.
+The order is now deliberate:
+
+1. finish the exact current MoE serving/runtime baseline correctly;
+2. freeze a trustworthy full-size MoE control;
+3. prepare and select the dense-Qwen target from live source/model truth rather than guessing a checkpoint;
+4. prefer a **resident-fit dense build** through aggressive but quality-validated low-bit representation;
+5. use out-of-core dense weight scheduling only for the remainder that cannot safely stay resident;
+6. retune Colibri for dense layer/block residency and sequential prefetch;
+7. promote only after quality + throughput + memory + rollback evidence is complete.
+
+MoE structural compression remains valuable as a bounded research/serving lane, but it is no longer allowed to become an indefinite product detour after the full-size control is sealed.
+
+Do not spend indefinite effort polishing the full-size MoE model after the exact-runtime frontier is measured. The full-size artifact remains the control/oracle, not the permanent destination.
 
 ---
 
@@ -43,7 +51,7 @@ Important evidence at this commit:
 - remaining prefill residual was localized to compute + routing recomputation;
 - decode path remained unchanged by that instrumentation commit.
 
-This branch is the current **full-size control source** unless later source truth explicitly supersedes it.
+This branch is the current **full-size MoE control source** unless later source truth explicitly supersedes it.
 
 ### Exact-next diagnostic line
 
@@ -67,6 +75,7 @@ Existing durable files include:
 
 - `docs/QWEN36_CAMPAIGN_LEDGER.md`
 - `docs/QWEN36_CAMPAIGN_CAPSULE.json`
+- `docs/COLIBRI_RUNTIME_LEARNINGS_LEDGER.md`
 
 The campaign ledger preserves the historical 5.33 tok/s warm-median serving anchor and the model/runtime chronology. Current mutable node state must still be re-verified locally.
 
@@ -74,13 +83,13 @@ The campaign ledger preserves the historical 5.33 tok/s warm-median serving anch
 
 ## 2. Critical path — what we do next
 
-### GATE A — Finish the full-size exact control correctly
+### GATE A — Finish the full-size exact MoE control correctly
 
 **Priority: NOW.**
 
 This is a closure wave, not another open-ended optimization campaign.
 
-Required before model surgery:
+Required before changing model family/structure:
 
 - verify the exact promoted source/binary/snapshot identities on the node;
 - run the current promoted FUSED+BATCH binary under the same frozen warm-serving protocol used for the accepted headline anchor, so current tok/s is apples-to-apples;
@@ -88,78 +97,120 @@ Required before model surgery:
 - verify deterministic route/output parity and accounting conservation for the promoted configuration;
 - preserve deployment `current` + rollback proof;
 - record RAM, expert-pool bytes, cache residency, physical expert misses/token, bytes/token, and storage latency under the same run;
-- freeze these results as the full-size control for every later compression candidate.
+- freeze these results as the full-size control for later MoE and dense comparisons.
 
 **Exit:** `QWEN36_FULLSIZE_CONTROL_FROZEN`
 
 Once this exit is earned, stop spending critical-path effort on tiny exact-runtime tweaks unless a measurement shows a new high-value software wall.
 
-### GATE B — Structural expert-footprint reduction
+### GATE B — Dense-Qwen target census and resident-fit plan
 
-**Priority: NEXT, immediately after Gate A.**
+**Priority: NEXT, immediately after Gate A. This is now the primary destination lane.**
 
-Primary goal:
+Do a fresh, current census before choosing a checkpoint. Do not assume that the current 35B MoE should be mechanically converted into dense form.
 
-> reduce real executed/stored expert weight enough to materially change the 16 GB node's residency/I/O regime while preserving useful model quality.
+Allowed candidate classes:
 
-Research families to evaluate together rather than as isolated folklore:
+1. a native dense Qwen-family checkpoint whose quality/capability matches the user's intended use;
+2. a dense student distilled/derived from a stronger Qwen teacher, if source/research evidence supports that route;
+3. a smaller native dense Qwen whose low-bit artifact can fit safely in the 16 GB node with useful context and runtime headroom.
 
-- progressive expert pruning with re-scoring after each step;
-- diversity-aware expert importance/scoring;
+For each candidate record:
+
+- exact model/revision/license/source;
+- architecture and parameter count;
+- context/KV geometry;
+- tokenizer/chat-template identity;
+- dense weight bytes at source precision;
+- predicted bytes at candidate quant formats;
+- actual converted artifact bytes when built;
+- RAM required for fixed weights, runtime workspaces, KV, OS, and safety headroom;
+- whether the preferred operating mode is fully resident or partially out-of-core;
+- quality baseline/provenance.
+
+**Preferred strategy:** make the dense model fit as fully resident as practical. A dense model touches essentially every layer every token, so naive per-token SSD weight streaming is a fallback, not the design goal.
+
+**Exit:** `QWEN_DENSE_TARGET_AND_MEMORY_PLAN_FROZEN`
+
+### GATE C — Dense artifact build + correctness/quality baseline
+
+Build the selected dense candidate under a new immutable artifact ID. Do not mutate the MoE control.
+
+Prioritize:
+
+- low-bit dense weight formats with real native kernels;
+- activation/outlier-aware precision allocation where evidence warrants it;
+- sensitive tensors protected at higher precision when measured quality requires it;
+- exact container geometry and bounds checks;
+- tokenizer/chat-template parity;
+- deterministic reference checks before performance work.
+
+A smaller file is not enough. The runtime must actually consume the low-bit representation without expanding it back into a RAM footprint that defeats the point.
+
+**Exit:** `QWEN_DENSE_ARTIFACT_QUALITY_PROVEN`
+
+### GATE D — Dense runtime execution strategy
+
+First attempt the **resident-fit** path.
+
+If the full useful dense artifact fits within measured safe RAM headroom, keep it resident and optimize compute. Do not invent disk streaming merely because Colibri knows how to stream MoE experts.
+
+If some dense weights must remain out-of-core, use a dense-specific strategy:
+
+- address weights by layer/tensor/block rather than `(layer, expert)`;
+- exploit deterministic layer order to prefetch the next block/layer;
+- use bounded double-buffer/window residency;
+- batch/merge reads into contiguous ranges where the container permits;
+- treat OS page cache as a measurable tier;
+- distinguish logical block requests from physical disk reads;
+- never evict a block while a consumer still holds a lease;
+- measure physical bytes/token and prove the requested throughput is compatible with actual storage bandwidth/latency.
+
+Do not use naive whole-layer rereads per generated token if the measured I/O budget makes the target impossible.
+
+**Exit:** `QWEN_DENSE_RUNTIME_BASELINE_PROVEN`
+
+### GATE E — Optional bounded MoE structural-compression lane
+
+MoE structural compression remains useful only when one of these is true:
+
+- it materially improves the currently useful deployed service before dense Qwen is ready;
+- it produces reusable quantization/pruning/distillation evidence for the dense lane;
+- it exposes a runtime mechanism that should be carried into Colibri.
+
+Candidate research includes:
+
+- progressive expert pruning with re-scoring;
+- diversity-aware expert scoring;
 - expert merging / partial-preservation merging;
 - joint structural pruning + mixed precision;
-- layer/expert sensitivity rather than uniform pruning;
-- knowledge-distillation recovery only when a promising compressed candidate earns it;
-- quantization retuning for the surviving experts.
+- layer/expert sensitivity;
+- KD recovery for promising lossy candidates.
 
-Important distinction:
+Keep the full-size MoE control immutable.
 
-- masks/zeros/sparse-looking tensors do **not** count as structural compression if the runtime still stores/reads/executes the same physical work;
-- a smaller model file does **not** count as a win by itself;
-- the node must show lower real bytes/read work and/or higher residency and higher comparable tok/s.
+This lane must not delay Gate B/C/D without evidence that it unlocks the dense destination.
 
-Keep the full-size model immutable as control. Build compressed successors under new artifact IDs.
+**Exit if pursued:** `QWEN36_STRUCTURAL_SUCCESSOR_PROVEN`
 
-**Exit:** `QWEN36_STRUCTURAL_SUCCESSOR_PROVEN`
-
-### GATE C — Re-optimize runtime for the compressed successor
-
-**Priority: AFTER Gate B produces a quality-valid candidate.**
-
-Compression changes the causal regime, so re-measure instead of carrying old conclusions forward blindly.
-
-Revisit:
-
-- cache capacity and per-layer budgets;
-- pinned/resident set;
-- FUSED/BATCH worker count;
-- prefetch/pilot usefulness;
-- expert admission concurrency;
-- storage-vs-compute split;
-- quantized kernels for the surviving precision mix;
-- whether the expert pool now fits mostly or wholly in safe RAM headroom.
-
-Previously falsified ideas stay falsified **for the old regime**, but may be re-opened only if the structural/hardware regime materially changes and the ledger records why.
-
-**Exit:** `QWEN36_COMPRESSED_RUNTIME_TUNED`
-
-### GATE D — Final production promotion
+### GATE F — Final dense production promotion
 
 Required:
 
-- source SHA;
+- source SHA/revision;
 - artifact hashes;
-- deterministic correctness/route evidence;
-- quality comparison against Gate-A control;
+- deterministic correctness evidence;
+- quality comparison against an explicit reference/control;
 - comparable cold + warm throughput;
 - TTFT/prefill/decode decomposition;
-- RSS / residency / miss rate / bytes read;
+- RSS / resident weight bytes / page-cache effect / physical bytes read;
+- context/KV memory behavior;
 - clean promotion directory;
 - atomic current pointer;
 - rollback proof;
 - smoke run.
 
-**Exit:** `QWEN36_NODE_FINAL_PROMOTION_PROVEN`
+**Exit:** `QWEN_DENSE_NODE_FINAL_PROMOTION_PROVEN`
 
 ---
 
@@ -167,32 +218,38 @@ Required:
 
 | Mechanism / research line | State | Production? | Next action |
 |---|---|---:|---|
-| Mixed INT3/INT4 expert storage | APPLIED + MEASURED | yes/current lineage | preserve as control; retune after structural compression |
-| Per-layer cache / LRU residency | APPLIED + MEASURED | yes | re-size after Gate B |
-| Duplicate in-flight load coalescing | APPLIED + CAUSAL | yes | harvest into generic runtime later |
-| Expert parallelism | APPLIED + MEASURED | yes | re-benchmark after Gate B |
-| FUSED loading | APPLIED + MEASURED | yes | preserve through Gate A |
-| BATCH acquisition / dedupe | APPLIED + MEASURED | yes | preserve through Gate A |
-| QD16 / deeper device queue | FALSIFIED in current regime | no | do not repeat unless regime changes |
-| Uniform cap increase alone | FALSIFIED in historical regime | no | do not repeat unchanged |
-| W3a routing recomputation reuse | CORRECT EXPERIMENT; wall value not established as production win | no | keep diagnostic; do not block Gate B |
+| Mixed INT3/INT4 MoE expert storage | APPLIED + MEASURED | yes/current MoE lineage | preserve as control and format evidence |
+| Per-layer MoE cache / LRU residency | APPLIED + MEASURED | yes | harvest lifetime/tier lessons into generic runtime |
+| Duplicate in-flight expert-load coalescing | APPLIED + CAUSAL | yes | generalize to weight/block admission |
+| Expert parallelism | APPLIED + MEASURED | yes | MoE-specific; do not force onto dense path |
+| FUSED loading | APPLIED + MEASURED | yes | generalize contiguous/read-bundling lessons where valid |
+| BATCH acquisition / dedupe | APPLIED + MEASURED | yes | generalize scheduler concepts, not expert assumptions |
+| QD16 / deeper device queue | FALSIFIED in current regime | no | do not repeat unless model/hardware regime changes |
+| Uniform cap increase alone | FALSIFIED in historical MoE regime | no | do not repeat unchanged |
+| W3a routing recomputation reuse | CORRECT EXPERIMENT; wall value not established as production win | no | keep diagnostic; does not block dense lane |
 | Argmax-prune exact-runtime discriminator | FALSIFIED / banked negative knowledge | no | do not confuse with structural model pruning |
-| Adjacent/KRS prefetch probes | BANKED / not production-winning | no | reopen only after changed residency regime |
-| Progressive structural expert pruning | RESEARCHED, NOT YET APPLIED TO FINAL 35B LINE | no | Gate B primary experiment family |
-| Diversity-aware expert scoring | RESEARCHED, NOT YET APPLIED | no | Gate B scoring arm |
-| Expert merging / partial-preservation merge | RESEARCHED, NOT YET APPLIED | no | Gate B candidate after scoring baseline |
-| Joint pruning + mixed precision | RESEARCHED, NOT YET APPLIED | no | Gate B high-priority interaction study |
-| Knowledge distillation recovery | RESEARCHED, NOT YET APPLIED | no | use only for a promising lossy candidate |
-| MTP distillation | CURRENTLY NOT DIRECTLY APPLICABLE | no | canonical artifact has no positive MTP tensor evidence; do not invent an MTP lane |
-| AATC-style KV compression | RESEARCHED, NOT YET APPLIED | no | lower priority while expert I/O dominates; revisit if Gate B moves bottleneck |
-| CompressKV-style KV eviction/compression | RESEARCHED, NOT YET APPLIED | no | same: only 10 full-attention layers; re-rank after Gate B |
-| Generic Colibri out-of-core MoE runtime Forge | DESIGNED, NOT YET FORGED | no | preserve as platform Forge, but do not delay Gate B critical path |
+| Adjacent/KRS prefetch probes | BANKED / not production-winning | no | dense lane uses deterministic layer order instead |
+| Progressive structural MoE expert pruning | RESEARCHED, NOT YET APPLIED TO FINAL 35B LINE | no | optional Gate E, no longer primary destination |
+| Diversity-aware expert scoring | RESEARCHED, NOT YET APPLIED | no | optional Gate E |
+| Expert merging / partial-preservation merge | RESEARCHED, NOT YET APPLIED | no | optional Gate E / possible teacher-student evidence |
+| Joint pruning + mixed precision | RESEARCHED, NOT YET APPLIED | no | useful to both model-reduction and dense candidate design |
+| Knowledge distillation recovery | RESEARCHED, NOT YET APPLIED | no | candidate for dense-student route if earned |
+| Native dense-Qwen candidate census | READY | no | Gate B: resolve live model/revision instead of guessing |
+| Dense low-bit resident-fit plan | READY | no | Gate B/C primary path |
+| Dense sensitive-tensor precision allocation | READY / RESEARCH REQUIRED | no | Gate C with quality gates |
+| Dense layer/tensor/block WeightStore | DESIGNED CONCEPTUALLY | no | Gate D only if out-of-core is required |
+| Dense sequential next-layer prefetch / double buffer | DESIGNED CONCEPTUALLY | no | Gate D discriminator |
+| Dense contiguous read bundling/windowing | RESEARCHED CONCEPTUALLY | no | Gate D if storage path is used |
+| Dense activation-sparsity / conditional compute | RESEARCHED CONCEPTUALLY, QUALITY-CHANGING | no | separate approximate lane after exact dense baseline |
+| AATC-style KV compression | RESEARCHED, NOT YET APPLIED | no | revisit when dense KV memory is measured; likely more relevant than in 10-attention-layer MoE |
+| CompressKV-style KV eviction/compression | RESEARCHED, NOT YET APPLIED | no | same: rank from measured dense KV pressure |
+| Generic Colibri low-memory model runtime Forge | DESIGNED, NOT YET FORGED | no | must support both MoE experts and dense weight blocks |
 
 ---
 
-## 4. Why runtime-first was still the correct order
+## 4. Why the MoE runtime work was still the correct first investment
 
-The work on the full-size model was not wasted.
+The work on the full-size MoE model was not wasted even though dense Qwen is the desired destination.
 
 It gave us:
 
@@ -200,34 +257,37 @@ It gave us:
 - route/output parity machinery;
 - reliable storage/cache telemetry;
 - exact knowledge of where wall time goes;
-- a faster control that makes every compression comparison fairer;
+- low-bit format and kernel experience;
+- lease/lifetime and duplicate-admission lessons;
+- page-cache/tier awareness;
+- a faster control that makes later experiments honest;
 - negative knowledge that prevents repeating bad I/O/cache experiments;
-- serving mechanisms the compressed successor can inherit.
+- promotion/rollback discipline.
 
-Without that control, a structurally smaller candidate could appear faster simply because it silently changed routing, quality, caching, or work accounting.
-
-The runtime work was the **measurement instrument and serving foundation**. Gate B is where we stop treating the 35B physical footprint as sacred.
+The MoE runtime work was the **measurement instrument and low-memory serving laboratory**. The dense lane now gets to reuse what is actually general while discarding expert-specific assumptions.
 
 ---
 
-## 5. Structural-compression acceptance rules
+## 5. Dense-Qwen acceptance rules
 
-Every candidate must report at minimum:
+Every dense candidate must report at minimum:
 
-1. source/control SHA and artifact hashes;
-2. structural change: which layers/experts/tensors were actually removed/merged/re-quantized;
-3. physical parameter/weight bytes before vs after;
-4. expert-pool bytes before vs after;
-5. RAM-resident bytes / residency ratio;
-6. physical expert misses/token;
-7. bytes read/token;
-8. prefill wall;
-9. decode tok/s under the frozen protocol;
-10. total request wall;
-11. quality corpus hash and metrics;
-12. deterministic repeat / correctness checks;
-13. whether KD/retraining was used;
-14. rollback/control artifact identity.
+1. model/revision/source and artifact hashes;
+2. architecture/parameter count and tokenizer/chat-template identity;
+3. source weight bytes and actual converted physical bytes;
+4. precision map by tensor class;
+5. fixed resident weight bytes;
+6. peak/current RSS;
+7. KV/context memory growth;
+8. physical bytes read per generated token after warmup;
+9. page-cache vs physical-disk evidence where measurable;
+10. prefill wall / TTFT;
+11. decode tok/s under a frozen protocol;
+12. total request wall;
+13. quality corpus hash and metrics;
+14. deterministic repeat / correctness checks;
+15. whether any approximation, sparsity, pruning, or distillation was used;
+16. rollback/control artifact identity.
 
 No candidate promotes on throughput alone.
 
@@ -235,46 +295,60 @@ No candidate promotes on PPL/NLL alone.
 
 No candidate promotes because a paper predicts a win.
 
+No out-of-core dense design promotes if its measured physical bytes/token make the target throughput impossible on the actual storage device.
+
 ---
 
 ## 6. Prioritization rule for the 16 GB node
 
-The current strategic order is:
+The strategic order is now:
 
-1. **expert-pool structural reduction** — attacks the dominant RAM/NVMe pressure directly;
-2. **joint precision + structure** — can compound the residency gain;
-3. **re-tune residency/cache/I/O runtime** after the pool changes;
-4. **KV compression** when measured KV growth becomes important enough to matter;
-5. micro-optimizations only when their measured ceiling exceeds run noise.
+1. **finish/freeze the current MoE control**;
+2. **select a dense Qwen target from live source truth**;
+3. **make the dense weights fit resident if at all practical** using quality-validated low-bit representation;
+4. **protect context/KV headroom** rather than filling all RAM with weights;
+5. use **out-of-core dense block scheduling only for the remainder** that cannot fit;
+6. optimize compute and sequential prefetch for the actual dense artifact;
+7. apply KV compression when measured context pressure makes it worthwhile;
+8. explore activation sparsity/conditional compute only in an explicitly quality-changing lane.
 
-The objective is not merely "fewer parameters." The objective is to cross useful residency thresholds on the real node and convert saved bytes into real end-to-end token throughput without unacceptable quality loss.
+The objective is not merely "fewer parameters." The objective is a dense Qwen that is genuinely useful on the real 16 GB node and converts every saved byte into stable capability, context, or throughput.
 
 ---
 
-## 7. Platform Forge is not forgotten
+## 7. Platform Forge becomes model-general
 
-The reusable Colibri Out-of-Core MoE Runtime remains a required Forge objective, but it is **not allowed to delay the Qwen structural-compression critical path**.
+The eventual platform target is broader than `ColiExpertStore`.
 
-Best timing:
+The runtime must preserve the proven ExpertStore contract for MoE while gaining a model-neutral weight-residency layer capable of representing dense blocks/tensors without forcing fake expert identities.
 
-- preserve all full-size serving lessons now in this ledger and the existing campaign ledger;
-- finish Gate A;
-- execute Gate B/C on Qwen;
-- then extract the proven final mechanisms into the generic ExpertStore/admission/telemetry surfaces using both full-size and compressed Qwen evidence plus a second-model proof.
+Candidate decomposition:
 
-That way we generalize the mechanism that actually survives the final model, rather than freezing an abstraction around an intermediate experiment.
+- **Model adapter**: architecture, tensor naming, execution order, tokenizer/chat semantics;
+- **WeightStore**: model-neutral lease/release/prefetch for addressable weight units;
+- **ExpertStore adapter**: maps `(layer, expert)` onto WeightStore-like lifetime/tier semantics without losing MoE-specific behavior;
+- **Admission scheduler**: coalescing, bounded parallel I/O, batch/window prefetch;
+- **Tier manager**: resident RAM, OS page cache observability, NVMe, optional GPU/other accelerators;
+- **Format dispatch**: real low-bit bytes + scales + native kernels;
+- **Resource planner**: fixed weights + KV growth + workspaces + OS/safety headroom;
+- **Telemetry**: logical requests, physical reads, bytes, latency, residency, page-cache effects;
+- **Promotion harness**: hashes, quality/parity, benchmark, deployment pointer, rollback.
+
+The Forge is successful only if it supports both an MoE model and a dense Qwen without copying an entire storage/runtime subsystem into each engine.
 
 ---
 
 ## 8. Current campaign position
 
-**Main Quest:** finish Gate A, then immediately enter structural model compression.
+**Main Quest:** finish Gate A, then immediately execute dense-Qwen Gate B.
 
 **Current Boss:** lack of one final apples-to-apples promoted FUSED+BATCH control measurement + fully pinned quality/provenance packet.
 
-**Do not open before Gate A closes:** destructive pruning/merging of the production artifact.
+**Primary future destination:** `QWEN_DENSE_NODE_FINAL_PROMOTION_PROVEN`.
 
-**Do prepare now:** structural-compression experiment design, scoring instrumentation, immutable source snapshots, and candidate artifact namespace.
+**Do not open before Gate A closes:** destructive mutation of the production MoE artifact or an ungrounded dense-model implementation based on a guessed checkpoint.
+
+**Do prepare now:** dense runtime interfaces, memory-budget calculator inputs, model-candidate census contract, low-bit container requirements, deterministic reference harness, and candidate artifact namespace.
 
 ---
 
@@ -285,7 +359,7 @@ This file is append/transition oriented.
 When a research item changes state, record:
 
 - date;
-- exact branch/SHA;
+- exact branch/SHA/model revision;
 - experiment/artifact ID;
 - previous state;
 - new state;
