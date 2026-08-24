@@ -1990,11 +1990,17 @@ static void req_emit_expert_meta(Model *m) {
  * same timer accumulation points. The split exists so moe() can overlap the
  * unlocked pread/unpack phases of several misses concurrently behind
  * COLI_EXPERT_ASYNC=1 without changing routing, bytes or arithmetic. ---- */
-typedef enum { ACQ_HIT = 0, ACQ_LOAD = 1 } AcqKind;
+typedef enum { ACQ_HIT = 0, ACQ_LOAD = 1, ACQ_WOULD_BLOCK = 2 } AcqKind;
 typedef struct { AcqKind kind; Slot *s; int64_t victim_eid; int mode; } AcqRes;
-/* acquisition mode: single source of truth for telemetry semantics */
-#define ACQ_MODE_DEMAND  0
-#define ACQ_MODE_PRELOAD 1
+
+#define ACQ_MODE_DEMAND      0
+#define ACQ_MODE_PRELOAD     1
+/* Non-blocking preload: identical semantics except that a reservation which
+ * would have to WAIT for a publish (every slot pinned or an unpublished
+ * reservation) reports ACQ_WOULD_BLOCK instead of sleeping. The BATCH
+ * pre-pass uses this so it can publish its own outstanding reservations
+ * before ever depending on them -- see the wedge analysis (2026-08-23). */
+#define ACQ_MODE_PRELOAD_NB  2
 /* W9 repair: when set (batch preload only), acquisition does full cache-state
  * work but emits NO DEMAND events/counters; loads classify to pilot buckets.
  * Mutated only by the main thread outside dispatch; read by workers in-flight. */
@@ -2198,11 +2204,11 @@ static void expert_acquire(Model *m, int layer, int eid, float router_mass, Slot
     double _tl1 = _tp ? tm_now() : 0;
     double _ts0 = _tl1;
     for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) {
-        if (mode != ACQ_MODE_PRELOAD) { m->hits++; g_acq_hits++; } lc->slots[i].used = ++m->clock; *out = &lc->slots[i];
-        if (mode != ACQ_MODE_PRELOAD && (*out)->is_int3) g_cache_hit_int3++;
-        else if (mode != ACQ_MODE_PRELOAD && (*out)->is_int4) g_cache_hit_int4++;
+        if (mode == ACQ_MODE_DEMAND) { m->hits++; g_acq_hits++; } lc->slots[i].used = ++m->clock; *out = &lc->slots[i];
+if (mode == ACQ_MODE_DEMAND && (*out)->is_int3) g_cache_hit_int3++;
+else if (mode == ACQ_MODE_DEMAND && (*out)->is_int4) g_cache_hit_int4++;
         if (_tp) { double _tn = tm_now(); g_eg_lock_wait_ms += _tl1 - _tl0; g_eg_lookup_ms += _tn - _tl1; }
-        if (mode != ACQ_MODE_PRELOAD) trace_emit("DEMAND", "HIT", g_trace_tok, layer, eid,
+        if (mode == ACQ_MODE_DEMAND) trace_emit("DEMAND", "HIT", g_trace_tok, layer, eid,
                    (*out)->is_int3 ? 3 : ((*out)->is_int4 ? 4 : 8), 0, 0.0, -1,
                    (int)(*out - lc->slots));
         ar->kind = ACQ_HIT;
@@ -2224,10 +2230,10 @@ static void expert_acquire(Model *m, int layer, int eid, float router_mass, Slot
             pthread_mutex_lock(&g_pilot_mx);
             for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) {
                 /* the coalesced load published: serve as a resident hit */
-                if (mode != ACQ_MODE_PRELOAD) { m->hits++; g_acq_hits++; } lc->slots[i].used = ++m->clock; *out = &lc->slots[i];
-                if (mode != ACQ_MODE_PRELOAD && (*out)->is_int3) g_cache_hit_int3++;
-                else if (mode != ACQ_MODE_PRELOAD && (*out)->is_int4) g_cache_hit_int4++;
-                if (mode != ACQ_MODE_PRELOAD) trace_emit("DEMAND", "HIT", g_trace_tok, layer, eid,
+                if (mode == ACQ_MODE_DEMAND) { m->hits++; g_acq_hits++; } lc->slots[i].used = ++m->clock; *out = &lc->slots[i];
+                if (mode == ACQ_MODE_DEMAND && (*out)->is_int3) g_cache_hit_int3++;
+                else if (mode == ACQ_MODE_DEMAND && (*out)->is_int4) g_cache_hit_int4++;
+                if (mode == ACQ_MODE_DEMAND) trace_emit("DEMAND", "HIT", g_trace_tok, layer, eid,
                            (*out)->is_int3 ? 3 : ((*out)->is_int4 ? 4 : 8), 0, 0.0, -1, i);
                 ar->kind = ACQ_HIT;
                 pthread_mutex_unlock(&g_pilot_mx); return;
@@ -2237,10 +2243,10 @@ static void expert_acquire(Model *m, int layer, int eid, float router_mass, Slot
         /* re-scan once more after the registry cleared; fall through to a
          * normal miss only if still absent */
         for (int i = 0; i < lc->n; i++) if (lc->slots[i].eid == eid) {
-            if (mode != ACQ_MODE_PRELOAD) { m->hits++; g_acq_hits++; } lc->slots[i].used = ++m->clock; *out = &lc->slots[i];
-            if (mode != ACQ_MODE_PRELOAD && (*out)->is_int3) g_cache_hit_int3++;
-            else if (mode != ACQ_MODE_PRELOAD && (*out)->is_int4) g_cache_hit_int4++;
-            if (mode != ACQ_MODE_PRELOAD) trace_emit("DEMAND", "HIT", g_trace_tok, layer, eid,
+            if (mode == ACQ_MODE_DEMAND) { m->hits++; g_acq_hits++; } lc->slots[i].used = ++m->clock; *out = &lc->slots[i];
+            if (mode == ACQ_MODE_DEMAND && (*out)->is_int3) g_cache_hit_int3++;
+            else if (mode == ACQ_MODE_DEMAND && (*out)->is_int4) g_cache_hit_int4++;
+            if (mode == ACQ_MODE_DEMAND) trace_emit("DEMAND", "HIT", g_trace_tok, layer, eid,
                        (*out)->is_int3 ? 3 : ((*out)->is_int4 ? 4 : 8), 0, 0.0, -1, i);
             ar->kind = ACQ_HIT;
             pthread_mutex_unlock(&g_pilot_mx); return;
@@ -2252,7 +2258,7 @@ static void expert_acquire(Model *m, int layer, int eid, float router_mass, Slot
     {
         Slot *ss = NULL;
         if (spec_serve(m, layer, eid, &ss)) {
-            if (mode != ACQ_MODE_PRELOAD) { m->hits++; g_acq_hits++; }
+            if (mode == ACQ_MODE_DEMAND) { m->hits++; g_acq_hits++; }
             if (ss->is_int3) g_cache_hit_int3++;
             else if (ss->is_int4) g_cache_hit_int4++;
             if (spec_debug_on())
@@ -2261,7 +2267,7 @@ static void expert_acquire(Model *m, int layer, int eid, float router_mass, Slot
                         ss->is_int3, ss->is_int4,
                         ss->is_int3 ? (void*)ss->w3 : (void*)ss->w4, (void*)ss->gs);
             *out = ss;   /* PROPAGATE: caller computes from the lease copy */
-            if (mode != ACQ_MODE_PRELOAD) trace_emit("DEMAND", "HIT", g_trace_tok, layer, eid,
+            if (mode == ACQ_MODE_DEMAND) trace_emit("DEMAND", "HIT", g_trace_tok, layer, eid,
                        ss->is_int3 ? 3 : (ss->is_int4 ? 4 : 8), 0, 0.0, -1, -1);
             ar->kind = ACQ_HIT;
             pthread_mutex_unlock(&g_pilot_mx);
@@ -2269,7 +2275,7 @@ static void expert_acquire(Model *m, int layer, int eid, float router_mass, Slot
         }
     }
     /* proceeding to a real load: count the miss here (post-coalesce decision) */
-    if (mode != ACQ_MODE_PRELOAD) { m->miss++; g_acq_miss++; }
+    if (mode == ACQ_MODE_DEMAND) { m->miss++; g_acq_miss++; }
     int64_t _victim_eid = -1;   /* -1 = free capacity (no eviction) */
     if (lc->n < lc->cap) { s = &lc->slots[lc->n++]; slot_ensure_allocated(m, s); }
     else {
@@ -2284,6 +2290,19 @@ static void expert_acquire(Model *m, int layer, int eid, float router_mass, Slot
             /* All slots are pinned or in-flight; find the oldest non-in-flight
              * slot (may be pinned, but never one currently being loaded). */
             for (int i = 0; i < lc->n; i++) { if (lc->slots[i].eid < 0) continue; if (lru < 0 || lc->slots[i].used < lc->slots[lru].used) lru = i; }
+        }
+        if (lru < 0 && mode == ACQ_MODE_PRELOAD_NB) {
+            /* No immediately reservable slot. For a non-blocking preload the
+             * caller decides: if it owns unfinished batch reservations, THOSE
+             * are the only publishers that exist here -- waiting would wait
+             * for ourselves (single-thread ordering self-deadlock, proven
+             * live 2026-08-23 with n==cap and every slot eid==-1). Report
+             * instead of sleeping; cache state and counters are untouched.
+             * With nl==0 the blockage is external and the caller falls back
+             * to ordinary blocking semantics below. */
+            pthread_mutex_unlock(&g_pilot_mx);
+            ar->kind = ACQ_WOULD_BLOCK;
+            return;
         }
         while (lru < 0) {
             /* EVERY slot is in flight: each buffer is owned by an unlocked pread
@@ -2310,7 +2329,7 @@ static void expert_acquire(Model *m, int layer, int eid, float router_mass, Slot
         s = &lc->slots[lru]; s->pinned = 0;
         if (_tp) g_eg_victim_ms += tm_now() - _tv0;   /* includes in-flight wait spins */
         _victim_eid = s->eid;   /* evicted expert id (trace) */
-        if (mode != ACQ_MODE_PRELOAD) trace_emit("DEMAND", "EVICT", g_trace_tok, layer, _victim_eid,
+        if (mode == ACQ_MODE_DEMAND) trace_emit("DEMAND", "EVICT", g_trace_tok, layer, _victim_eid,
                    s->is_int3 ? 3 : (s->is_int4 ? 4 : 8), 0, 0.0, -1, lru);
     }
     s->eid = -1; s->used = ++m->clock;
@@ -2326,9 +2345,9 @@ static void expert_finish(Model *m, int layer, int eid, AcqRes *ar, Slot **out) 
     int _tp = tm_on();
     ExpertLoadResult res;
     double _lio0 = tm_now();
-    load_expert_merged(m, layer, eid, s, (ar->mode == ACQ_MODE_PRELOAD ? 1 : 0), &res);
+    load_expert_merged(m, layer, eid, s, (ar->mode != ACQ_MODE_DEMAND ? 1 : 0), &res);
     double _lio1 = tm_now();
-    if (ar->mode == ACQ_MODE_PRELOAD && res.ms > 0)
+    if (ar->mode != ACQ_MODE_DEMAND && res.ms > 0)
         __atomic_fetch_add(&g_pb_io_us, (unsigned long long)(res.ms * 1000.0), __ATOMIC_RELAXED);
     if (g_lead_fp && ar->mode == ACQ_MODE_DEMAND) fprintf(g_lead_fp, "M %lld %d %d %.3f %.4f %.4f\n",
                            (long long)g_trace_tok, layer, eid, res.ms, _lio0, _lio1);
@@ -2336,8 +2355,8 @@ static void expert_finish(Model *m, int layer, int eid, AcqRes *ar, Slot **out) 
     pthread_mutex_lock(&g_pilot_mx);
     s->eid = eid; s->pinned = m->is_pinned[layer * c->n_experts + eid]; s->used = ++m->clock;
     lc->loading[eid] = -1;   /* publish: exactly one resident slot now represents (layer,eid) */
-    if (ar->mode != ACQ_MODE_PRELOAD && s->is_int3) g_cache_miss_int3++;
-    else if (ar->mode != ACQ_MODE_PRELOAD && s->is_int4) g_cache_miss_int4++;
+    if (ar->mode == ACQ_MODE_DEMAND && s->is_int3) g_cache_miss_int3++;
+    else if (ar->mode == ACQ_MODE_DEMAND && s->is_int4) g_cache_miss_int4++;
     if (_tp) g_eg_lock_wait_ms += tm_now() - _tl2;
     if (ar->mode == ACQ_MODE_DEMAND) trace_emit("DEMAND", "INSERT", g_trace_tok, layer, eid,
                res.fmt, res.bytes, res.ms, ar->victim_eid, (int)(s - lc->slots));
@@ -2654,6 +2673,25 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
         AcqRes *ars2 = malloc((size_t)S * 8 * sizeof(AcqRes));
         Slot **bsl = malloc((size_t)S * 8 * sizeof(Slot*));
         int *ld = malloc((size_t)S * 8 * sizeof(int)); int nl = 0;
+        /* Publish a wave of outstanding reservations (same parallel shape as
+         * the final flush). Used by the WOULD_BLOCK drain below so the batch
+         * never waits on publishers sequenced after itself. */
+        #define PB_FLUSH() do { \
+            if (nl > 1) { \
+                int W_ = nl < 8 ? nl : 8; \
+                _Pragma("omp parallel for schedule(static)") \
+                for (int ii_ = 0; ii_ < nl; ii_++) { \
+                    int cell_ = ld[ii_]; \
+                    expert_finish(m, layer, bidx[cell_ / 8][cell_ % 8], &ars2[cell_], &bsl[cell_]); \
+                } \
+            } else { \
+                for (int ii_ = 0; ii_ < nl; ii_++) { \
+                    int cell_ = ld[ii_]; \
+                    expert_finish(m, layer, bidx[cell_ / 8][cell_ % 8], &ars2[cell_], &bsl[cell_]); \
+                } \
+            } \
+            nl = 0; \
+        } while (0)
         for (int s = 0; s < S; s++)
             for (int kk = 0; kk < K; kk++) {
                 if (bidx[s][kk] < 0) continue;
@@ -2662,24 +2700,28 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
                     for (int j = 0; j < K; j++) if (bidx[p][j] == bidx[s][kk]) { dup = 1; break; }
                 if (!dup) for (int j = 0; j < kk; j++) if (bidx[s][j] == bidx[s][kk]) dup = 1;
                 if (dup) continue;
+                /* Non-blocking reservation: reserve freely while slots are
+                 * reservable (parallel load shape preserved up to the true
+                 * frontier); when the NEXT reservation would wait on a
+                 * publish, publish what this batch already owes first, then
+                 * retry. Liveness invariant: the pre-pass can never block on
+                 * a publication that only its own unfinished batch could
+                 * perform (wedge of 2026-08-23). */
                 Slot *tmpo = NULL;
-                expert_acquire(m, layer, bidx[s][kk], bval[s*8+kk], &tmpo, &ars2[s*8+kk], ACQ_MODE_PRELOAD);
+                expert_acquire(m, layer, bidx[s][kk], bval[s*8+kk], &tmpo, &ars2[s*8+kk], ACQ_MODE_PRELOAD_NB);
+                if (ars2[s*8+kk].kind == ACQ_WOULD_BLOCK) {
+                    /* nl>0: our own reservations are the only possible
+                     * publishers -> drain and retry this expert.
+                     * nl==0: blockage is external (pinned/in-flight owned
+                     * elsewhere) -> ordinary blocking semantics apply. */
+                    if (nl > 0) PB_FLUSH();
+                    expert_acquire(m, layer, bidx[s][kk], bval[s*8+kk], &tmpo, &ars2[s*8+kk], ACQ_MODE_PRELOAD);
+                }
                 if (ars2[s*8+kk].kind == ACQ_LOAD) ld[nl++] = s*8+kk;
                 bsl[s*8+kk] = tmpo;
             }
-        if (nl > 1) {
-            int W = nl < 8 ? nl : 8;
-            #pragma omp parallel for schedule(static) num_threads(W)
-            for (int ii = 0; ii < nl; ii++) {
-                int cell = ld[ii];
-                expert_finish(m, layer, bidx[cell / 8][cell % 8], &ars2[cell], &bsl[cell]);
-            }
-        } else {
-            for (int ii = 0; ii < nl; ii++) {
-                int cell = ld[ii];
-                expert_finish(m, layer, bidx[cell / 8][cell % 8], &ars2[cell], &bsl[cell]);
-            }
-        }
+        PB_FLUSH();
+        #undef PB_FLUSH
         free(ars2); free(bsl); free(ld); free(bidx); free(bval); free(scr);
         if (tm_on()) g_pb_wall_ms += tm_now() - _pb0;
     }
