@@ -17,9 +17,11 @@
  *     mirroring the proven expert_fmt size logic without Qwen geometry;
  *   - one global mutation lock (the qwen36 g_pilot_mx pattern); pread I/O
  *     runs unlocked so device transfers never serialize compute threads;
- *   - LRU victim scan skips pinned and reserved slots; the all-reserved
- *     spin-wait fallback is preserved verbatim in semantics (never steal a
- *     buffer an unlocked pread owns);
+ *   - LRU victim scan skips pinned and reserved slots; an all-RESERVED pool
+ *     is TRANSIENT saturation reported as COLI_EXPERT_ERR_SATURATED instead
+ *     of a spin inside victim selection (F1-LIVE-1): callers retry after
+ *     drain and a FREE-after-abort or RESIDENT-after-publish slot becomes
+ *     claimable; a RESERVED buffer is never stolen;
  *   - fused single-pread [scales][weights] admission when configured and
  *     the pair is verified contiguous zero-gap per tensor.
  */

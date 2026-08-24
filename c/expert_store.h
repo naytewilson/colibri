@@ -62,6 +62,13 @@ typedef struct {
 #define COLI_EXPERT_ERR_BUSY      (-2) /* key already has an active reservation */
 #define COLI_EXPERT_ERR_NOCAP     (-3) /* no capacity to admit */
 #define COLI_EXPERT_ERR_UNSUPPORTED (-4) /* backend does not implement this op */
+/* v1.3 additive (-5 is reserved for admission-level load failures): TRANSIENT
+ * pool saturation — every slot is owned by another in-flight reservation.
+ * Never fatal, never spins inside the store: capacity exists or will exist
+ * once an owner publishes/aborts. Callers retry OUTSIDE any lock that
+ * publish()/abort() may need; a retry must reconsider FREE buffers, growth
+ * room, evictable RESIDENT victims, and the drained RESERVED set. */
+#define COLI_EXPERT_ERR_SATURATED (-6) /* all slots transiently reserved */
 
 /* Internal core identity: (layer, role, index). role=EXPERT is first-class;
  * future WeightStore roles extend this enum without changing the contract.
@@ -110,7 +117,8 @@ typedef struct {
  *   must not call release().
  * - release() clears the entire view. release() on an already-cleared or
  *   zero-initialized view is a no-op.
- * - destroy() requires zero active leases (debug builds assert).
+ * - destroy() requires zero active leases and zero active reservations
+ *   (debug builds assert before freeing).
  * - Thread-safety is implementation-specific. Callers must not assume that
  *   lookup/release/prefetch/stats/destroy are safe to call concurrently on
  *   the same store unless the concrete store documents that guarantee.
@@ -124,6 +132,14 @@ typedef struct {
  *   most ONE active reservation per key exists at any time; a second reserve
  *   for the same key fails with COLI_EXPERT_ERR_BUSY (callers coalesce by
  *   waiting and re-running lookup instead of duplicating the load).
+ * - reserve() never blocks: when every slot is owned by another reservation
+ *   it fails with COLI_EXPERT_ERR_SATURATED. Pool-full is NOT permanently
+ *   no-capacity: FREE-after-abort must become claimable and RESIDENT-after-
+ *   publish must permit progress, so a SATURATED/BUSY caller retries after
+ *   observing progress — outside any lock publish()/abort() may need, with
+ *   each retry reconsidering FREE buffers, growth room, evictable RESIDENT
+ *   victims, and the drained RESERVED set. RESERVED buffers may never be
+ *   stolen.
  * - Between a successful reserve() and its terminal op, the reservation's
  *   segment buffers are writable by exactly the owning thread (single writer).
  *   The buffers' contents are undefined; no residency exists yet.
@@ -254,7 +270,7 @@ static inline void coli_expert_unpin(ColiExpertStore *store,
 }
 
 /* destroy() requires zero active leases and reservations (debug builds
- * report both); double-destroy is a safe no-op. */
+ * assert before freeing); double-destroy is a safe no-op. */
 static inline void coli_expert_destroy(ColiExpertStore *store) {
     if (store && store->ops && store->ops->destroy)
         store->ops->destroy(store);

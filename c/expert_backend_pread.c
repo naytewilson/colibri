@@ -10,6 +10,7 @@
 
 #include "expert_backend_pread.h"
 
+#include <assert.h>
 #include <dirent.h>
 #include <errno.h>
 #include <pthread.h>
@@ -156,15 +157,19 @@ static PreadSlot *pbs_find_resident(PreadBackend *bk, int layer, int index) {
 }
 
 /*
- * Victim selection — three stages preserved from qwen36 expert_acquire /
+ * Victim selection — stages preserved from qwen36 expert_acquire /
  * pilot_realload:
  *   1. oldest RESIDENT slot neither pinned nor reserved (reserved == the
  *      eid==-1 sentinel of the original);
  *   2. otherwise oldest RESIDENT slot (may be pinned, never reserved);
- *   3. otherwise spin (every candidate buffer is owned by an unlocked pread
- *      that will publish into it) until stage 2 finds a victim. Stealing a
- *      reserved slot corrupts silently — wait instead; reservations drain.
- * Caller holds mx; returns the slot cleared to FREE.
+ *   3. otherwise NULL: every candidate buffer is RESERVED by an in-flight
+ *      admission elsewhere. This is TRANSIENT saturation, not permanent
+ *      no-capacity — the caller retries after drain instead of spinning
+ *      here. Spinning inside victim selection deadlocked the engine lock
+ *      order (F1-LIVE-1): a waiter parked here while holding g_xorder_mx
+ *      starved the publish that would have freed a slot. Stealing a
+ *      reserved slot corrupts silently; waiting happens ABOVE this layer.
+ * Caller holds mx; returns the slot cleared to FREE, or NULL.
  */
 static PreadSlot *pbs_pick_victim(PreadBackend *bk, PreadLayer *pl) {
     int lru = -1;
@@ -180,16 +185,7 @@ static PreadSlot *pbs_pick_victim(PreadBackend *bk, PreadLayer *pl) {
             if (lru < 0 || s->used < pl->slots[lru].used) lru = i;
         }
     }
-    while (lru < 0) {
-        PBS_UNLOCK(bk);
-        usleep(1000);
-        PBS_LOCK(bk);
-        for (int i = 0; i < pl->n; i++) {
-            PreadSlot *s = &pl->slots[i];
-            if (s->state != PBS_RESIDENT) continue;
-            if (lru < 0 || s->used < pl->slots[lru].used) lru = i;
-        }
-    }
+    if (lru < 0) return NULL; /* transient all-RESERVED saturation */
     PreadSlot *s = &pl->slots[lru];
     bk->stats.resident_bytes -= (uint64_t)(s->wbytes + s->sbytes);
     if (bk->evict_cb) {
@@ -207,7 +203,11 @@ static PreadSlot *pbs_pick_victim(PreadBackend *bk, PreadLayer *pl) {
 }
 
 /* Claim a FREE/reusable/victim slot for (layer,index) and mark the in-flight
- * identity. Caller holds mx. busy_kind: 1 = reservation exists, 2 = resident. */
+ * identity. Caller holds mx. busy_kind: 1 = reservation exists, 2 = resident,
+ * 3 = transient saturation (pool full, every slot RESERVED). The claim
+ * search is non-blocking and complete per attempt: existing FREE first, then
+ * growth room, then a legal RESIDENT victim; all-RESERVED reports saturation
+ * instead of waiting (retry above re-runs the FULL search after wake). */
 static PreadSlot *pbs_claim(PreadBackend *bk, int layer, int index,
                             int *busy_kind) {
     PreadLayer *pl = &bk->layers[layer];
@@ -222,7 +222,10 @@ static PreadSlot *pbs_claim(PreadBackend *bk, int layer, int index,
         s = &pl->slots[pl->n++];
         pl->slots[pl->n - 1].state = PBS_FREE;
     }
-    if (!s) s = pbs_pick_victim(bk, pl);
+    if (!s) {
+        s = pbs_pick_victim(bk, pl);
+        if (!s) { *busy_kind = 3; return NULL; }
+    }
 
     s->state = PBS_RESERVED;
     s->layer = layer;
@@ -335,7 +338,10 @@ static int pbs_io_fill(PreadBackend *bk, PreadSlot *s, int64_t *bytes_read) {
 }
 
 /* Internal synchronous admission used by prefetch(): claim -> pread into the
- * reserved buffers (unlocked I/O) -> publish. Returns 0 on success. */
+ * reserved buffers (unlocked I/O) -> publish. Returns 0 on success.
+ * busy==3 (transient saturation) skips this advisory admission: prefetch
+ * holds no lease and must never contend with demand traffic for capacity;
+ * a later demand-path admission or retry admits the key. */
 static int pbs_admit_sync(PreadBackend *bk, int layer, int index, int as_prefetch) {
     PBS_LOCK(bk);
     int busy = 0;
@@ -453,7 +459,10 @@ static int pbs_reserve(ColiExpertStore *store, const ColiExpertCoreKey *key,
     if (!s) {
         if (busy == 1) bk->stats.coalesced_requests++; /* saw in-flight loader */
         PBS_UNLOCK(bk);
-        return COLI_EXPERT_ERR_BUSY;
+        /* busy==3: transient all-RESERVED saturation — explicit non-blocking
+         * result; the pool drains via owners' publish/abort and the caller
+         * may retry (re-running the full claim search). */
+        return busy == 3 ? COLI_EXPERT_ERR_SATURATED : COLI_EXPERT_ERR_BUSY;
     }
     int64_t ei = pbs_ei(bk, key->layer, key->index);
     if (pbs_seg_reserve(&s->wbuf, &s->wcap, (size_t)bk->emeta_w[ei]) != 0 ||
@@ -621,21 +630,34 @@ static void pbs_destroy(ColiExpertStore *store) {
     PreadBackend *bk = (PreadBackend *)store;
     if (!bk) return;
     PBS_LOCK(bk);
+    /* Contract (expert_store.h): destroy requires zero active reservations
+     * AND zero active leases. Debug builds fail loudly BEFORE any free so a
+     * live lease can never alias freed memory; release builds retain the
+     * documented caller precondition. */
+    int live_leases = 0;
+    for (int l = 0; l < bk->n_layers; l++) {
+        PreadLayer *pl = &bk->layers[l];
+        for (int i = 0; i < pl->n; i++)
+            if (pl->slots[i].lease_count) live_leases++;
+    }
 #ifndef NDEBUG
     if (bk->stats.reservations_active != 0)
         fprintf(stderr, "pbs_destroy: %llu active reservations\n",
                 (unsigned long long)bk->stats.reservations_active);
+    for (int l = 0; l < bk->n_layers; l++) {
+        PreadLayer *pl = &bk->layers[l];
+        for (int i = 0; i < pl->n; i++)
+            if (pl->slots[i].lease_count)
+                fprintf(stderr, "pbs_destroy: layer %d slot %d holds %d leases\n",
+                        l, i, pl->slots[i].lease_count);
+    }
+    assert(bk->stats.reservations_active == 0 && live_leases == 0);
 #endif
     PBS_UNLOCK(bk);
 
     for (int l = 0; l < bk->n_layers; l++) {
         PreadLayer *pl = &bk->layers[l];
         for (int i = 0; i < pl->n; i++) {
-#ifndef NDEBUG
-            if (pl->slots[i].lease_count)
-                fprintf(stderr, "pbs_destroy: layer %d slot %d holds %d leases\n",
-                        l, i, pl->slots[i].lease_count);
-#endif
             free(pl->slots[i].wbuf);
             free(pl->slots[i].sbuf);
         }
@@ -685,7 +707,8 @@ void coli_expert_backend_pread_set_evict_notify(
  * displace if claimed right now? Mirrors pbs_pick_victim stages 1-2 without
  * mutating anything or charging counters.
  * Returns: -1 = no displacement (key resident / free capacity / bad args);
- * -2 = every slot reserved (a claim would spin-wait);
+ * -2 = every slot reserved (a claim returns the transient
+ *      COLI_EXPERT_ERR_SATURATED until an owner publishes/aborts);
  * >= 0 = the prospective victim's expert id within that layer. */
 int coli_expert_backend_pread_would_evict(ColiExpertStore *store,
                                           const ColiExpertKey *key) {
