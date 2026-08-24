@@ -34,7 +34,11 @@ Worktree: `~/ANVIL-worktrees/colibri-forge-f1`
 ## Key mechanics the next agent must not break
 
 - Trace-order invariant: every slot-table mutation and its v3 row share
-  `g_xorder_mx` (loads stay outside). Replay gate fails if violated.
+  one critical section. Authority for mutation ORDER is the store's own
+  internal lock; since F1-LIVE-1 closure, engine `g_xorder_mx` serializes
+  publish+trace emission but NEVER wraps reserve() (the store op is
+  non-blocking and must not run under a lock a publisher needs).
+  Replay gate fails if the stream orderings break.
 - Views are INVALIDATED by release() — capture `slot_hint`/bytes/format
   BEFORE `coli_expert_release`.
 - PRELOAD publishes carry NO lease; never release a view you were not given.
@@ -88,3 +92,31 @@ Worktree: `~/ANVIL-worktrees/colibri-forge-f1`
   (PROMGATE_LOCAL_GREEN at 333a3ee), promgate receipt banked from ANVIL.
 - olmoe end-to-end vs real model: still UNMEASURED (node dependency).
 - Verdict: FORGE_F1_STAGES_0_9_COMPLETE_READY_FOR_INDEPENDENT_VERIFICATION
+
+---
+
+## LANE A DEFECT CLOSURE (2026-08-24) — F1-LIVE-1 + lease/promgate defects
+
+Independent verifier (verify/forge-f1-20260824 @ 5689298b) confirmed the
+core campaign and surfaced four defects; this wave closes them on the
+candidate branch. Full record:
+`docs/experiments/FORGE_F1_LIVENESS_DEFECT_CLOSURE_20260824.md`.
+
+- F1-LIVE-1: `pbs_pick_victim` stage-3 spin removed — all-RESERVED pools
+  return transient `COLI_EXPERT_ERR_SATURATED`; claim search re-runs fully
+  on retry (FREE / growth / evictable RESIDENT / drained RESERVED).
+- qwen36.c + olmoe.c: no thread holds `g_xorder_mx` across reserve()
+  anymore (demand, PILOT realload, OLMoE demand+PILOT); BUSY and SATURATED
+  both drain-wait outside engine locks with residency rechecks.
+- admission.c acquire_batch: unique-job leases TRANSFER to their first
+  caller occurrence (previously leaked inside jobs[]); duplicates take
+  fresh lookups.
+- destroy contract: debug builds now assert (before freeing) on live
+  reservations or leases; docs unified to one truthful contract.
+- promote.sh: builds `qwen36_trace_replay` itself — fresh clean checkout
+  is self-contained.
+- New durable tests: c/tests/test_pread_liveness.c (H1/H2 ×100, real
+  backend; batch lease transfer incl. partial failure; destroy-contract
+  fork probe). Operating-laws §4 falsified coverage claim corrected.
+
+Verdict: FORGE_F1_LIVENESS_AND_LEASE_DEFECTS_FIXED_READY_FOR_TARGETED_REVERIFICATION

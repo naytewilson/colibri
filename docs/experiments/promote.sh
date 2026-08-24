@@ -14,7 +14,10 @@ chk "baseline is ancestor" "git merge-base --is-ancestor $BASE HEAD"
 chk "clean tree" "[[ -z \"\$(git status --porcelain)\" ]]"
 
 say "== build =="
-make -C c qwen36 olmoe >/dev/null 2>&1 && say "PASS engines build" || { say "FAIL engines build"; FAIL=1; }
+# Self-containment: the trace-replay gate below invokes c/qwen36_trace_replay,
+# so a fresh clean checkout must build every executable the gate runs.
+make -C c qwen36 olmoe qwen36_trace_replay >/dev/null 2>&1 \
+  && say "PASS engines + trace-replay build" || { say "FAIL engines + trace-replay build"; FAIL=1; }
 
 say "== unit gates (arm64 local excludes: test_uring, x86-only i4_kernel) =="
 make -C c -k test-c TEST_EXCLUDE="test_uring test_qwen36_i4_kernel" >/dev/null 2>&1 \

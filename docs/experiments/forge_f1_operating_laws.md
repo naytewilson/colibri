@@ -54,7 +54,20 @@ possible wait on that same pool. Concretely tested: full-pool != unreservable;
 a caller holding an unfinished reservation never waits on a publish only it can
 perform. Covered by tests/test_expert_reservation.c (BUSY path) +
 tests/test_admission.c (coalesce window with external publisher) +
-tests/test_expert_backend_pread.c (all-reserved spin drain).
+tests/test_pread_liveness.c (H1 ABORT->FREE and H2 PUBLISH->PROGRESS on the
+real backend, 100 iterations each; fully-RESERVED pools return the transient
+COLI_EXPERT_ERR_SATURATED instead of spinning inside victim selection).
+
+CORRECTION (2026-08-24, verifier F1-LIVE-1): an earlier revision claimed
+coverage by "tests/test_expert_backend_pread.c (all-reserved spin drain)" —
+NO such test existed; the claim is FALSIFIED. Worse, the then-current
+`pbs_pick_victim` stage-3 spin could hang a reserve that another thread's
+publish (blocked behind the caller-held engine lock) needed to drain: two
+QWEN36 threads racing reserves into an exhausted pool deadlocked. The repair:
+reserve() never blocks internally (explicit transient-saturation result;
+retry above reconsiders FREE, growth, evictable RESIDENT, drained RESERVED),
+and no engine thread holds `g_xorder_mx` across reserve() in qwen36.c or
+olmoe.c.
 
 ## 5. Promotion gate
 
