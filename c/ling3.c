@@ -177,6 +177,10 @@ typedef struct {
         float *gate,*up,*hz;                                /* expert temps */
         float *xev,*xod;                                    /* AVX2 split (max I/2) */
         float *logits;                                      /* [V] */
+        float *uid_f,*wlist,*poslist_f;                     /* MoE union scratch (int-packed) */
+        int *uid,*pcnt,*pfirst,*poslist,*cur;
+        float *sg,*su,*sd;                                  /* shared expert */
+        float *dg,*du;                                      /* dense layer */
     } ws;
 } Model;
 
@@ -200,8 +204,9 @@ static int l3_thread_count(const char *name){
     return (int)n;
 }
 static long g_allocs=0, g_frees=0;
-static float *falloc(int64_t n){ float *p=malloc((size_t)n*sizeof(float)); if(!p){fprintf(stderr,"OOM %lld floats\n",(long long)n);exit(1);} g_allocs++; return p; }
-static float *fcalloc(int64_t n){ float *p=calloc((size_t)n,sizeof(float)); if(!p){fprintf(stderr,"OOM %lld floats\n",(long long)n);exit(1);} g_allocs++; return p; }
+static int g_heap_phase=0;   /* 0=INIT 1=PREFILL/DECODE: counters only accrue when >0 */
+static float *falloc(int64_t n){ float *p=malloc((size_t)n*sizeof(float)); if(!p){fprintf(stderr,"OOM %lld floats\n",(long long)n);exit(1);} if(g_heap_phase)g_allocs++; return p; }
+static float *fcalloc(int64_t n){ float *p=calloc(1,(size_t)n*sizeof(float)); if(!p){fprintf(stderr,"OOM %lld floats\n",(long long)n);exit(1);} if(g_heap_phase)g_allocs++; return p; }
 static inline float sigmoidf_(float x){ return 1.f/(1.f+expf(-x)); }
 static inline float siluf_(float x){ return x/(1.f+expf(-x)); }
 static void rmsnorm_(float *out, const float *x, const float *w, int D, float eps){
@@ -639,6 +644,14 @@ static void kv_alloc(Model *m, int max_t){
         { int Imax=c->hidden>c->moe_inter?c->hidden:c->moe_inter;
           WSA(xev,Imax/2+16); WSA(xod,Imax/2+16); }
         WSA(logits,c->vocab);
+        { long cap=(long)cm*c->topk;
+          WSA(uid_f,cap); WSA(wlist,cap); WSA(poslist_f,cap);
+          m->ws.uid=(int*)falloc(cap); m->ws.pcnt=(int*)falloc(cap);
+          m->ws.pfirst=(int*)falloc(cap); m->ws.poslist=(int*)falloc(cap);
+          m->ws.cur=(int*)falloc(cap); }
+        WSA(sg,(long)cm*c->sh_inter); WSA(su,(long)cm*c->sh_inter);
+        WSA(sd,(long)cm*D);
+        WSA(dg,(long)cm*c->dense_inter); WSA(du,(long)cm*c->dense_inter);
         #undef WSA
         g_ws_xev=m->ws.xev; g_ws_xod=m->ws.xod;
     }
@@ -988,11 +1001,10 @@ static void moe_forward(Model *m, Layer *l, int li, const float *x, int C, float
     {
         int map[4096]; for(int e=0;e<c->n_experts;e++) map[e]=-1;
         int nu=0;
-        int *uid=malloc((size_t)C*c->topk*sizeof(int));
-        int *pcnt=calloc((size_t)C*c->topk,sizeof(int)), *pfirst=malloc((size_t)C*c->topk*sizeof(int));
-        int *poslist=malloc((size_t)C*c->topk*sizeof(int));
-        float *wlist=falloc((int64_t)C*c->topk);
-        int *cur=malloc((size_t)C*c->topk*sizeof(int));
+        int *uid=(int*)m->ws.uid, *pcnt=(int*)m->ws.pcnt, *pfirst=(int*)m->ws.pfirst;
+        int *poslist=(int*)m->ws.poslist, *cur=(int*)m->ws.cur;
+        float *wlist=m->ws.wlist;
+        memset(pcnt,0,(size_t)nu*sizeof(int));
         for(int t=0;t<C;t++) for(int kk=0;kk<c->topk;kk++){
             int e=idxs[(int64_t)t*c->topk+kk];
             if(map[e]<0){ map[e]=nu; uid[nu]=e; pcnt[nu]=0; nu++; }
@@ -1004,7 +1016,7 @@ static void moe_forward(Model *m, Layer *l, int li, const float *x, int C, float
             int j=map[idxs[(int64_t)t*c->topk+kk]];
             poslist[cur[j]]=t; wlist[cur[j]]=wsels[(int64_t)t*c->topk+kk]; cur[j]++;
         }
-        float *gate=falloc(MI), *up=falloc(MI), *hz=falloc(LT);
+        float *gate=m->ws.gate, *up=m->ws.up, *hz=m->ws.hz;
         for(int j=0;j<nu;j++){
             Exp *eg=&o->exps[uid[j]*3+0], *eu=&o->exps[uid[j]*3+1], *ed=&o->exps[uid[j]*3+2];
             for(int p2=0;p2<pcnt[j];p2++){
@@ -1018,8 +1030,6 @@ static void moe_forward(Model *m, Layer *l, int li, const float *x, int C, float
                 for(int i2=0;i2<LT;i2++) U[(int64_t)t*LT+i2]+=wk*hz[i2];
             }
         }
-        free(gate);free(up);free(hz);
-        g_frees+=7; free(uid);free(pcnt);free(pfirst);free(poslist);free(wlist);free(cur);
         (void)0;
     }
     m->t_expert+=now_s()-te0;
@@ -1028,23 +1038,21 @@ static void moe_forward(Model *m, Layer *l, int li, const float *x, int C, float
     double ts0=now_s();
     {
         int SI=c->sh_inter;
-        float *sg=falloc((int64_t)C*SI), *su=falloc((int64_t)C*SI), *sd=falloc((int64_t)C*c->hidden);
+        float *sg=m->ws.sg, *su=m->ws.su, *sd=m->ws.sd;
         w_matmul(sg,x,&o->sh_gate,C); w_matmul(su,x,&o->sh_up,C);
         for(int64_t i2=0;i2<(int64_t)C*SI;i2++) sg[i2]=siluf_(sg[i2])*su[i2];
         w_matmul(sd,sg,&o->sh_down,C);
         for(int64_t d=0;d<(int64_t)C*c->hidden;d++) out[d]+=sd[d];
-        free(sg);free(su);free(sd);
     }
     m->t_shared+=now_s()-ts0;
 }
 
 static void dense_forward(Model *m, Layer *l, const float *x, int C, float *out){
     Cfg *c=&m->c; int DI=c->dense_inter;
-    float *g=falloc((int64_t)C*DI), *u=falloc((int64_t)C*DI);
+    float *g=m->ws.dg, *u=m->ws.du;
     w_matmul(g,x,&l->d_gate,C); w_matmul(u,x,&l->d_up,C);
     for(int64_t i=0;i<(int64_t)C*DI;i++) g[i]=siluf_(g[i])*u[i];
     w_matmul(out,g,&l->d_down,C);
-    free(g);free(u);
 }
 
 /* ---------- a CHUNK of C tokens through the stack ---------- */
@@ -1132,10 +1140,10 @@ static float *step_chunk(Model *m, const int *ids, int pos0, int C){
             float mix[16384];
             rmsnorm_(mix,hidden+(int64_t)t*D,m->final_norm,D,c->eps);
             if(m->trace) fwrite(mix,sizeof(float),(size_t)D,m->trace);
-            float *lo=falloc(c->vocab);
+            float *lo=m->ws.logits;
             w_matmul(lo,mix,&m->lm_head,1);
             if(g_lfp) fwrite(lo,sizeof(float),(size_t)c->vocab,g_lfp);
-            if(t==C-1) logits=lo; else { memcpy(m->ws.logits,lo,(size_t)c->vocab*4); free(lo); }
+            if(t==C-1) logits=lo;
         }
         m->t_head+=now_s()-th0;
     }
@@ -1255,6 +1263,7 @@ int main(int argc, char **argv){
     int phases=getenv("L3_PHASES")?atoi(getenv("L3_PHASES")):0;
     g_phases=phases;
     g_kda_scalar=getenv("L3_KDA_SCALAR")?atoi(getenv("L3_KDA_SCALAR")):0;
+    g_heap_phase=1;
     double t_wall0=now_s();
     int chunk=getenv("L3_CHUNK")?atoi(getenv("L3_CHUNK")):32;
     if(chunk<1)chunk=1; if(chunk>512)chunk=512;
@@ -1264,7 +1273,6 @@ int main(int argc, char **argv){
         int nc=np-i<chunk?np-i:chunk;
         lo=step_chunk(m,ids,i,nc);
         if(i==0) ttft=now_s()-t_wall0;
-        if(i+nc<np) free(lo);
     }
     double t_prefill=now_s()-t_wall0;
     double t_dec0=now_s(); int produced=0;
@@ -1272,7 +1280,6 @@ int main(int argc, char **argv){
         int next=sample_greedy(lo,m->c.vocab);
         printf("%d ",next); fflush(stdout);
         int stop=0; for(int e2=0;e2<m->c.n_eos;e2++) if(next==m->c.eos[e2]) stop=1;
-        free(lo);
         produced++;
         if(stop) break;
         lo=step_chunk(m,&next,np+g,1);
