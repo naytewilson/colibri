@@ -419,6 +419,15 @@ kimi_k3$(EXE): kimi_k3.c st.h json.h tok.h tok_unicode.h tok_unicode_o200k.h com
 ling3$(EXE): ling3.c st.h json.h tok.h tok_unicode.h tok_unicode_o200k.h compat.h quant.h
 	$(CC) $(CFLAGS) ling3.c -o ling3$(EXE) $(LDFLAGS)
 
+# --- Ling Wave-2 allocation-proof tooling (test-only, not built by default) --
+# ling3_probe exports g_l3_alloc_phase (INIT/PREFILL/DECODE) so the
+# l3_allocprobe.so interposer can split process-global heap traffic by phase.
+ling3_probe$(EXE): ling3.c st.h json.h tok.h tok_unicode.h tok_unicode_o200k.h compat.h quant.h
+	$(CC) $(CFLAGS) -DL3_ALLOC_PROBE -rdynamic ling3.c -o ling3_probe$(EXE) $(LDFLAGS)
+
+l3_allocprobe.so: l3_allocprobe.c
+	$(CC) -O2 -Wall -shared -fPIC l3_allocprobe.c -o $@ -ldl
+
 ling3_check$(EXE): ling3_check.c json.h
 	$(CC) $(CFLAGS) ling3_check.c -o ling3_check$(EXE) $(LDFLAGS)
 

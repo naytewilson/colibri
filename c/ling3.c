@@ -50,11 +50,15 @@
  * FULL RESIDENCY: every expert matrix of every layer is loaded once at startup
  * into resident buffers behind a direct [layer][expert][matrix] pointer table.
  * Steady-state decode performs zero model-weight file reads, zero tensor-name
- * lookups, zero locking. NOT yet zero-allocation: the Wave-1 AVX2 exp_matvec
- * allocates/frees its x-even/x-odd scratch on every call and moe_forward /
- * attention keep small per-call temporaries. A persistent scratch/workspace
- * pool is the next exact optimization wave; do not claim a zero-alloc hot
- * path until that lands.
+ * lookups, zero locking. ZERO Ling-owned steady-state heap traffic (STRIKE
+ * 3R1): all prefill/decode temporaries live in a persistent workspace sized
+ * once at init; every heap call in this TU routes through falloc/fcalloc/
+ * xmalloc/xcalloc/xfree, and post-init alloc+free counts are 0 (source census
+ * + L3_ALLOC_COUNT wrappers + independent L3_ALLOC_PROBE malloc-interposer).
+ * Rejected-as-default experiment paths stay strictly opt-in behind NUMERIC
+ * flags parsed once at startup (unset/0 = OFF): L3_TOP8, L3_SERIAL_C1,
+ * L3_MLA_SIMD; L3_ARGMAX_HEAD fuses greedy argmax into the LM head where
+ * exactness-eligible.
  *
  * ENV:
  *   L3_BITS=4|8|32        load-time quant of attention/dense/shared/embed (def 32)
@@ -72,6 +76,14 @@
  *                         8 = measured Dell i7-11700 knee, NOT a universal
  *                         constant). Invalid values (<=0) are rejected.
  *   L3_PHASES=0|1         phase decomposition timers to stderr (default 0)
+ *   L3_SERIAL_C1=0|1      opt-in rejected serial C==1 matvec (default OFF)
+ *   L3_TOP8=0|1           opt-in rejected top-8 prepared-input path (default OFF)
+ *   L3_MLA_SIMD=0|1       opt-in rejected MLA AVX2 AXPY variant (default OFF)
+ *   L3_KDA_SCALAR=0|1     reference four-sweep KDA path instead of two-pass
+ *   L3_ARGMAX_HEAD=0|1    fused exact greedy argmax in LM head (default OFF;
+ *                         auto-disabled when L3_LOGITS or non-f32 head)
+ *   L3_FLAGS_DUMP=1       print resolved flag booleans and exit (discriminator)
+ *   L3_ALLOC_COUNT=1      print post-init Ling-wrapped alloc/free counters
  *   L3_MAXT=N             KV/context capacity (default prompt+ngen+8)
  *   COLI_TEMP=F           0 = greedy (default)
  */
@@ -95,6 +107,23 @@
 static int g_mla_simd=0;   /* L3_MLA_SIMD=1: rejected-as-default MLA AXPY variant */
 static int g_serial_c1=0;  /* REJECTED as default: control-run proven 3.3x KDA wall
                              * regression (26.9s vs 8.16s). L3_SERIAL_C1=1 opts in. */
+static int g_top8=0;       /* REJECTED as default (STRIKE 4): slower + changed
+                             * arithmetic lineage. L3_TOP8=1 opts in. */
+static int g_argmax_head=0;/* L3_ARGMAX_HEAD=1: fused greedy argmax in LM head
+                             * (STRIKE 7, exact-greedy only, no L3_LOGITS) */
+static int g_fused_next=0; /* sampling position result when g_argmax_head fuses */
+/* Numeric feature-flag semantics: unset/empty = OFF, "0" = OFF, positive
+ * integer = that value, anything else rejected. Parsed ONCE at startup —
+ * hot paths read the resolved global, never getenv(). Presence alone no
+ * longer enables a path, so L3_SERIAL_C1=0 / L3_TOP8=0 are safely OFF. */
+static int l3_flag(const char *name){
+    const char *v=getenv(name);
+    if(!v||!*v) return 0;
+    char *end=NULL; long n=strtol(v,&end,10);
+    if(n<0||!end||*end){
+        fprintf(stderr,"[L3] %s=%s rejected: must be an unset, 0 or positive-integer flag\n",name,v); exit(1); }
+    return n?1:0;
+}
 
 typedef struct {
     int hidden, n_layers, vocab, first_dense, dense_inter;
@@ -208,9 +237,27 @@ static int l3_thread_count(const char *name){
     return (int)n;
 }
 static long g_allocs=0, g_frees=0;
-static int g_heap_phase=0;   /* 0=INIT 1=PREFILL/DECODE: counters only accrue when >0 */
+#ifdef L3_ALLOC_PROBE
+/* Test-only seam for tools/l3_allocprobe.so: the interposer reads this symbol
+ * to split process-global malloc/calloc/realloc/free counts into
+ * INIT(0)/PREFILL(1)/DECODE(2). Values >0 keep the wrapper counters armed,
+ * so counting semantics are identical with or without the probe build. */
+int g_l3_alloc_phase=0;
+#define g_heap_phase g_l3_alloc_phase
+#else
+static int g_heap_phase=0;   /* 0=INIT 1=PREFILL 2=DECODE: counters only accrue when >0 */
+#endif
+/* Every Ling-owned heap primitive routes through this family, so the
+ * L3_ALLOC_COUNT printout is source-complete for THIS translation unit:
+ * a raw malloc/calloc/free/realloc appearing anywhere else is a grep-visible
+ * contract violation. (Process-global truth — libc/libgomp allocations the
+ * engine does not issue directly — is measured by the L3_ALLOC_PROBE
+ * interposer, not claimed from these counters.) */
 static float *falloc(int64_t n){ float *p=malloc((size_t)n*sizeof(float)); if(!p){fprintf(stderr,"OOM %lld floats\n",(long long)n);exit(1);} if(g_heap_phase)g_allocs++; return p; }
 static float *fcalloc(int64_t n){ float *p=calloc(1,(size_t)n*sizeof(float)); if(!p){fprintf(stderr,"OOM %lld floats\n",(long long)n);exit(1);} if(g_heap_phase)g_allocs++; return p; }
+static void *xmalloc(size_t n){ void *p=malloc(n); if(!p){fprintf(stderr,"OOM %zu bytes\n",n);exit(1);} if(g_heap_phase)g_allocs++; return p; }
+static void *xcalloc(size_t n,size_t sz){ void *p=calloc(n,sz); if(!p){fprintf(stderr,"OOM %zu x %zu\n",n,sz);exit(1);} if(g_heap_phase)g_allocs++; return p; }
+static void xfree(void *p){ if(p){ if(g_heap_phase)g_frees++; free(p); } }
 static inline float sigmoidf_(float x){ return 1.f/(1.f+expf(-x)); }
 static inline float siluf_(float x){ return x/(1.f+expf(-x)); }
 static void rmsnorm_(float *out, const float *x, const float *w, int D, float eps){
@@ -323,7 +370,7 @@ static void w_load(Model *m, W *w, const char *name, int O, int I, int bits){
     int gs=64;
     if(bits<=4 && I%gs){ bits=8; }
     float *scr=falloc((int64_t)QCHUNK*I);
-    if(bits>4){ w->fmt=1; w->q8=malloc((int64_t)O*I); w->s=falloc(O);
+    if(bits>4){ w->fmt=1; w->q8=xmalloc((size_t)((int64_t)O*I)); w->s=falloc(O);
         if(!w->q8){fprintf(stderr,"OOM int8 %s\n",name);exit(1);}
         for(int r0=0;r0<O;r0+=QCHUNK){ int n=O-r0<QCHUNK?O-r0:QCHUNK;
             st_read_slice_f32(&m->S,name,(int64_t)r0*I,(int64_t)n*I,scr,0);
@@ -333,7 +380,7 @@ static void w_load(Model *m, W *w, const char *name, int O, int I, int bits){
                 int8_t *dst=w->q8+(int64_t)(r0+r)*I;
                 for(int i=0;i<I;i++){ int v=(int)lrintf(src[i]*inv); if(v>127)v=127; if(v<-127)v=-127; dst[i]=(int8_t)v; } } }
     } else { w->fmt=4; w->gs=gs; int rb=I/2, ng=I/gs;
-        w->q4=malloc((int64_t)O*rb); w->s=falloc((int64_t)O*ng);
+        w->q4=xmalloc((size_t)((int64_t)O*rb)); w->s=falloc((int64_t)O*ng);
         if(!w->q4){fprintf(stderr,"OOM int4 %s\n",name);exit(1);}
         for(int r0=0;r0<O;r0+=QCHUNK){ int n=O-r0<QCHUNK?O-r0:QCHUNK;
             st_read_slice_f32(&m->S,name,(int64_t)r0*I,(int64_t)n*I,scr,0);
@@ -347,7 +394,7 @@ static void w_load(Model *m, W *w, const char *name, int O, int I, int bits){
                         int v1=(int)lrintf(gp[i+1]*inv); if(v1>7)v1=7; if(v1<-8)v1=-8;
                         dst[(g*gs+i)>>1]=(uint8_t)((v0+8)|((v1+8)<<4)); } } } }
     }
-    free(scr);
+    xfree(scr);
 }
 static float *f32_load(Model *m, const char *name, int64_t want){
     st_tensor *t=st_find(&m->S,name);
@@ -373,7 +420,7 @@ static void exp_load(Model *m, Exp *e, const char *base, int O, int I){
     if(t->dtype!=ST_I32 || t->nbytes!=want){
         fprintf(stderr,"%s: dtype %d nbytes %lld != expected ST_I32 %lld (I32 [%d,%d])\n",
                 nm,t->dtype,(long long)t->nbytes,(long long)want,O,e->nw); exit(1); }
-    e->packed=malloc((size_t)want);
+    e->packed=xmalloc((size_t)want);
     if(!e->packed){fprintf(stderr,"OOM expert packed %s\n",nm);exit(1);}
     st_read_raw(&m->S,nm,e->packed,0);
     snprintf(nm,sizeof(nm),"%s.weight_scale",base);
@@ -514,7 +561,7 @@ static void load_cfg(Cfg *c, const char *snap){
     { FILE *f=fopen(path,"rb"); if(!f){perror(path);exit(1);}
       fseek(f,0,SEEK_END); n=ftell(f); fseek(f,0,SEEK_SET);
       if(n<0||n>(64L<<20)){ fprintf(stderr,"%s: bad size\n",path); exit(1); }
-      buf=malloc((size_t)n+1); if(!buf){fprintf(stderr,"OOM cfg\n");exit(1);}
+      buf=xmalloc((size_t)n+1);
       if(fread(buf,1,(size_t)n,f)!=(size_t)n){ fprintf(stderr,"%s: short read\n",path); exit(1); }
       buf[n]=0; fclose(f); }
     char *arena=NULL; jval *root=json_parse(buf,&arena);
@@ -567,7 +614,7 @@ static void load_cfg(Cfg *c, const char *snap){
     jval *e=json_get(root,"eos_token_id"); if(!e) e=json_get(tc,"eos_token_id");
     if(e&&e->t==J_NUM) c->eos[c->n_eos++]=(int)e->num;
     else if(e&&e->t==J_ARR) for(int i=0;i<e->len&&c->n_eos<8;i++) c->eos[c->n_eos++]=(int)e->kids[i]->num;
-    free(buf); (void)arena;
+    xfree(buf); (void)arena;
 }
 
 /* ---------- init ---------- */
@@ -583,11 +630,11 @@ static void model_init(Model *m, const char *snap, int n_layers_env){
     int bits      = getenv("L3_BITS")?atoi(getenv("L3_BITS")):32;
     int hbits     = getenv("L3_HEAD_BITS")?atoi(getenv("L3_HEAD_BITS")):bits;
     double t0=now_s();
-    m->L=calloc(c->n_layers,sizeof(Layer));
-    m->kstate=calloc(c->n_layers,sizeof(float*));
-    m->cwq=calloc(c->n_layers,sizeof(float*));
-    m->cwk=calloc(c->n_layers,sizeof(float*));
-    m->cwv=calloc(c->n_layers,sizeof(float*));
+    m->L=xcalloc((size_t)c->n_layers,sizeof(Layer));
+    m->kstate=xcalloc((size_t)c->n_layers,sizeof(float*));
+    m->cwq=xcalloc((size_t)c->n_layers,sizeof(float*));
+    m->cwk=xcalloc((size_t)c->n_layers,sizeof(float*));
+    m->cwv=xcalloc((size_t)c->n_layers,sizeof(float*));
     char nm[600];
     #define NM(...) (snprintf(nm,sizeof(nm),__VA_ARGS__),nm)
     for(int i=0;i<c->n_layers;i++){
@@ -612,7 +659,7 @@ static void model_init(Model *m, const char *snap, int n_layers_env){
             a->onw=f32_load(m,NM("model.layers.%d.attention.o_norm.weight",i),c->kda_hd);
             a->A=falloc(c->kda_heads);
             { float *al=f32_load(m,NM("model.layers.%d.attention.A_log",i),c->kda_heads);
-              for(int h=0;h<c->kda_heads;h++) a->A[h]=expf(al[h]); free(al); }
+              for(int h=0;h<c->kda_heads;h++) a->A[h]=expf(al[h]); xfree(al); }
             m->kstate[i]=fcalloc((int64_t)c->kda_heads*c->kda_hd*c->kda_hd);
             m->cwq[i]=fcalloc((int64_t)P*c->conv_k);
             m->cwk[i]=fcalloc((int64_t)P*c->conv_k);
@@ -635,7 +682,7 @@ static void model_init(Model *m, const char *snap, int n_layers_env){
             w_load(m,&o->sh_gate,NM("model.layers.%d.mlp.shared_experts.gate_proj.weight",i),c->sh_inter,c->hidden,bits);
             w_load(m,&o->sh_up,  NM("model.layers.%d.mlp.shared_experts.up_proj.weight",i),c->sh_inter,c->hidden,bits);
             w_load(m,&o->sh_down,NM("model.layers.%d.mlp.shared_experts.down_proj.weight",i),c->hidden,c->sh_inter,bits);
-            o->exps=calloc((size_t)c->n_experts*3,sizeof(Exp));
+            o->exps=xcalloc((size_t)c->n_experts*3,sizeof(Exp));
             if(is_int4){
                 for(int e2=0;e2<c->n_experts;e2++){
                     exp_load(m,&o->exps[e2*3+0],NM("model.layers.%d.mlp.experts.%d.gate_proj",i,e2),c->moe_inter,c->hidden);
@@ -669,7 +716,7 @@ static void model_init(Model *m, const char *snap, int n_layers_env){
                     for(int mi=0;mi<3;mi++){
                         Exp *ex=&o->exps[e2*3+mi];
                         ex->O=OO[mi]; ex->I=II[mi]; ex->nw=II[mi]/8; ex->ng=II[mi]/32;
-                        ex->packed=malloc((size_t)OO[mi]*ex->nw*4);
+                        ex->packed=xmalloc((size_t)OO[mi]*ex->nw*4);
                         ex->scl=falloc((int64_t)OO[mi]*ex->ng);
                         char full[700];
                         snprintf(full,sizeof(full),"model.layers.%d.mlp.experts.%d.%s.weight",i,e2,mt[mi]);
@@ -691,7 +738,7 @@ static void model_init(Model *m, const char *snap, int n_layers_env){
                                 memcpy(dst+g2*4,word,16);
                             }
                         }
-                        free(src);
+                        xfree(src);
                         m->wbytes += (int64_t)OO[mi]*ex->nw*4 + (int64_t)OO[mi]*ex->ng*4;
                     }
                 }
@@ -728,7 +775,7 @@ static void kv_alloc(Model *m, int max_t){
         WSA(qa,(long)cm*c->q_lora); WSA(qv,(long)cm*c->n_heads*c->qk_head);
         WSA(ckv,(long)cm*(c->kv_lora+c->qk_rope)); WSA(gv,(long)cm*c->n_heads);
         WSA(ctx,(long)cm*c->n_heads*c->v_head);
-        WSA(moe_U,(long)cm*D); m->ws.moe_idx=(int*)falloc(cm*(long)c->topk); g_allocs--;
+        WSA(moe_U,(long)cm*D); m->ws.moe_idx=(int*)falloc(cm*(long)c->topk);
         m->ws.moe_w=falloc((long)cm*c->topk);
         WSA(gate,c->moe_inter); WSA(up,c->moe_inter); WSA(hz,D);
         for(int sl=0;sl<8;sl++){ WSA(eg,sl*c->moe_inter); }
@@ -748,8 +795,8 @@ static void kv_alloc(Model *m, int max_t){
         #undef WSA
         g_ws_xev=m->ws.xev; g_ws_xod=m->ws.xod;
     }
-    m->Lc=calloc(c->n_layers,sizeof(float*));
-    m->Rc=calloc(c->n_layers,sizeof(float*));
+    m->Lc=xcalloc((size_t)c->n_layers,sizeof(float*));
+    m->Rc=xcalloc((size_t)c->n_layers,sizeof(float*));
     for(int i=0;i<c->n_layers;i++) if(m->L[i].mla){
         m->Lc[i]=falloc((int64_t)max_t*c->kv_lora);
         m->Rc[i]=falloc((int64_t)max_t*c->qk_rope);
@@ -1113,7 +1160,7 @@ static void moe_forward(Model *m, Layer *l, int li, const float *x, int C, float
              * the decode arithmetic lineage (scalar order vs AVX2 row kernel)
              * -> greedy stream diverges at token 6; also slower (experts
              * 2.17->2.61s). Kept strictly opt-in for the record. */
-        if(C==1&&getenv("L3_TOP8")){
+        if(C==1&&g_top8){
             /* STRIKE 4: one outer region across selected experts; per-slot
              * scratch; split prepared ONCE (Finding E); deterministic
              * uid-order reduction. */
@@ -1252,15 +1299,44 @@ static float *step_chunk(Model *m, const int *ids, int pos0, int C){
     float *logits=NULL;
     {
         double th0=now_s();
+        /* STRIKE 7: fused greedy argmax over lm_head rows. Exactness contract:
+         * eligible ONLY for exact greedy decode with no L3_LOGITS dump (which
+         * requires materialized logits) and an f32 head (fmt==0 -> identical
+         * per-row arithmetic to the accepted w_matmul/matmul S==1 path: same
+         * scalar accumulation order per row; threading splits rows, never the
+         * inner reduction). Ascending-row scan with strictly-greater compare,
+         * merged lowest-index-on-tie, reproduces sample_greedy tie behavior
+         * (first max wins). */
+        int fused=g_argmax_head && !g_lfp && m->lm_head.fmt==0;
         for(int t=0;t<C;t++){
-            if(!g_lfp && t<C-1) continue;
+            if(!g_lfp && t<C-1) continue;   /* unchanged skip: head runs only
+                                             * where the OFF path computed it */
             float mix[16384];
             rmsnorm_(mix,hidden+(int64_t)t*D,m->final_norm,D,c->eps);
             if(m->trace) fwrite(mix,sizeof(float),(size_t)D,m->trace);
-            float *lo=m->ws.logits;
-            w_matmul(lo,mix,&m->lm_head,1);
-            if(g_lfp) fwrite(lo,sizeof(float),(size_t)c->vocab,g_lfp);
-            if(t==C-1) logits=lo;
+            if(fused){
+                const float *xs=mix,*Wf=m->lm_head.f;
+                int I=m->lm_head.I,V=c->vocab;
+                long best=-1; float bv=-INFINITY;
+                #pragma omp parallel
+                {
+                    long lb=-1; float lv=-INFINITY;
+                    #pragma omp for schedule(static)
+                    for(int o=0;o<V;o++){
+                        const float *w=Wf+(int64_t)o*I; float a=0;
+                        for(int i=0;i<I;i++) a+=xs[i]*w[i];
+                        if(a>lv){ lv=a; lb=o; }
+                    }
+                    #pragma omp critical
+                    if(lb>=0&&(lv>bv||(lv==bv&&lb<best))){ bv=lv; best=lb; }
+                }
+                if(t==C-1){ g_fused_next=(int)best; logits=NULL; }
+            } else {
+                float *lo=m->ws.logits;
+                w_matmul(lo,mix,&m->lm_head,1);
+                if(g_lfp) fwrite(lo,sizeof(float),(size_t)c->vocab,g_lfp);
+                if(t==C-1) logits=lo;
+            }
         }
         m->t_head+=now_s()-th0;
     }
@@ -1284,7 +1360,18 @@ int main(int argc, char **argv){
         else { fprintf(stderr,"unknown arg %s\n",argv[i]); return 1; }
     }
     if(!snap){ fprintf(stderr,"usage: ling3 --model DIR [--prompt TEXT|--ids-file F|--ids env] [--ngen N]\n"); return 1; }
-    Model *m=calloc(1,sizeof(Model));
+    /* Resolve every feature flag ONCE, before any model work. L3_FLAGS_DUMP=1
+     * prints the resolved booleans and exits 0 without loading the model:
+     * the deterministic flag-semantics discriminator (unset/0 -> OFF). */
+    g_serial_c1  =l3_flag("L3_SERIAL_C1");
+    g_top8       =l3_flag("L3_TOP8");
+    g_mla_simd   =l3_flag("L3_MLA_SIMD");
+    g_kda_scalar =l3_flag("L3_KDA_SCALAR");
+    g_argmax_head=l3_flag("L3_ARGMAX_HEAD");
+    fprintf(stderr,"[L3-FLAGS] serial_c1=%d top8=%d mla_simd=%d kda_scalar=%d argmax_head=%d\n",
+            g_serial_c1,g_top8,g_mla_simd,g_kda_scalar,g_argmax_head);
+    if(l3_flag("L3_FLAGS_DUMP")) return 0;
+    Model *m=xcalloc(1,sizeof(Model));
     model_init(m,snap,getenv("L3_LAYERS")?atoi(getenv("L3_LAYERS")):0);
     if(getenv("L3_TRACE")) m->trace=fopen(getenv("L3_TRACE"),"wb");
     if(getenv("L3_LOGITS")) g_lfp=fopen(getenv("L3_LOGITS"),"wb");
@@ -1355,7 +1442,7 @@ int main(int argc, char **argv){
     g_th_wide=th_pref;
     fprintf(stderr,"[L3] threads: prefill=%d decode=%d (max=%d)\n",th_pref,th_dec,omp_maxt);
 #endif
-    int cap=65536, *ids=malloc((size_t)cap*sizeof(int)), np=0;
+    int cap=65536, *ids=xmalloc((size_t)cap*sizeof(int)), np=0;
     if(m->c.bos>=0) ids[np++]=m->c.bos;
     if(ids_file){
         FILE *f=fopen(ids_file,"r"); if(!f){perror("ids-file");return 1;}
@@ -1379,10 +1466,6 @@ int main(int argc, char **argv){
     model_state_reset(m);
     int phases=getenv("L3_PHASES")?atoi(getenv("L3_PHASES")):0;
     g_phases=phases;
-    g_kda_scalar=getenv("L3_KDA_SCALAR")?atoi(getenv("L3_KDA_SCALAR")):0;
-    g_mla_simd=getenv("L3_MLA_SIMD")?atoi(getenv("L3_MLA_SIMD")):0;
-    if(getenv("L3_SERIAL_C1")) g_serial_c1=1;
-    g_mla_simd=getenv("L3_MLA_SIMD")?atoi(getenv("L3_MLA_SIMD")):0;
     g_heap_phase=1;
     double t_wall0=now_s();
     int chunk=getenv("L3_CHUNK")?atoi(getenv("L3_CHUNK")):32;
@@ -1395,9 +1478,10 @@ int main(int argc, char **argv){
         if(i==0) ttft=now_s()-t_wall0;
     }
     double t_prefill=now_s()-t_wall0;
+    g_heap_phase=2;
     double t_dec0=now_s(); int produced=0;
     for(int g=0;g<ngen;g++){
-        int next=sample_greedy(lo,m->c.vocab);
+        int next=lo?sample_greedy(lo,m->c.vocab):g_fused_next;
         printf("%d ",next); fflush(stdout);
         int stop=0; for(int e2=0;e2<m->c.n_eos;e2++) if(next==m->c.eos[e2]) stop=1;
         produced++;
@@ -1419,6 +1503,8 @@ int main(int argc, char **argv){
     if(g_lfp) fclose(g_lfp);
     if(m->routef) fclose(m->routef);
     if(getenv("L3_ALLOC_COUNT"))
-        fprintf(stderr,"[L3-ALLOC] total heap allocs=%ld frees=%ld\n",g_allocs,g_frees);
+        fprintf(stderr,"[L3-ALLOC] ling-wrapped post-init allocs=%ld frees=%ld "
+                "(counts ONLY this TU's falloc/fcalloc/xmalloc/xcalloc/xfree sites; "
+                "process-global truth requires the L3_ALLOC_PROBE interposer)\n",g_allocs,g_frees);
     return 0;
 }

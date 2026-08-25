@@ -24,6 +24,12 @@ c/ling3_check
 c/ling3_check.exe
 c/l3_tracecmp
 c/l3_tracecmp.exe
+c/ling3_probe
+c/ling3_asan
+c/ling3_ubsan
+c/ling3_tsan
+c/l3_allocprobe.so
+c/gomp_probe.so
 c/olmoe.exe
 c/iobench
 c/iobench.exe
