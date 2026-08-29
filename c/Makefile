@@ -895,6 +895,22 @@ qwen36_trace_replay$(EXE): qwen36_trace_replay.c
 qwen36_policy_sim$(EXE): qwen36_policy_sim.c
 	$(CC) $(NOCUDA_CFLAGS) qwen36_policy_sim.c -o qwen36_policy_sim$(EXE) $(NOCUDA_LDFLAGS)
 
+# --- NGRAM-FORGE: exact n-gram address oracle + sparse-row tomography ---
+ngram_tomography$(EXE): ngram_tomography.c ngram_addr.c ngram_store.c ngram_forge.h
+	$(CC) $(NOCUDA_CFLAGS) ngram_tomography.c ngram_addr.c ngram_store.c -o ngram_tomography$(EXE) $(NOCUDA_LDFLAGS) -pthread
+
+ngram_make_table$(EXE): ngram_make_table.c
+	$(CC) $(NOCUDA_CFLAGS) ngram_make_table.c -o ngram_make_table$(EXE) $(NOCUDA_LDFLAGS)
+
+ngram_golden_gen$(EXE): ngram_golden_gen.c ngram_addr.c ngram_forge.h
+	$(CC) $(NOCUDA_CFLAGS) ngram_golden_gen.c ngram_addr.c -o ngram_golden_gen$(EXE) $(NOCUDA_LDFLAGS)
+
+tests/test_ngram_addr$(EXE): tests/test_ngram_addr.c ngram_addr.c ngram_forge.h
+	$(CC) $(CFLAGS) -DNGRAM_GOLDEN_PATH='"$(CURDIR)/tests/ngram_golden_rows.tsv"' tests/test_ngram_addr.c ngram_addr.c -o $@ $(LDFLAGS)
+
+tests/test_ngram_store$(EXE): tests/test_ngram_store.c ngram_store.c ngram_addr.c ngram_forge.h
+	$(CC) $(CFLAGS) tests/test_ngram_store.c ngram_addr.c ngram_store.c -o $@ $(LDFLAGS) -pthread
+
 # Context-size gates: KV layout, growth across requests, and the attention
 # capacity. Includes qwen36.c directly, so no model file is needed.
 tests/test_qwen36_i4_kernel$(EXE): tests/test_qwen36_i4_kernel.c
