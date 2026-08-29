@@ -1,6 +1,4 @@
 /* ngram_store.c - NGRAM-FORGE N1 read-only sparse-row store with
- * tomography telemetry. Experimental surface; intentionally separate from
- * ExpertStore/ColiExpertStore lease semantics (plan architecture rule).
  *
  * Modes:
  *   NSR_RAM    synthetic in-RAM table (pattern rows), pure gather ceiling
@@ -24,6 +22,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #define BATCH_MAX_ROWS 32
@@ -39,6 +38,7 @@ typedef struct {
     int n;
     int slot[BATCH_MAX_ROWS];  /* per requested row: slot index (dedup map) */
     int pending;
+    uint64_t t_issue;
     pthread_mutex_t mtx;
     pthread_cond_t  cv;
 } nsr_batch;
@@ -52,6 +52,10 @@ struct nsr_store {
     /* direct-mapped row cache */
     uint64_t *cache_tag;
     uint8_t  *cache_mem;
+    uint32_t cache_assoc, cache_seen_pad;
+    uint64_t cache_sets, cache_clock;
+    uint32_t *cache_lru;
+    uint8_t *cache_seen;
     /* async machinery */
     pthread_t threads[64];
     pthread_mutex_t q_mtx;
@@ -106,27 +110,74 @@ static int row_read(nsr_store *s, uint64_t row, uint8_t *dst)
 static int cache_lookup(nsr_store *s, uint64_t row, uint8_t *dst)
 {
     if (!s->cache_tag) return 0;
-    uint64_t way = row % s->cfg.cache_rows;
-    if (s->cache_tag[way] == row + 1) { /* tag 0 reserved miss */
-        memcpy(dst, s->cache_mem + way * s->cfg.row_bytes, s->cfg.row_bytes);
-        atomic_add(&s->st.cache_hits, 1);
-        return 1;
+    uint32_t assoc = s->cache_assoc, set = (uint32_t)(row % s->cache_sets);
+    uint64_t *tags = s->cache_tag + (size_t)set * assoc;
+    for (uint32_t w = 0; w < assoc; w++) {
+        if (tags[w] == row + 1) { /* tag 0 reserved miss */
+            uint64_t entry = (uint64_t)set * assoc + w;
+            memcpy(dst, s->cache_mem + entry * s->cfg.row_bytes,
+                   s->cfg.row_bytes);
+            s->cache_lru[entry] = ++s->cache_clock;
+            atomic_add(&s->st.cache_hits, 1);
+            return 1;
+        }
     }
     return 0;
+}
+
+/* peek for issue-time serve (async prefetch), no counter side effects */
+static const uint8_t *cache_peek(nsr_store *s, uint64_t row)
+{
+    if (!s->cache_tag) return NULL;
+    uint32_t assoc = s->cache_assoc, set = (uint32_t)(row % s->cache_sets);
+    uint64_t *tags = s->cache_tag + (size_t)set * assoc;
+    for (uint32_t w = 0; w < assoc; w++)
+        if (tags[w] == row + 1)
+            return s->cache_mem +
+                   ((uint64_t)set * assoc + w) * s->cfg.row_bytes;
+    return NULL;
 }
 
 static void cache_fill(nsr_store *s, uint64_t row, const uint8_t *src)
 {
     if (!s->cache_tag) return;
-    uint64_t way = row % s->cfg.cache_rows;
-    memcpy(s->cache_mem + way * s->cfg.row_bytes, src, s->cfg.row_bytes);
-    s->cache_tag[way] = row + 1;
+    uint32_t assoc = s->cache_assoc, set = (uint32_t)(row % s->cache_sets);
+    uint64_t *tags = s->cache_tag + (size_t)set * assoc;
+    /* second-touch admission: first sighting only marks the sketch */
+    if (s->cfg.cache_policy == NSR_CACHE_ADMIT2) {
+        if (tags[0] != row + 1 && s->cache_seen[set] < 1) {
+            s->cache_seen[set] = 1;
+            return;
+        }
+    }
+    /* pick way: empty else LRU */
+    uint32_t way = 0;
+    uint32_t oldest = UINT32_MAX;
+    for (uint32_t w = 0; w < assoc; w++) {
+        if (tags[w] == row + 1) { way = w; goto do_fill; }
+    }
+    for (uint32_t w = 0; w < assoc; w++) {
+        if (tags[w] == 0) { way = w; oldest = 0; break; }
+        if (s->cache_lru[(uint64_t)set * assoc + w] < oldest) {
+            oldest = s->cache_lru[(uint64_t)set * assoc + w];
+            way = w;
+        }
+    }
+do_fill:;
+    uint64_t entry = (uint64_t)set * assoc + way;
+    memcpy(s->cache_mem + entry * s->cfg.row_bytes, src, s->cfg.row_bytes);
+    tags[way] = row + 1;
+    s->cache_lru[entry] = ++s->cache_clock;
+    if (s->cfg.cache_policy == NSR_CACHE_ADMIT2) s->cache_seen[set] = 2;
 }
 
 static void cache_inval(nsr_store *s)
 {
     if (s->cache_tag)
-        memset(s->cache_tag, 0, s->cfg.cache_rows * sizeof(uint64_t));
+        memset(s->cache_tag, 0,
+               (size_t)s->cache_sets * s->cache_assoc * sizeof(uint64_t));
+    if (s->cache_seen)
+        memset(s->cache_seen, 0, s->cache_sets);
 }
 
 nsr_store *nsr_open(const nsr_cfg *cfg, char *err, size_t errlen)
@@ -150,7 +201,9 @@ nsr_store *nsr_open(const nsr_cfg *cfg, char *err, size_t errlen)
                      (unsigned long long)cfg->rows);
             close(s->fd); free(s); return NULL;
         }
-        posix_fadvise(s->fd, 0, 0, POSIX_FADV_RANDOM);
+        if (cfg->fadv_random >= 0)
+            posix_fadvise(s->fd, 0, 0, cfg->fadv_random
+                                         ? POSIX_FADV_RANDOM : POSIX_FADV_NORMAL);
     }
 
     if (cfg->mode == NSR_MMAP) {
@@ -163,9 +216,15 @@ nsr_store *nsr_open(const nsr_cfg *cfg, char *err, size_t errlen)
     }
 
     if (cfg->cache_rows) {
-        s->cache_tag = calloc(cfg->cache_rows, sizeof(uint64_t));
-        s->cache_mem = malloc((size_t)cfg->cache_rows * cfg->row_bytes);
-        if (!s->cache_tag || !s->cache_mem) {
+        s->cache_assoc = cfg->cache_assoc ? cfg->cache_assoc : 1;
+        s->cache_sets = cfg->cache_rows / s->cache_assoc;
+        if (!s->cache_sets) s->cache_sets = 1;
+        uint64_t entries = s->cache_sets * s->cache_assoc;
+        s->cache_tag = calloc(entries, sizeof(uint64_t));
+        s->cache_mem = malloc((size_t)entries * cfg->row_bytes);
+        s->cache_lru = calloc(entries, sizeof(uint32_t));
+        s->cache_seen = calloc(s->cache_sets, 1);
+        if (!s->cache_tag || !s->cache_mem || !s->cache_lru || !s->cache_seen) {
             snprintf(err, errlen, "oom cache");
             nsr_close(s); return NULL;
         }
@@ -222,8 +281,13 @@ static void *nsr_worker_run(nsr_store *s)
         nsr_batch *B = &s->batches[b];
         pthread_mutex_lock(&B->mtx);
         slot->state = ok ? 2 : 3;
-        if (--B->pending == 0)
+        if (--B->pending == 0) {
+            uint64_t d = now_ns() - B->t_issue;
+            unsigned bin = d / NSR_READY_BIN_NS;
+            if (bin >= NSR_READY_BINS) bin = NSR_READY_BINS - 1;
+            s->st.ready_hist[bin]++;
             pthread_cond_broadcast(&B->cv);
+        }
         pthread_mutex_unlock(&B->mtx);
     }
 }
@@ -248,6 +312,8 @@ void nsr_close(nsr_store *s)
     free(s->batches);
     free(s->cache_tag);
     free(s->cache_mem);
+    free(s->cache_lru);
+    free(s->cache_seen);
     free(s);
 }
 
@@ -273,6 +339,7 @@ int nsr_prefetch(nsr_store *s, const uint64_t *rows, int n_rows)
     B->used = 1;
     B->n = n_rows;
     B->pending = 0;
+    B->t_issue = now_ns();
     int first_slot = b * BATCH_MAX_ROWS;
     for (int i = 0; i < n_rows; i++) {
         int reuse = -1;
@@ -285,11 +352,10 @@ int nsr_prefetch(nsr_store *s, const uint64_t *rows, int n_rows)
         }
         nsr_slot *slot = &s->slots[first_slot + i];
         slot->row = rows[i];
-        if (s->cache_tag && s->cache_tag[rows[i] % s->cfg.cache_rows] == rows[i] + 1) {
+        const uint8_t *cp = cache_peek(s, rows[i]);
+        if (cp) {
             /* hot row: serve from cache at issue, skip physical read */
-            memcpy(slot->buf, s->cache_mem +
-                   (rows[i] % s->cfg.cache_rows) * s->cfg.row_bytes,
-                   s->cfg.row_bytes);
+            memcpy(slot->buf, cp, s->cfg.row_bytes);
             slot->state = 2;
             B->slot[i] = i;
             atomic_add(&s->st.cache_hits, 1);
@@ -321,6 +387,11 @@ int nsr_consume_batch(nsr_store *s, int batch, void **out_block,
 {
     nsr_batch *B = &s->batches[batch];
     uint64_t t0 = now_ns();
+    pthread_mutex_lock(&s->q_mtx);
+    unsigned outstanding = (unsigned)s->q_count;
+    pthread_mutex_unlock(&s->q_mtx);
+    s->st.out_sum += outstanding;
+    if (outstanding > s->st.out_max) s->st.out_max = outstanding;
     pthread_mutex_lock(&B->mtx);
     int all_ready = 1;
     for (int i = 0; i < B->n; i++) {
@@ -391,6 +462,22 @@ int nsr_consume(nsr_store *s, const uint64_t *rows, int n_rows,
 
 void nsr_stats_get(nsr_store *s, nsr_stats *st) { *st = s->st; }
 void nsr_stats_reset(nsr_store *s) { memset(&s->st, 0, sizeof(s->st)); }
+
+/* discard a prefetched batch that will never be consumed (rejected MTP
+ * draft). In-flight worker reads still complete into slots (and can be
+ * absorbed by the issue-time cache), but the batch returns to the free
+ * pool and the row is counted as wasted. */
+void nsr_batch_release(nsr_store *s, int batch)
+{
+    if (batch < 0 || batch >= s->n_batches) return;
+    nsr_batch *B = &s->batches[batch];
+    pthread_mutex_lock(&B->mtx);
+    if (B->used) {
+        B->used = 0;
+        atomic_add(&s->st.wasted_rows, (uint64_t)B->n);
+    }
+    pthread_mutex_unlock(&B->mtx);
+}
 
 void nsr_evict(nsr_store *s)
 {

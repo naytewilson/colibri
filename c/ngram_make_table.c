@@ -20,17 +20,19 @@ int main(int argc, char **argv)
 {
     const char *out = NULL;
     uint64_t rows = 320001536ull;
+    uint32_t row_bytes = ROW_BYTES;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
         else if (!strcmp(argv[i], "--rows") && i + 1 < argc) rows = strtoull(argv[++i], NULL, 10);
-        else { fprintf(stderr, "usage: ngram_make_table --out FILE [--rows N]\n"); return 2; }
+        else if (!strcmp(argv[i], "--row-bytes") && i + 1 < argc) row_bytes = (uint32_t)strtoul(argv[++i], NULL, 10);
+        else { fprintf(stderr, "usage: ngram_make_table --out FILE [--rows N] [--row-bytes RB]\n"); return 2; }
     }
     if (!out) { fprintf(stderr, "missing --out\n"); return 2; }
 
     int fd = open(out, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) { perror("open"); return 1; }
-    size_t chunk_rows = 1u << 20; /* 1 Mi rows = 320 MiB chunk */
-    uint8_t *buf = malloc(chunk_rows * ROW_BYTES);
+    size_t chunk_rows = 1u << 20;
+    uint8_t *buf = malloc(chunk_rows * row_bytes);
     if (!buf) { fprintf(stderr, "oom\n"); return 1; }
 
     size_t off = 0;
@@ -39,12 +41,12 @@ int main(int argc, char **argv)
     for (uint64_t base = 0; base < rows; base += chunk_rows) {
         uint64_t n = rows - base < chunk_rows ? rows - base : chunk_rows;
         for (uint64_t r = 0; r < n; r++) {
-            uint8_t *p = buf + (size_t)r * ROW_BYTES;
+            uint8_t *p = buf + (size_t)r * row_bytes;
             uint64_t id = base + r;
             memcpy(p, &id, 8);
-            memset(p + 8, 0x3c, ROW_BYTES - 8);
+            memset(p + 8, 0x3c, row_bytes - 8);
         }
-        size_t bytes = (size_t)n * ROW_BYTES;
+        size_t bytes = (size_t)n * row_bytes;
         size_t done = 0;
         while (done < bytes) {
             ssize_t w = write(fd, buf + done, bytes - done);
@@ -57,7 +59,7 @@ int main(int argc, char **argv)
         off += bytes;
         if (base % (16ull << 20) == 0) {
             fprintf(stderr, "\r%zu MiB / %llu MiB", off >> 20,
-                    (unsigned long long)(rows * ROW_BYTES) >> 20);
+                    (unsigned long long)((rows * (uint64_t)row_bytes) >> 20));
         }
     }
     fprintf(stderr, "\n");

@@ -94,6 +94,7 @@ static void test_cache_dedup(void)
     cfg.file = "/tmp/ngram_test_cache.bin";
     cfg.row_bytes = NGRAM_ROW_BYTES;
     cfg.cache_rows = 64;
+    cfg.fadv_random = 1;
     char err[128];
     nsr_store *s = nsr_open(&cfg, err, sizeof(err));
     CHECK(s != NULL, "open: %s", err);
@@ -132,6 +133,7 @@ static void test_async_dedup_backpressure(void)
     cfg.row_bytes = NGRAM_ROW_BYTES;
     cfg.workers = 4;
     cfg.queue_depth = 2;
+    cfg.fadv_random = 1;
     char err[128];
     nsr_store *s = nsr_open(&cfg, err, sizeof(err));
     CHECK(s != NULL, "async open: %s", err);
@@ -185,6 +187,7 @@ static void test_async_cache_at_issue(void)
     cfg.cache_rows = 4096;
     cfg.workers = 2;
     cfg.queue_depth = 4;
+    cfg.fadv_random = 1;
     char err[128];
     nsr_store *s = nsr_open(&cfg, err, sizeof(err));
     CHECK(s != NULL, "acache open: %s", err);
@@ -228,6 +231,7 @@ static void test_error_paths(void)
     nsr_cfg cfg = {0};
     cfg.mode = NSR_MMAP;
     cfg.rows = 10;
+    cfg.fadv_random = 1;
     cfg.file = "/tmp/ngram_definitely_missing_table.bin";
     nsr_store *s = nsr_open(&cfg, err, sizeof(err));
     CHECK(s == NULL, "missing file must fail open");

@@ -18,6 +18,14 @@
  *     model.language_model.layers.1.ple.ple_embedding.{layer_multipliers,
  *     ngram_heads_vocab_sizes,ngram_heads_offsets} via HTTP byte-ranges;
  *     sha256 of raw buffers pinned in tests/ngram_golden_rows.tsv header.
+ *   N2 torch-LITERAL closure (2026-08-29): the official functions above
+ *     were AST-extracted VERBATIM from the same modeling file (src sha256
+ *     91e9b1e9c74efe373cd989fe1974a8fa305f4aad43628dbcbd03dac20437814f),
+ *     executed under torch in a bounded reference step, and match this
+ *     implementation on 520/520 golden + 4000/4000 random sequences
+ *     (tests/ngram_torch_rows.tsv; verify with
+ *     -DNGRAM_GOLDEN_PATH=tests/ngram_torch_rows.tsv build of
+ *     tests/test_ngram_addr).
  *
  * Semantics (must match the oracle bit-exactly):
  *   ngram_size=3, heads_per_ngram=8, 16 heads: h<8 bigram, h>=8 trigram.
@@ -100,12 +108,22 @@ typedef enum {
     NSR_ASYNC = 3   /* bounded worker pool pread + batch handles         */
 } nsr_mode;
 
+/* N2.4 cache policy discriminator (direct-mapped == assoc 1, policy 0
+ * reproduces the N1 hot-row cache exactly) */
+typedef enum {
+    NSR_CACHE_DM = 0,     /* fill on every miss (N1 behavior)        */
+    NSR_CACHE_ADMIT2 = 1  /* second-touch admission (frequency-aware)*/
+} nsr_cache_policy;
+
 typedef struct {
     nsr_mode mode;
     const char *file;        /* NULL => synthetic rows (content = f(row)) */
     uint64_t  rows;          /* table row count (sparse addressing space) */
     uint32_t  row_bytes;     /* bytes per row (NGRAM_ROW_BYTES)           */
     uint32_t  cache_rows;    /* direct-mapped hot-row cache, 0 disables   */
+    uint32_t  cache_assoc;   /* ways per set (0==1)                       */
+    nsr_cache_policy cache_policy;
+    int       fadv_random;   /* 1 (default) POSIX_FADV_RANDOM on open     */
     int       workers;       /* NSR_ASYNC only                            */
     int       queue_depth;   /* max outstanding batches (NSR_ASYNC)       */
 } nsr_cfg;
@@ -113,6 +131,8 @@ typedef struct {
 typedef struct nsr_store nsr_store;
 
 /* telemetry (plan measurements) */
+#define NSR_READY_BINS 64
+#define NSR_READY_BIN_NS 32000 /* 32us bins, 2ms top; last bin saturating */
 typedef struct {
     uint64_t lookups;          /* row requests                        */
     uint64_t unique_lookups;   /* dedup survivor requests             */
@@ -128,6 +148,9 @@ typedef struct {
     uint64_t consume_ns_total; /* consume incl. wait                  */
     uint64_t addr_ns_total;    /* address generation                  */
     uint64_t batches, batch_hits; /* prefetch hit accounting          */
+    uint64_t wasted_rows;      /* prefetched then released (MTP reject) */
+    uint64_t out_sum, out_max; /* in-flight queue depth at consume     */
+    uint64_t ready_hist[NSR_READY_BINS]; /* issue->ready per batch     */
 } nsr_stats;
 
 nsr_store *nsr_open(const nsr_cfg *cfg, char *err, size_t errlen);
@@ -146,6 +169,8 @@ int  nsr_consume_batch(nsr_store *s, int batch, void **out_block,
                        uint64_t *wait_ns, uint64_t *lookup_ns, int *hit);
 void nsr_stats_get(nsr_store *s, nsr_stats *st);
 void nsr_stats_reset(nsr_store *s);
+/* discard a never-consumed prefetched batch (rejected MTP draft) */
+void nsr_batch_release(nsr_store *s, int batch);
 /* drop page cache for the backing file (fadvise DONTNEED; also madvise for
  * mmap). RAM mode: no-op. */
 void nsr_evict(nsr_store *s);

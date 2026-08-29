@@ -259,37 +259,38 @@ static void check_golden(void)
     }
     ngram_params p;
     ngram_params_flash_next(&p);
-    char line[512];
+    static char line[4096];
     int cases = 0;
     while (fgets(line, sizeof(line), f)) {
         if (line[0] == '#' || line[0] == '\n') continue;
-        /* format: seq_id len tok0..tok4 \t row0..row15 (rows at final pos) */
-        unsigned long len;
-        long long toks_ll[5];
-        unsigned long long rows_ll[16];
+        /* format: seq_id len tok0..tokN \t row0..row15 (rows at final pos) */
         char *tab = strchr(line, '\t');
         CHECK(tab != NULL, "golden line %d malformed", cases);
         if (!tab) continue;
         *tab = 0;
-        int id_read = -1;
-        int nt = sscanf(line, "%d %lu %lld %lld %lld %lld %lld",
-                        &id_read, &len, toks_ll, toks_ll + 1, toks_ll + 2,
-                        toks_ll + 3, toks_ll + 4);
-        (void)nt; (void)id_read;
-        int nr = sscanf(tab + 1,
-                        "%llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
-                        rows_ll, rows_ll+1, rows_ll+2, rows_ll+3, rows_ll+4,
-                        rows_ll+5, rows_ll+6, rows_ll+7, rows_ll+8, rows_ll+9,
-                        rows_ll+10, rows_ll+11, rows_ll+12, rows_ll+13,
-                        rows_ll+14, rows_ll+15);
+        char *sp = line;
+        strtoll(sp, &sp, 10);                       /* seq id       */
+        long long len = strtoll(sp, &sp, 10);       /* seq length   */
+        if (len < 1 || len > 512) { cases++; continue; }
+        int64_t seq[512];
+        for (long long j = 0; j < len; j++) seq[j] = strtoll(sp, &sp, 10);
+        uint64_t want[16];
+        int nr = 0;
+        /* walk rows from tab+1 */
+        {
+            char *rp = tab + 1;
+            for (int h = 0; h < 16; h++) {
+                char *endp;
+                want[h] = strtoull(rp, &endp, 10);
+                if (endp == rp) break;
+                rp = endp;
+                nr++;
+            }
+        }
         CHECK(nr == 16, "golden row count %d", nr);
         cases++;
-        if (nr != 16 || len == 0 || len > 5) continue;
-        int64_t seq[5];
-        uint64_t want[16];
-        for (int j = 0; j < 5; j++) seq[j] = (int64_t)toks_ll[j];
-        for (int h = 0; h < 16; h++) want[h] = (uint64_t)rows_ll[h];
-        uint64_t got[5 * NGRAM_MAX_HEADS];
+        if (nr != 16) continue;
+        static uint64_t got[512 * NGRAM_MAX_HEADS];
         ngram_rows_seq(&p, seq, (size_t)len, got);
         /* fixture stores the LAST position of the sequence */
         uint64_t *g = got + (len - 1) * 16;
