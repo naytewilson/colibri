@@ -22,7 +22,7 @@ env:
 jobs:
   linux:
     name: Linux
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -61,7 +61,7 @@ jobs:
 
   v4-tiny:
     name: Linux (generated tiny V4 target oracle)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -79,7 +79,7 @@ jobs:
     # clang; libomp for the threaded path (Makefile falls back to
     # single-threaded automatically if it's ever missing).
     name: macOS (colibri + V4 platform gate)
-    runs-on: macos-latest
+    runs-on: [self-hosted, macOS, ARM64, nayte-macos]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4

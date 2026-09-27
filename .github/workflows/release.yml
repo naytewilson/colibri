@@ -13,11 +13,13 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+            labels: [self-hosted, Linux, X64, nayte-linux]
             name: linux-x86_64
             ext: ""
             make_args: "ARCH=x86-64-v3"
             v4: "1"
           - os: macos-latest
+            labels: [self-hosted, macOS, ARM64, nayte-macos]
             name: macos-arm64
             ext: ""
             make_args: ""
@@ -26,6 +28,7 @@ jobs:
             v4: "1"
 
           - os: windows-latest
+            labels: [windows-latest]
             name: windows-x86_64
             ext: ".exe"
             make_args: ""
@@ -33,7 +36,7 @@ jobs:
             # GitHub shells are format strings: 'msys2 {0}', never bare 'msys2'
             # (the v1.0.0 tag build failed on exactly this). Same as ci.yml.
             shell: "msys2 {0}"
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.labels }}
     defaults:
       run:
         shell: ${{ matrix.shell || 'bash' }}
@@ -267,7 +270,7 @@ jobs:
 
   release:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nayte-linux]
     steps:
       - uses: actions/checkout@v4
 
