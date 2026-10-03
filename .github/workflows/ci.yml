@@ -201,6 +201,7 @@ jobs:
           install: >-
             make
             mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-gcc-libs
             mingw-w64-ucrt-x86_64-binutils
       - if: matrix.os == 'macos-latest'
         # HOMEBREW_NO_AUTO_UPDATE=1: a bare `brew install` auto-upgrades every
@@ -254,11 +255,13 @@ jobs:
       - uses: actions/setup-python@v5
         if: matrix.os == 'macos-latest'
         env:
-          # The Neo runner executes as user nayte, but setup-python defaults
-          # its tool cache to /Users/runner (the GitHub-hosted layout) and
-          # dies with "mkdir: /Users/runner: Permission denied". Point it at
-          # a nayte-owned directory instead.
-          AGENT_TOOLSDIRECTORY: /Users/nayte/hostedtoolcache
+          # The Neo runner executes as user nayte, but the runner's default
+          # RUNNER_TOOL_CACHE points at /Users/runner (the GitHub-hosted
+          # layout) and setup-python dies with
+          # "mkdir: /Users/runner: Permission denied". @actions/tool-cache
+          # reads RUNNER_TOOL_CACHE (not AGENT_TOOLSDIRECTORY), so point it
+          # at a nayte-owned directory instead.
+          RUNNER_TOOL_CACHE: /Users/nayte/hostedtoolcache
         with:
           python-version: '3.13'
           cache: pip
@@ -704,6 +707,7 @@ jobs:
           install: >-
             make
             mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-gcc-libs
       - name: make cuda-dll (nvcc + MSVC host)
         shell: msys2 {0}
         run: |
@@ -799,11 +803,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         env:
-          # The Neo runner executes as user nayte, but setup-python defaults
-          # its tool cache to /Users/runner (the GitHub-hosted layout) and
-          # dies with "mkdir: /Users/runner: Permission denied". Point it at
-          # a nayte-owned directory instead.
-          AGENT_TOOLSDIRECTORY: /Users/nayte/hostedtoolcache
+          # The Neo runner executes as user nayte, but the runner's default
+          # RUNNER_TOOL_CACHE points at /Users/runner (the GitHub-hosted
+          # layout) and setup-python dies with
+          # "mkdir: /Users/runner: Permission denied". @actions/tool-cache
+          # reads RUNNER_TOOL_CACHE (not AGENT_TOOLSDIRECTORY), so point it
+          # at a nayte-owned directory instead.
+          RUNNER_TOOL_CACHE: /Users/nayte/hostedtoolcache
         with:
           python-version: '3.12'
           cache: pip
