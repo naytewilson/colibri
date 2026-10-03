@@ -274,24 +274,44 @@ int main(void) {
 
     /* bounded parallelism: 4 unique misses x 50ms loads.
      * Timing-sensitive: on a shared CI runner, scheduling jitter can push a
-     * wave past the bound even when the parallelism is correct. Retry the
-     * measurement (with fresh keys each attempt, so every attempt measures
-     * misses) -- the bounds themselves are unchanged, so a real regression
-     * still fails every attempt. Attempt 0 uses the original key set; the
-     * retry sets avoid keys later blocks rely on (K(1,5), K(2,0..2), K(3,3)). */
+     * wave past an absolute bound even when the parallelism is correct. So
+     * the bounds are RELATIVE to a single-miss latency measured on this
+     * machine in the same attempt: max_parallel=2 must take ~2 waves
+     * (1.5x..3.2x of one miss) and max_parallel=4 must take ~1 wave
+     * (< 1.8x of one miss). A real parallelism regression still fails every
+     * attempt -- serialized loads take ~4x (fails the upper bound), a cap
+     * stuck at 2 takes ~2x on the second batch (fails the <1.8x bound) --
+     * and the physical-load counter proves every attempt measured misses,
+     * not cache hits. Attempts use fresh keys; the key sets avoid keys
+     * earlier/later blocks rely on (K(0,0), K(1,1), K(2,0..2), K(3,3),
+     * K(1,5)). */
     ms.load_sleep_ms = 50;
     {
         static const int base[3][2] = {{0, 4}, {1, 6}, {2, 4}}; /* {layer, expert-lo} */
         int timing_ok = 0;
         for (int attempt = 0; attempt < 3 && !timing_ok; attempt++) {
             int L = base[attempt][0], E = base[attempt][1];
+            ColiExpertStoreStats ss0, ss1;
+            mock_stats(&store, &ss0);
+
+            /* single-miss latency on this machine, right now */
+            ColiExpertKey k1 = K(L, E + 8);
+            ColiExpertView v1;
+            ColiAdmissionConfig pcfg1 = {0};
+            ColiAdmission *pa1 = coli_admission_new(&store, mock_fill, &ms, &pcfg1);
+            double t1 = now_ms();
+            int ok = coli_admission_acquire_batch(pa1, &k1, 1, &v1) == 1;
+            double w1 = now_ms() - t1;
+            coli_expert_release(&store, &v1);
+            coli_admission_free(pa1);
+
             ColiExpertKey keys[4] = {K(L, E), K(L, E+1), K(L, E+2), K(L, E+3)};
             ColiExpertView views[4];
             ColiAdmissionConfig pcfg = {0};
             pcfg.max_parallel = 2;
             ColiAdmission *pa = coli_admission_new(&store, mock_fill, &ms, &pcfg);
-            double t1 = now_ms();
-            int ok = coli_admission_acquire_batch(pa, keys, 4, views) == 4;
+            t1 = now_ms();
+            ok = ok && coli_admission_acquire_batch(pa, keys, 4, views) == 4;
             double wall2 = now_ms() - t1;
             for (int i = 0; i < 4; i++) coli_expert_release(&store, &views[i]);
             coli_admission_free(pa);
@@ -307,8 +327,14 @@ int main(void) {
             for (int i = 0; i < 4; i++) coli_expert_release(&store, &views2[i]);
             coli_admission_free(pa4);
 
-            timing_ok = ok && wall2 >= 95.0 && wall2 < 190.0 /* 2 waves of 50ms */
-                             && wall4 < 95.0;               /* one wave */
+            mock_stats(&store, &ss1);
+            uint64_t loads = ss1.physical_loads - ss0.physical_loads;
+            timing_ok = ok && w1 > 0.0 && loads == 9 /* 1 + 4 + 4, all misses */
+                             && wall2 > 1.5 * w1 && wall2 < 3.2 * w1 /* ~2 waves */
+                             && wall4 < 1.8 * w1;                    /* ~1 wave */
+            if (!timing_ok)
+                fprintf(stderr, "admission timing attempt %d: w1=%.1f loads=%llu wall2=%.1f wall4=%.1f\n",
+                        attempt, w1, (unsigned long long)loads, wall2, wall4);
         }
         CHECK(timing_ok);
     }
