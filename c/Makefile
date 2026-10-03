@@ -439,6 +439,18 @@ ifeq ($(COLI_V4_SUPPORTED),1)
 TEST_BINS += tests/test_deepseek_v4$(EXE) tests/test_v4_ownership$(EXE)
 endif
 
+# tests/test_qwen36_i4_kernel.c is x86-intrinsics-only (<immintrin.h>): it
+# cannot compile on ARM. The ARM integer-kernel gate is test_int_kernel_exact.c
+# with the NEON branches live (oracle-arm job in .github/workflows/ci.yml).
+ifeq (,$(X86_64))
+TEST_EXCLUDE += test_qwen36_i4_kernel
+endif
+# tests/test_expert_telemetry.c captures via open_memstream, which MinGW UCRT
+# does not provide. The byte-identity pin stays gated on Linux/macOS.
+ifneq (,$(IS_WIN))
+TEST_EXCLUDE += test_expert_telemetry
+endif
+
 # Windows CUDA/HIP DLL path: host links the loader, NOT cudart or amdhip64.
 # (CUDA_DLL/HIP_DLL mutual exclusion is enforced at the HIP_DLL declaration.)
 ifneq ($(IS_WIN),)
@@ -626,6 +638,25 @@ endif
 # phony targets — 'glm' kept for backward compatibility
 colibri: colibri$(EXE)
 glm: colibri$(EXE)
+
+# Bare-name aliases so `make olmoe` / `make qwen36` resolve to the explicit
+# multi-object rules on platforms where $(EXE) is non-empty (Windows):
+# CI's "Build every engine" loop uses the bare names, and without these make
+# falls back to the built-in single-.c rule, which fails to link the expert
+# backend objects (undefined reference to coli_expert_backend_pread_* /
+# coli_admission_*). Mirrors the colibri alias above.
+olmoe: olmoe$(EXE)
+qwen36: qwen36$(EXE)
+# On EXE platforms the bare name must not fall through to the built-in
+# single-.c implicit rule after the alias builds olmoe.exe/qwen36.exe --
+# that rule would link a second, extensionless binary without the backend
+# objects and fail. .PHONY suppresses implicit-rule search for the bare name.
+# (On EXE-empty platforms the alias is a plain self-dependency, dropped with
+# the same circular warning the colibri alias already emits, and normal
+# freshness checks apply.)
+ifneq ($(EXE),)
+.PHONY: olmoe qwen36
+endif
 
 # Config stamp: make only tracks file timestamps, not flag changes. Without this,
 # `make colibri.exe CUDA_DLL=1` after a prior CPU-only build reports "up to date"
