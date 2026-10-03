@@ -96,23 +96,36 @@ else ifneq ($(IS_WIN),)
 # a v3 build simply compiles out the VNNI path - safe on any x86-64.
 CC      = gcc
 ARCH   ?= x86-64-v3
-CFLAGS  = -D_FILE_OFFSET_BITS=64 -O3 -march=$(ARCH) -fopenmp -Wall -Wextra -Wno-unused-parameter -Wno-misleading-indentation -Wno-unused-function $(EXTRA_CFLAGS)
+CFLAGS  = -D_FILE_OFFSET_BITS=64 -O3 -march=$(ARCH) $(WIN_OPENMP) -Wall -Wextra -Wno-unused-parameter -Wno-misleading-indentation -Wno-unused-function $(EXTRA_CFLAGS)
 # -lpsapi: compat.h calls GetProcessMemoryInfo (rss_gb). It's linked via
 # #pragma comment(lib,"psapi.lib") for MSVC, but MinGW gcc ignores that pragma
 # (warns), so link psapi explicitly or the build fails undefined-reference on
 # modern GCC (e.g. 16.x under UCRT). Harmless where the pragma also resolves it.
 #
-# Static libgomp: msys2's UCRT64 gcc 16.2+ no longer ships libgomp.a (only
-# libgomp.spec + the DLL import lib), so a `-static -fopenmp` link dies with
-# "cannot find -lgomp". Detect the static archive through the driver and fall
-# back to dynamic libgomp when it is absent; the fully-static intent is kept
-# wherever the archive exists.
-GOMP_A := $(shell $(CC) -print-file-name=libgomp.a 2>/dev/null)
-ifeq ($(GOMP_A),libgomp.a)
-LDFLAGS = -lm -fopenmp -static-libgcc -lpsapi $(EXTRA_LDFLAGS)
+# OpenMP on Windows needs a linkable libgomp. msys2's UCRT64 gcc 16.2+
+# stopped shipping the libgomp link libraries in the default install set, so
+# -fopenmp dies at link time with "cannot find -lgomp" (observed on both the
+# -static and the -static-libgcc link lines). Probe the actual link and
+# degrade gracefully (mirrors the Darwin single-thread fallback when its
+# OpenMP runtime is absent):
+#   linkable, static archive present -> -static -fopenmp (historical)
+#   linkable, static archive absent  -> dynamic libgomp (-static-libgcc)
+#   not linkable at all              -> single-threaded build, loud warning
+WIN_GOMP_LINK := $(shell printf 'int main(void){return 0;}\n' | $(CC) -fopenmp -x c - -o /dev/null >/dev/null 2>&1 && echo ok || echo no)
+ifeq ($(WIN_GOMP_LINK),ok)
+WIN_OPENMP = -fopenmp
+WIN_GOMP_A := $(shell $(CC) -print-file-name=libgomp.a 2>/dev/null)
+ifeq ($(WIN_GOMP_A),libgomp.a)
+WIN_STATIC = -static-libgcc
 else
-LDFLAGS = -lm -fopenmp -static -lpsapi $(EXTRA_LDFLAGS)
+WIN_STATIC = -static
 endif
+else
+$(warning libgomp is not linkable with this MinGW toolchain: building single-threaded)
+WIN_OPENMP =
+WIN_STATIC =
+endif
+LDFLAGS = -lm $(WIN_OPENMP) $(WIN_STATIC) -lpsapi $(EXTRA_LDFLAGS)
 ifeq ($(LTO),1)
 CFLAGS  += -flto
 LDFLAGS += -flto
@@ -650,23 +663,25 @@ endif
 colibri: colibri$(EXE)
 glm: colibri$(EXE)
 
-# Bare-name aliases so `make olmoe` / `make qwen36` resolve to the explicit
-# multi-object rules on platforms where $(EXE) is non-empty (Windows):
-# CI's "Build every engine" loop uses the bare names, and without these make
-# falls back to the built-in single-.c rule, which fails to link the expert
-# backend objects (undefined reference to coli_expert_backend_pread_* /
-# coli_admission_*). Mirrors the colibri alias above.
+# Bare-name aliases so `make olmoe` / `make qwen36` / `make inkling` /
+# `make kimi_k3` resolve to the explicit multi-object rules on platforms where
+# $(EXE) is non-empty (Windows): CI's "Build every engine" loop uses the bare
+# names, and without these make falls back to the built-in single-.c rule,
+# which fails to link the expert backend objects (undefined reference to
+# coli_expert_backend_pread_* / coli_admission_*). Mirrors the colibri alias above.
 olmoe: olmoe$(EXE)
 qwen36: qwen36$(EXE)
+inkling: inkling$(EXE)
+kimi_k3: kimi_k3$(EXE)
 # On EXE platforms the bare name must not fall through to the built-in
-# single-.c implicit rule after the alias builds olmoe.exe/qwen36.exe --
-# that rule would link a second, extensionless binary without the backend
-# objects and fail. .PHONY suppresses implicit-rule search for the bare name.
+# single-.c implicit rule after the alias builds the .exe -- that rule would
+# link a second, extensionless binary without the backend objects and fail.
+# .PHONY suppresses implicit-rule search for the bare name.
 # (On EXE-empty platforms the alias is a plain self-dependency, dropped with
 # the same circular warning the colibri alias already emits, and normal
 # freshness checks apply.)
 ifneq ($(EXE),)
-.PHONY: olmoe qwen36
+.PHONY: olmoe qwen36 inkling kimi_k3
 endif
 
 # Config stamp: make only tracks file timestamps, not flag changes. Without this,
