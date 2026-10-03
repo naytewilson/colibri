@@ -254,14 +254,13 @@ jobs:
       # oracle (round 2 of this PR measured exactly that).
       - uses: actions/setup-python@v5
         if: matrix.os == 'macos-latest'
-        env:
-          # The Neo runner executes as user nayte, but the runner's default
-          # RUNNER_TOOL_CACHE points at /Users/runner (the GitHub-hosted
-          # layout) and setup-python dies with
-          # "mkdir: /Users/runner: Permission denied". @actions/tool-cache
-          # reads RUNNER_TOOL_CACHE (not AGENT_TOOLSDIRECTORY), so point it
-          # at a nayte-owned directory instead.
-          RUNNER_TOOL_CACHE: /Users/nayte/hostedtoolcache
+        # NOTE: setup-python on the Neo REQUIRES the one-time machine provisioning:
+        #   sudo mkdir -p /Users/runner/hostedtoolcache && sudo chown nayte:staff /Users/runner
+        # The macOS Python packages are non-relocatable (fixed dylib paths) and MUST
+        # live in /Users/runner/hostedtoolcache (see setup-python advanced-usage.md).
+        # Overriding RUNNER_TOOL_CACHE was tried and reverted: the downloaded Python
+        # has broken library paths outside /Users/runner. Without the provisioning,
+        # this step fails with "mkdir: /Users/runner: Permission denied".
         with:
           python-version: '3.13'
           cache: pip
@@ -327,16 +326,23 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install CUDA toolkit (compiler only)
         # Jimver/cuda-toolkit installs via dpkg, which needs sudo; the fleet
-        # runner has none. This job only needs nvcc for a syntax compile, so
-        # the pip-shipped nvcc + CUDA runtime headers are sufficient and
-        # install rootless. Pin matches the 12.6 line the action used.
+        # runner has none. The pip nvidia-cuda-nvcc-cu12 wheel was tried and
+        # REJECTED: it ships ptxas/headers/NVVM but NOT the nvcc binary itself
+        # (verified: 36 files in 12.6.85, no bin/nvcc). This job only needs
+        # nvcc for a syntax compile, so install the real CUDA compiler via
+        # micromamba (single static binary, rootless) from NVIDIA's conda
+        # channel. The install persists in $HOME across JIT jobs; the guard
+        # skips re-install when nvcc is already present.
         run: |
-          pip3 install 'nvidia-cuda-nvcc-cu12==12.6.*' 'nvidia-cuda-runtime-cu12==12.6.*'
-          NVCC_BIN="$(python3 -c 'import nvidia.cuda_nvcc, os; print(os.path.join(os.path.dirname(nvidia.cuda_nvcc.__file__), "bin"))')"
-          CUDA_INCLUDE="$(python3 -c 'import nvidia.cuda_runtime, os; print(os.path.join(os.path.dirname(nvidia.cuda_runtime.__file__), "include"))')"
-          test -x "$NVCC_BIN/nvcc" || { echo "FAIL: nvcc not installed"; exit 1; }
-          echo "$NVCC_BIN" >> "$GITHUB_PATH"
-          echo "CUDA_INCLUDE=$CUDA_INCLUDE" >> "$GITHUB_ENV"
+          CUDA_ENV="$HOME/cuda-env"
+          if [ ! -x "$CUDA_ENV/bin/nvcc" ]; then
+            curl -L https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj bin/micromamba
+            ./bin/micromamba create -y -p "$CUDA_ENV" -c nvidia/label/cuda-12.6.0 -c conda-forge cuda-nvcc
+            rm -rf bin/micromamba
+          fi
+          test -x "$CUDA_ENV/bin/nvcc" || { echo "FAIL: nvcc not installed"; exit 1; }
+          echo "$CUDA_ENV/bin" >> "$GITHUB_PATH"
+          echo "CUDA_INCLUDE=$CUDA_ENV/targets/x86_64-linux/include" >> "$GITHUB_ENV"
       - name: Compile backend_cuda.cu (syntax only, no GPU)
         run: |
           cd c
@@ -802,14 +808,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        env:
-          # The Neo runner executes as user nayte, but the runner's default
-          # RUNNER_TOOL_CACHE points at /Users/runner (the GitHub-hosted
-          # layout) and setup-python dies with
-          # "mkdir: /Users/runner: Permission denied". @actions/tool-cache
-          # reads RUNNER_TOOL_CACHE (not AGENT_TOOLSDIRECTORY), so point it
-          # at a nayte-owned directory instead.
-          RUNNER_TOOL_CACHE: /Users/nayte/hostedtoolcache
+        # NOTE: setup-python on the Neo REQUIRES the one-time machine provisioning:
+        #   sudo mkdir -p /Users/runner/hostedtoolcache && sudo chown nayte:staff /Users/runner
+        # The macOS Python packages are non-relocatable (fixed dylib paths) and MUST
+        # live in /Users/runner/hostedtoolcache (see setup-python advanced-usage.md).
+        # Overriding RUNNER_TOOL_CACHE was tried and reverted: the downloaded Python
+        # has broken library paths outside /Users/runner. Without the provisioning,
+        # this step fails with "mkdir: /Users/runner: Permission denied".
         with:
           python-version: '3.12'
           cache: pip
