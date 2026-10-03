@@ -20,7 +20,7 @@ static int g_fail = 0;
         }                                                                 \
     } while (0)
 
-static char *capture(char **buf, size_t *len) {
+static FILE *capture(char **buf, size_t *len) {
     /* open_memstream: POSIX.1-2008; available on macOS + glibc/musl */
     FILE *f = open_memstream(buf, len);
     if (!f) return NULL;
