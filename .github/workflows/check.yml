@@ -84,6 +84,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: install libomp
-        run: brew install libomp
+        # HOMEBREW_NO_AUTO_UPDATE=1: a bare `brew install` auto-upgrades every
+        # outdated dependent (numpy -> ...), and the link step then fails on
+        # files the machine owner installed outside brew
+        # (observed: "Could not symlink bin/f2py ... already exists").
+        # libomp itself pours from a bottle; the runner must not touch the
+        # owner's toolchain to get there.
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install libomp
       - name: make check (V4 execution gated off)
         run: make -C c check
