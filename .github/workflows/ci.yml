@@ -22,43 +22,28 @@ jobs:
   # that inkling and kimi_k3 did not compile under msys2/UCRT64 at all was invisible
   # for months, and binary releases silently shipped the GLM engine alone (#720).
   # Each engine is built separately so one failure does not mask the others.
-  # The container image. Nothing built docker/Dockerfile.slim in CI before, so a
-  # rename or a moved file under c/ could break the image and only a user would
-  # find out -- the same gap the .mm and fuzz-rans paths had.
+  # Dockerfile lint. This job used to build the slim image and run it; the
+  # fleet has no Docker daemon (docker: command not found), so build/run cannot
+  # execute here. The Dockerfiles still ship to users (docker/Dockerfile is the
+  # README's zero-setup path and is followed verbatim), so they at least get a
+  # syntax lint. hadolint-action itself builds a container, which needs Docker
+  # too — the statically-linked hadolint binary is used directly instead.
   #
-  # Only Dockerfile.slim is built here, on purpose. docker/Dockerfile does
-  # `git clone` of the upstream repo (that is its point -- README's zero-setup
-  # path downloads that one file and needs no checkout), so building it in CI
-  # would test upstream/main rather than this PR. Its Dockerfile is linted for
-  # syntax instead.
+  # Only Dockerfile.slim was ever built here, on purpose. docker/Dockerfile
+  # does `git clone` of the upstream repo (that is its point), so building it
+  # in CI would test upstream/main rather than this PR. Both are linted.
   docker:
-    name: Container image
+    name: Dockerfile lint
     runs-on: [self-hosted, Linux, X64, nayte-linux]
     steps:
       - uses: actions/checkout@v4
-      - name: Build the slim image
-        run: docker build -t colibri:ci -f docker/Dockerfile.slim .
-      - name: The image actually runs
-        # Building is not the same as working: a missing COPY only shows up when
-        # the entrypoint tries to import what is not there. --version needs no
-        # model, so it exercises the launcher end to end without a 372 GB mount.
-        run: |
-          docker run --rm colibri:ci --version
-          docker run --rm colibri:ci --help > /dev/null
-          # The gateway has runtime modules that launcher-only commands do not
-          # import. Exercise that boundary so the advertised serve path cannot
-          # ship with a missing Python file.
-          docker run --rm --entrypoint python3 colibri:ci -c \
-            "import openai_server; print('gateway imports')"
-      - name: The engine binary is in the image and is executable
-        run: docker run --rm --entrypoint /app/colibri colibri:ci --help 2>&1 | head -5 || true
       - name: Lint both Dockerfiles
-        # docker/Dockerfile is not built here (see above) but it is still shipped
-        # and followed by users, so it gets checked for syntax at least.
-        uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: docker/Dockerfile
-          failure-threshold: error
+        run: |
+          curl -sSL -o /tmp/hadolint \
+            https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-x86_64
+          chmod +x /tmp/hadolint
+          /tmp/hadolint --failure-threshold error docker/Dockerfile
+          /tmp/hadolint --failure-threshold error docker/Dockerfile.slim
   # The C suite under AddressSanitizer + UndefinedBehaviorSanitizer.
   #
   # Before this the only sanitized code in CI was nothing at all: fuzz-rans has
@@ -103,16 +88,48 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install the Vulkan toolchain and a software driver
         run: |
-          sudo apt-get update
           # libvulkan-dev: headers + loader. glslc: compiles the .comp shaders to SPIR-V --
           # neither is present on the runner by default, which is half of why VK=1 was
           # never built here. mesa-vulkan-drivers carries Lavapipe (lvp).
-          sudo apt-get install -y --no-install-recommends \
-            libvulkan-dev glslc mesa-vulkan-drivers
+          #
+          # The fleet runner user (anvil-ci) has no sudo, so packages are fetched
+          # and unpacked into $HOME/vkroot instead of installed system-wide
+          # (apt-get download + dpkg-deb -x need no root). Where sudo IS
+          # available the plain system install is still used.
+          if sudo -n true 2>/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends \
+              libvulkan-dev glslc mesa-vulkan-drivers
+            echo "VK_ICD_JSON=/usr/share/vulkan/icd.d/lvp_icd.json" >> "$GITHUB_ENV"
+          else
+            set -e
+            VKROOT="$HOME/vkroot"
+            mkdir -p "$VKROOT/apt/lists/partial" "$VKROOT/debs"
+            APT_OPTS="-o Dir::State::Lists=$VKROOT/apt/lists -o Dir::Cache=$VKROOT/apt/cache -o Debug::NoLocking=1"
+            # shellcheck disable=SC2086
+            apt-get $APT_OPTS update
+            cd "$VKROOT/debs"
+            # shellcheck disable=SC2086
+            apt-get $APT_OPTS download libvulkan-dev libvulkan1 mesa-vulkan-drivers glslc
+            for d in *.deb; do dpkg-deb -x "$d" "$VKROOT"; done
+            test -x "$VKROOT/usr/bin/glslc" || { echo "FAIL: glslc not unpacked"; exit 1; }
+            test -f "$VKROOT/usr/share/vulkan/icd.d/lvp_icd.json" || { echo "FAIL: lvp ICD not unpacked"; exit 1; }
+            echo "$VKROOT/usr/bin" >> "$GITHUB_PATH"
+            echo "VKROOT=$VKROOT" >> "$GITHUB_ENV"
+            echo "VK_ICD_JSON=$VKROOT/usr/share/vulkan/icd.d/lvp_icd.json" >> "$GITHUB_ENV"
+          fi
       - name: Build with VK=1
         run: |
           cd c
-          make colibri VK=1
+          # Rootless install: point the compiler, linker and loader at $VKROOT.
+          # (System install: VKROOT is unset and the toolchain is on the
+          # default paths, so these expand to nothing.)
+          EXTRA_CFLAGS="${VKROOT:+-I$VKROOT/usr/include}"
+          EXTRA_LDFLAGS="${VKROOT:+-L$VKROOT/usr/lib/x86_64-linux-gnu -Wl,-rpath,$VKROOT/usr/lib/x86_64-linux-gnu}"
+          if [ -n "${VKROOT:-}" ]; then
+            export LD_LIBRARY_PATH="$VKROOT/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          fi
+          make colibri VK=1 EXTRA_CFLAGS="$EXTRA_CFLAGS" EXTRA_LDFLAGS="$EXTRA_LDFLAGS"
           # The shaders are a separate failure mode from the C: glslc can reject a .comp
           # while backend_vulkan.c compiles perfectly. Assert all four exist.
           ls -l shaders/qmatmul.spv shaders/qmatmul_gate_up.spv \
@@ -126,7 +143,10 @@ jobs:
           # What is asserted is the [VK] banner, not a successful load.
           mkdir -p /tmp/vkprobe
           echo '{"model_type":"glm_moe_dsa"}' > /tmp/vkprobe/config.json
-          VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
+          if [ -n "${VKROOT:-}" ]; then
+            export LD_LIBRARY_PATH="$VKROOT/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          fi
+          VK_ICD_FILENAMES="$VK_ICD_JSON" \
           COLI_NO_OMP_TUNE=1 COLI_VULKAN=1 SNAP=/tmp/vkprobe \
             timeout 120 ./colibri > vk.log 2>&1 || true
           cat vk.log
@@ -183,7 +203,10 @@ jobs:
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-binutils
       - if: matrix.os == 'macos-latest'
-        run: brew install libomp
+        # HOMEBREW_NO_AUTO_UPDATE=1: a bare `brew install` auto-upgrades every
+        # outdated dependent, and the link step then fails on files the machine
+        # owner installed outside brew (observed: bin/f2py already exists).
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install libomp
       # "Every engine" was four of five. deepseek-v4's only CI is the Linux
       # v4-tiny job in check.yml, so the MSYS2 build of that engine had no job
       # anywhere -- the release tag compiled it on Windows for the first time.
@@ -230,6 +253,12 @@ jobs:
       # oracle (round 2 of this PR measured exactly that).
       - uses: actions/setup-python@v5
         if: matrix.os == 'macos-latest'
+        env:
+          # The Neo runner executes as user nayte, but setup-python defaults
+          # its tool cache to /Users/runner (the GitHub-hosted layout) and
+          # dies with "mkdir: /Users/runner: Permission denied". Point it at
+          # a nayte-owned directory instead.
+          AGENT_TOOLSDIRECTORY: /Users/nayte/hostedtoolcache
         with:
           python-version: '3.13'
           cache: pip
@@ -294,13 +323,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install CUDA toolkit (compiler only)
-        uses: Jimver/cuda-toolkit@v0.2.19
-        with:
-          # v0.2.19's version table stops at 12.6.2 — 12.6.3 fails the install
-          # step with "Version not available" before nvcc is ever reached.
-          cuda: '12.6.2'
-          method: network
-          sub-packages: '["nvcc"]'
+        # Jimver/cuda-toolkit installs via dpkg, which needs sudo; the fleet
+        # runner has none. This job only needs nvcc for a syntax compile, so
+        # the pip-shipped nvcc + CUDA runtime headers are sufficient and
+        # install rootless. Pin matches the 12.6 line the action used.
+        run: |
+          pip3 install 'nvidia-cuda-nvcc-cu12==12.6.*' 'nvidia-cuda-runtime-cu12==12.6.*'
+          NVCC_BIN="$(python3 -c 'import nvidia.cuda_nvcc, os; print(os.path.join(os.path.dirname(nvidia.cuda_nvcc.__file__), "bin"))')"
+          CUDA_INCLUDE="$(python3 -c 'import nvidia.cuda_runtime, os; print(os.path.join(os.path.dirname(nvidia.cuda_runtime.__file__), "include"))')"
+          test -x "$NVCC_BIN/nvcc" || { echo "FAIL: nvcc not installed"; exit 1; }
+          echo "$NVCC_BIN" >> "$GITHUB_PATH"
+          echo "CUDA_INCLUDE=$CUDA_INCLUDE" >> "$GITHUB_ENV"
       - name: Compile backend_cuda.cu (syntax only, no GPU)
         run: |
           cd c
@@ -308,7 +341,7 @@ jobs:
           # LAST command, so head's 0 masked every nvcc error and the job could
           # only ever be green. A check that cannot fail is worse than no check —
           # it buys false confidence in the one file nothing else compiles.
-          nvcc -O2 -std=c++17 -arch=sm_80 -c backend_cuda.cu -o /dev/null \
+          nvcc -O2 -std=c++17 -arch=sm_80 -I"$CUDA_INCLUDE" -c backend_cuda.cu -o /dev/null \
             -Xcompiler=-Wall,-Wextra
           echo "CUDA syntax check passed"
       - name: Compile backend_cuda_ink.cu (syntax only, no GPU)
@@ -316,15 +349,28 @@ jobs:
           cd c
           # inkling's own CUDA backend (bf16 residents + int4 expert GEMM); same
           # no-pipeline rule as above so a compile error can actually fail the job.
-          nvcc -O2 -std=c++17 -arch=sm_80 -c backend_cuda_ink.cu -o /dev/null \
+          nvcc -O2 -std=c++17 -arch=sm_80 -I"$CUDA_INCLUDE" -c backend_cuda_ink.cu -o /dev/null \
             -Xcompiler=-Wall,-Wextra
           echo "inkling CUDA syntax check passed"
 
   qwen36-tiny-check:
     name: Qwen3.6 tiny oracle (token-exact + ASan/UBSan)
     runs-on: [self-hosted, Linux, X64, nayte-linux]
+    env:
+      # anvil-ci has a disk quota and no sudo: temp files go to the workspace
+      # (which has headroom) instead of /tmp (which does not).
+      TMPDIR: ${{ github.workspace }}/.tmp
     steps:
       - uses: actions/checkout@v4
+      - name: Free runner disk (rootless)
+        run: |
+          # The fleet runner user has no sudo and a disk quota, so the
+          # hosted-runner `sudo rm -rf /usr/share/dotnet ...` form cannot work
+          # here. Reclaim user-owned space instead (pip/npm caches, stale temp
+          # files) and prepare the workspace TMPDIR used by the pip install.
+          rm -rf ~/.cache/pip ~/.npm /tmp/pip-* /tmp/tmp.* 2>/dev/null || true
+          mkdir -p "$TMPDIR"
+          df -h "$GITHUB_WORKSPACE" /tmp | tail -2
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -428,8 +474,21 @@ jobs:
   inkling-oracle:
     name: Inkling oracle (token-exact vs transformers)
     runs-on: [self-hosted, Linux, X64, nayte-linux]
+    env:
+      # anvil-ci has a disk quota and no sudo: temp files go to the workspace
+      # (which has headroom) instead of /tmp (which does not).
+      TMPDIR: ${{ github.workspace }}/.tmp
     steps:
       - uses: actions/checkout@v4
+      - name: Free runner disk (rootless)
+        run: |
+          # The fleet runner user has no sudo and a disk quota, so the
+          # hosted-runner `sudo rm -rf /usr/share/dotnet ...` form cannot work
+          # here. Reclaim user-owned space instead (pip/npm caches, stale temp
+          # files) and prepare the workspace TMPDIR used by the pip install.
+          rm -rf ~/.cache/pip ~/.npm /tmp/pip-* /tmp/tmp.* 2>/dev/null || true
+          mkdir -p "$TMPDIR"
+          df -h "$GITHUB_WORKSPACE" /tmp | tail -2
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -478,8 +537,21 @@ jobs:
   efficiency:
     name: Efficiency suite (tiny oracle)
     runs-on: [self-hosted, Linux, X64, nayte-linux]
+    env:
+      # anvil-ci has a disk quota and no sudo: temp files go to the workspace
+      # (which has headroom) instead of /tmp (which does not).
+      TMPDIR: ${{ github.workspace }}/.tmp
     steps:
       - uses: actions/checkout@v4
+      - name: Free runner disk (rootless)
+        run: |
+          # The fleet runner user has no sudo and a disk quota, so the
+          # hosted-runner `sudo rm -rf /usr/share/dotnet ...` form cannot work
+          # here. Reclaim user-owned space instead (pip/npm caches, stale temp
+          # files) and prepare the workspace TMPDIR used by the pip install.
+          rm -rf ~/.cache/pip ~/.npm /tmp/pip-* /tmp/tmp.* 2>/dev/null || true
+          mkdir -p "$TMPDIR"
+          df -h "$GITHUB_WORKSPACE" /tmp | tail -2
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -538,8 +610,21 @@ jobs:
   cluster-parity:
     name: Cluster parity gate (fmt6/fmt4, token-exact)
     runs-on: [self-hosted, Linux, X64, nayte-linux]
+    env:
+      # anvil-ci has a disk quota and no sudo: temp files go to the workspace
+      # (which has headroom) instead of /tmp (which does not).
+      TMPDIR: ${{ github.workspace }}/.tmp
     steps:
       - uses: actions/checkout@v4
+      - name: Free runner disk (rootless)
+        run: |
+          # The fleet runner user has no sudo and a disk quota, so the
+          # hosted-runner `sudo rm -rf /usr/share/dotnet ...` form cannot work
+          # here. Reclaim user-owned space instead (pip/npm caches, stale temp
+          # files) and prepare the workspace TMPDIR used by the pip install.
+          rm -rf ~/.cache/pip ~/.npm /tmp/pip-* /tmp/tmp.* 2>/dev/null || true
+          mkdir -p "$TMPDIR"
+          df -h "$GITHUB_WORKSPACE" /tmp | tail -2
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -554,41 +639,16 @@ jobs:
       - name: Cluster parity gate (token-exact)
         run: cd c && python3 -m unittest -v tests.test_cluster_sharding
 
-  engine-hip-syntax:
-    name: HIP syntax check
-    runs-on: [self-hosted, Linux, X64, nayte-linux]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Free runner disk
-        # rocm/dev images are large; hosted runners need the headroom freed
-        # BEFORE the pull (which is why this is not a container: job).
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-      - name: Compile backend_cuda.cu + test binary with hipcc (no GPU)
-        run: |
-          # Tag pinned: `latest` outgrew the runner disk once already. The
-          # gcc-side engine link is skipped: containerized gcc/ld cannot link
-          # ROCm runtime libs (both 22.04 and 24.04 bases); the hipcc-driver
-          # link of the test binary below covers the single-source claim, and
-          # the engine link is exercised on real ROCm hardware (GPU_BACKENDS.md).
-          docker run --rm -v "$PWD":/src -w /src rocm/dev-ubuntu-24.04:6.2 bash -c '
-            apt-get update && apt-get install -y --no-install-recommends make gcc g++ rocwmma-dev binutils &&
-            make -C c gpu-compile HIP=1 HIP_ARCH=gfx1100 &&
-            # The engine link is skipped here (see above), so assert the property
-            # that link needs instead: backend_cuda.o must be position-independent.
-            # hipcc emits a non-PIC/PIE object unless told otherwise, while gcc
-            # links -pie by default on the distros users build on, so absolute
-            # 32-bit relocations here mean `make HIP=1 colibri` dies with
-            #   R_X86_64_32 ... can not be used when making a PIE object
-            # That is exactly what happened before -fPIE was added to HIPCCFLAGS:
-            # this job stayed green over a HIP build that could not link at all,
-            # because gpu-compile links the TEST binary with the hipcc driver
-            # (PIC-agnostic) and never runs the gcc engine link. One readelf keeps
-            # that regression from silently coming back.
-            if readelf -r c/backend_cuda.o | grep -qE "R_X86_64_32S?"; then
-              echo "backend_cuda.o has absolute 32-bit relocations: the PIE link of colibri will fail (HIPCCFLAGS needs -fPIE or -fPIC)" >&2
-              exit 1
-            fi'
-          echo "HIP syntax check passed"
+  # HIP syntax check REMOVED on the local fleet: the job compiled
+  # backend_cuda.cu with hipcc inside the rocm/dev-ubuntu-24.04 container, and
+  # the fleet has no Docker daemon to run it (docker: command not found). The
+  # gate is documented here so it can be restored if a container runtime lands
+  # on the fleet; until then keeping the job would mean a permanently red X
+  # for an environment limitation, not a code signal.
+  #
+  # (The removed job: `docker run --rm -v $PWD:/src -w /src
+  #  rocm/dev-ubuntu-24.04:6.2` running `make -C c gpu-compile HIP=1
+  #  HIP_ARCH=gfx1100` plus the readelf PIC assertion on backend_cuda.o.)
 
   windows-cuda-build:
     # The Windows CUDA path has no coverage anywhere: `engine-cuda-syntax` above
@@ -684,8 +744,21 @@ jobs:
   python:
     name: Python tests
     runs-on: [self-hosted, Linux, X64, nayte-linux]
+    env:
+      # anvil-ci has a disk quota and no sudo: temp files go to the workspace
+      # (which has headroom) instead of /tmp (which does not).
+      TMPDIR: ${{ github.workspace }}/.tmp
     steps:
       - uses: actions/checkout@v4
+      - name: Free runner disk (rootless)
+        run: |
+          # The fleet runner user has no sudo and a disk quota, so the
+          # hosted-runner `sudo rm -rf /usr/share/dotnet ...` form cannot work
+          # here. Reclaim user-owned space instead (pip/npm caches, stale temp
+          # files) and prepare the workspace TMPDIR used by the suite below.
+          rm -rf ~/.cache/pip ~/.npm /tmp/pip-* /tmp/tmp.* 2>/dev/null || true
+          mkdir -p "$TMPDIR"
+          df -h "$GITHUB_WORKSPACE" /tmp | tail -2
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -725,10 +798,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
+        env:
+          # The Neo runner executes as user nayte, but setup-python defaults
+          # its tool cache to /Users/runner (the GitHub-hosted layout) and
+          # dies with "mkdir: /Users/runner: Permission denied". Point it at
+          # a nayte-owned directory instead.
+          AGENT_TOOLSDIRECTORY: /Users/nayte/hostedtoolcache
         with:
           python-version: '3.12'
           cache: pip
           cache-dependency-path: c/tools/oracle-requirements.txt
+      - name: Install libomp
+        # HOMEBREW_NO_AUTO_UPDATE=1: a bare `brew install` auto-upgrades every
+        # outdated dependent, and the link step then fails on files the machine
+        # owner installed outside brew (observed: bin/f2py already exists).
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install libomp
       - name: Install torch (CPU) + transformers
         run: pip install -r c/tools/oracle-requirements.txt
       - name: Build every engine (NEON branches must compile)
@@ -736,7 +820,17 @@ jobs:
       - name: Integer-kernel exactness, NEON branches live (#1081)
         run: |
           cd c
-          gcc -O3 -mcpu=native -fopenmp -I. tests/test_int_kernel_exact.c -o /tmp/tike -lm
+          # Darwin toolchain port: Apple clang has no -fopenmp runtime of its
+          # own, so the Linux `gcc -mcpu=native -fopenmp` form cannot work here.
+          # This mirrors c/Makefile's Darwin stanza: clang -Xclang -fopenmp
+          # against Homebrew's libomp (installed above). -mcpu is dropped: on
+          # arm64 NEON is baseline and the Makefile's default Darwin build is
+          # the byte-identical reference.
+          OMPDIR="$(brew --prefix libomp)"
+          test -f "$OMPDIR/include/omp.h" || { echo "FAIL: libomp not installed"; exit 1; }
+          clang -O3 -Xclang -fopenmp -I"$OMPDIR/include" -I. \
+            tests/test_int_kernel_exact.c -o /tmp/tike -lm \
+            -L"$OMPDIR/lib" -lomp
           /tmp/tike
       - name: Generate the glm_tiny fixture on this runner
         run: cd c && python3 tools/make_glm_oracle.py
