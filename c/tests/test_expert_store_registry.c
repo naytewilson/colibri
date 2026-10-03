@@ -24,6 +24,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+/* MinGW UCRT does not declare POSIX setenv/unsetenv, and GCC 14+ promotes
+ * the implicit declaration to an error. Map to the native CRT: _putenv("N=")
+ * removes a variable, _putenv_s sets it. (The overwrite flag is unused by
+ * this test's call sites.) */
+#define setenv(n, v, o) _putenv_s(n, v)
+#define unsetenv(n) _putenv(n "=")
+#endif
+
 static int g_auto_called = 0;
 static const ColiExpertStoreDescriptor *g_auto_last_desc = NULL;
 
