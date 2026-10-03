@@ -140,6 +140,10 @@ static char g_dir[256];
 static int write_fixtures(void) {
     snprintf(g_dir, sizeof(g_dir), "/tmp/kilo/forge_f1_pread_fixtures_%d",
              (int)getpid());
+    /* MKDIR creates one level only: ensure the parent exists first, or the
+     * whole fixture generation fails on a machine that never ran this test
+     * (observed on fresh CI runners: "fixture generation failed"). */
+    MKDIR("/tmp/kilo");
     MKDIR(g_dir);
 
     for (int l = 0; l < FIX_LAYERS; l++) {
