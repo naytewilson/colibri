@@ -101,7 +101,18 @@ CFLAGS  = -D_FILE_OFFSET_BITS=64 -O3 -march=$(ARCH) -fopenmp -Wall -Wextra -Wno-
 # #pragma comment(lib,"psapi.lib") for MSVC, but MinGW gcc ignores that pragma
 # (warns), so link psapi explicitly or the build fails undefined-reference on
 # modern GCC (e.g. 16.x under UCRT). Harmless where the pragma also resolves it.
+#
+# Static libgomp: msys2's UCRT64 gcc 16.2+ no longer ships libgomp.a (only
+# libgomp.spec + the DLL import lib), so a `-static -fopenmp` link dies with
+# "cannot find -lgomp". Detect the static archive through the driver and fall
+# back to dynamic libgomp when it is absent; the fully-static intent is kept
+# wherever the archive exists.
+GOMP_A := $(shell $(CC) -print-file-name=libgomp.a 2>/dev/null)
+ifeq ($(GOMP_A),libgomp.a)
+LDFLAGS = -lm -fopenmp -static-libgcc -lpsapi $(EXTRA_LDFLAGS)
+else
 LDFLAGS = -lm -fopenmp -static -lpsapi $(EXTRA_LDFLAGS)
+endif
 ifeq ($(LTO),1)
 CFLAGS  += -flto
 LDFLAGS += -flto
