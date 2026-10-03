@@ -66,6 +66,10 @@ static char g_dir[256];
 static int write_fixtures(void) {
     snprintf(g_dir, sizeof(g_dir), "/tmp/kilo/forge_f1_liveness_%d",
              (int)getpid());
+    /* MKDIR creates one level only: ensure the parent exists first, or the
+     * whole fixture generation fails on a machine that never ran this test
+     * (observed on fresh CI runners: "fixture generation failed"). */
+    MKDIR("/tmp/kilo");
     if (MKDIR(g_dir) != 0) return -1;
 
     /* ONE shard, FOUR INT8 expert tensors: [w_l0_e0..w_l0_e3], zero-gap. */
