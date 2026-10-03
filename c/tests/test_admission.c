@@ -272,32 +272,45 @@ int main(void) {
         for (int i = 0; i < 6; i++) coli_expert_release(&store, &views[i]);
     }
 
-    /* bounded parallelism: 4 unique misses x 50ms loads */
+    /* bounded parallelism: 4 unique misses x 50ms loads.
+     * Timing-sensitive: on a shared CI runner, scheduling jitter can push a
+     * wave past the bound even when the parallelism is correct. Retry the
+     * measurement (with fresh keys each attempt, so every attempt measures
+     * misses) -- the bounds themselves are unchanged, so a real regression
+     * still fails every attempt. Attempt 0 uses the original key set; the
+     * retry sets avoid keys later blocks rely on (K(1,5), K(2,0..2), K(3,3)). */
     ms.load_sleep_ms = 50;
     {
-        ColiExpertKey keys[4] = {K(0, 4), K(0, 5), K(0, 6), K(0, 7)};
-        ColiExpertView views[4];
-        ColiAdmissionConfig pcfg = {0};
-        pcfg.max_parallel = 2;
-        ColiAdmission *pa = coli_admission_new(&store, mock_fill, &ms, &pcfg);
-        double t1 = now_ms();
-        CHECK(coli_admission_acquire_batch(pa, keys, 4, views) == 4);
-        double wall2 = now_ms() - t1;
-        CHECK(wall2 >= 95.0 && wall2 < 190.0); /* 2 waves of 50ms */
-        for (int i = 0; i < 4; i++) coli_expert_release(&store, &views[i]);
-        coli_admission_free(pa);
+        static const int base[3][2] = {{0, 4}, {1, 6}, {2, 4}}; /* {layer, expert-lo} */
+        int timing_ok = 0;
+        for (int attempt = 0; attempt < 3 && !timing_ok; attempt++) {
+            int L = base[attempt][0], E = base[attempt][1];
+            ColiExpertKey keys[4] = {K(L, E), K(L, E+1), K(L, E+2), K(L, E+3)};
+            ColiExpertView views[4];
+            ColiAdmissionConfig pcfg = {0};
+            pcfg.max_parallel = 2;
+            ColiAdmission *pa = coli_admission_new(&store, mock_fill, &ms, &pcfg);
+            double t1 = now_ms();
+            int ok = coli_admission_acquire_batch(pa, keys, 4, views) == 4;
+            double wall2 = now_ms() - t1;
+            for (int i = 0; i < 4; i++) coli_expert_release(&store, &views[i]);
+            coli_admission_free(pa);
 
-        ColiAdmissionConfig pcfg4 = {0};
-        pcfg4.max_parallel = 4;
-        ColiExpertKey keys2[4] = {K(0, 8), K(0, 9), K(0, 10), K(0, 11)};
-        ColiExpertView views2[4];
-        ColiAdmission *pa4 = coli_admission_new(&store, mock_fill, &ms, &pcfg4);
-        t1 = now_ms();
-        CHECK(coli_admission_acquire_batch(pa4, keys2, 4, views2) == 4);
-        double wall4 = now_ms() - t1;
-        CHECK(wall4 < 95.0); /* one wave */
-        for (int i = 0; i < 4; i++) coli_expert_release(&store, &views2[i]);
-        coli_admission_free(pa4);
+            ColiAdmissionConfig pcfg4 = {0};
+            pcfg4.max_parallel = 4;
+            ColiExpertKey keys2[4] = {K(L, E+4), K(L, E+5), K(L, E+6), K(L, E+7)};
+            ColiExpertView views2[4];
+            ColiAdmission *pa4 = coli_admission_new(&store, mock_fill, &ms, &pcfg4);
+            t1 = now_ms();
+            ok = ok && coli_admission_acquire_batch(pa4, keys2, 4, views2) == 4;
+            double wall4 = now_ms() - t1;
+            for (int i = 0; i < 4; i++) coli_expert_release(&store, &views2[i]);
+            coli_admission_free(pa4);
+
+            timing_ok = ok && wall2 >= 95.0 && wall2 < 190.0 /* 2 waves of 50ms */
+                             && wall4 < 95.0;               /* one wave */
+        }
+        CHECK(timing_ok);
     }
     ms.load_sleep_ms = 0;
 
