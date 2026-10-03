@@ -24,10 +24,18 @@ jobs:
     name: Linux
     runs-on: [self-hosted, Linux, X64, nayte-linux]
     timeout-minutes: 15
+    env:
+      # The fleet runner user (anvil-ci) hits a disk quota on /tmp
+      # ("error writing to /tmp/cccU35UI.s: Disk quota exceeded" in round 3);
+      # gcc honors TMPDIR for its temp files, so point it at the workspace,
+      # which demonstrably accepts writes (the checkout lands there).
+      TMPDIR: ${{ github.workspace }}/.tmp
     steps:
       - uses: actions/checkout@v4
       - name: make check
-        run: make -C c check
+        run: |
+          mkdir -p "$TMPDIR"
+          make -C c check
 
   windows:
     # The job that would have caught #68/#137 pre-merge: native MinGW-w64
@@ -47,6 +55,7 @@ jobs:
           install: >-
             make
             mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-gcc-libs
             mingw-w64-ucrt-x86_64-python
       - name: make check
         run: make -C c check
