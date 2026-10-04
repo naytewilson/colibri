@@ -52,13 +52,28 @@ class MakefilePlatformTests(unittest.TestCase):
         env["PATH"] = ""
 
         cases = (
-            ("ok", "libgomp.a", ("-fopenmp", "-static-libgcc"), (" -static ",)),
-            ("ok", "/mingw/lib/libgomp.a", ("-fopenmp", " -static "), ("-static-libgcc",)),
-            ("no", "libgomp.a", (), ("-fopenmp", "-static-libgcc", " -static ")),
+            (
+                "/mingw/lib/libgomp.a",
+                "libgomp.dll.a",
+                ("-fopenmp", " -static "),
+                ("-static-libgcc",),
+            ),
+            (
+                "libgomp.a",
+                "/mingw/lib/libgomp.dll.a",
+                ("-fopenmp", "-static-libgcc"),
+                (" -static ",),
+            ),
+            (
+                "libgomp.a",
+                "libgomp.dll.a",
+                (),
+                ("-fopenmp", "-static-libgcc", " -static "),
+            ),
         )
 
-        for linkable, archive, expected, absent in cases:
-            with self.subTest(linkable=linkable, archive=archive):
+        for archive, import_lib, expected, absent in cases:
+            with self.subTest(archive=archive, import_lib=import_lib):
                 result = subprocess.run(
                     [
                         MAKE,
@@ -66,8 +81,8 @@ class MakefilePlatformTests(unittest.TestCase):
                         "-B",
                         "-n",
                         "colibri",
-                        f"WIN_GOMP_LINK={linkable}",
                         f"WIN_GOMP_A={archive}",
+                        f"WIN_GOMP_DLL_A={import_lib}",
                     ],
                     cwd=C_DIR,
                     env=env,

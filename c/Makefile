@@ -102,26 +102,20 @@ CFLAGS  = -D_FILE_OFFSET_BITS=64 -O3 -march=$(ARCH) $(WIN_OPENMP) -Wall -Wextra 
 # (warns), so link psapi explicitly or the build fails undefined-reference on
 # modern GCC (e.g. 16.x under UCRT). Harmless where the pragma also resolves it.
 #
-# OpenMP on Windows needs a linkable libgomp. msys2's UCRT64 gcc 16.2+
-# stopped shipping the libgomp link libraries in the default install set, so
-# -fopenmp dies at link time with "cannot find -lgomp" (observed on both the
-# -static and the -static-libgcc link lines). Probe the actual link and
-# degrade gracefully (mirrors the Darwin single-thread fallback when its
-# OpenMP runtime is absent):
-#   linkable, static archive present -> -static -fopenmp (historical)
-#   linkable, static archive absent  -> dynamic libgomp (-static-libgcc)
-#   not linkable at all              -> single-threaded build, loud warning
-WIN_GOMP_LINK := $(shell printf 'int main(void){return 0;}\n' | $(CC) -fopenmp -x c - -o /dev/null >/dev/null 2>&1 && echo ok || echo no)
-ifeq ($(WIN_GOMP_LINK),ok)
+# OpenMP on Windows needs either the static libgomp archive or MinGW's
+# dynamic import library. Use GCC's -print-file-name lookup instead of a
+# compile/link shell probe: this Makefile also supports native Windows cmd.exe,
+# where POSIX pipelines, printf, and /dev/null are unavailable.
+WIN_GOMP_A := $(shell $(CC) -print-file-name=libgomp.a)
+WIN_GOMP_DLL_A := $(shell $(CC) -print-file-name=libgomp.dll.a)
+ifneq ($(filter-out libgomp.a,$(WIN_GOMP_A)),)
 WIN_OPENMP = -fopenmp
-WIN_GOMP_A := $(shell $(CC) -print-file-name=libgomp.a 2>/dev/null)
-ifeq ($(WIN_GOMP_A),libgomp.a)
+WIN_STATIC = -static
+else ifneq ($(filter-out libgomp.dll.a,$(WIN_GOMP_DLL_A)),)
+WIN_OPENMP = -fopenmp
 WIN_STATIC = -static-libgcc
 else
-WIN_STATIC = -static
-endif
-else
-$(warning libgomp is not linkable with this MinGW toolchain: building single-threaded)
+$(warning libgomp link library not found in this MinGW toolchain: building single-threaded)
 WIN_OPENMP =
 WIN_STATIC =
 endif

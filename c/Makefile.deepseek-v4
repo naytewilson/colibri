@@ -49,19 +49,18 @@ endif
 ifneq ($(IS_WIN),)
 CC = gcc
 ARCH ?= x86-64-v3
-# Same libgomp probe as the parent Makefile's Windows block: msys2's UCRT64
-# gcc 16.2+ may not link -fopenmp at all ("cannot find -lgomp").
-V4_GOMP_LINK := $(shell printf 'int main(void){return 0;}\n' | $(CC) -fopenmp -x c - -o /dev/null >/dev/null 2>&1 && echo ok || echo no)
-ifeq ($(V4_GOMP_LINK),ok)
+# Same shell-neutral libgomp lookup as the parent Makefile's Windows block.
+# GCC returns the bare filename when a requested runtime library is absent.
+V4_GOMP_A := $(shell $(CC) -print-file-name=libgomp.a)
+V4_GOMP_DLL_A := $(shell $(CC) -print-file-name=libgomp.dll.a)
+ifneq ($(filter-out libgomp.a,$(V4_GOMP_A)),)
 V4_OPENMP = -fopenmp
-V4_GOMP_A := $(shell $(CC) -print-file-name=libgomp.a 2>/dev/null)
-ifeq ($(V4_GOMP_A),libgomp.a)
+V4_STATIC = -static
+else ifneq ($(filter-out libgomp.dll.a,$(V4_GOMP_DLL_A)),)
+V4_OPENMP = -fopenmp
 V4_STATIC = -static-libgcc
 else
-V4_STATIC = -static
-endif
-else
-$(warning libgomp is not linkable with this MinGW toolchain: building single-threaded)
+$(warning libgomp link library not found in this MinGW toolchain: building single-threaded)
 V4_OPENMP =
 V4_STATIC =
 endif
