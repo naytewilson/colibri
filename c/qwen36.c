@@ -3069,7 +3069,8 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
         /* Expert slot acquisition */
         double _t_lk = tm_on() ? tm_now() : 0.0;
         Slot *e_slots[256];
-        if (S == 1 && expert_async_on() && K >= 2 && K <= 8 && m->cache_cap[layer] >= 2*K) {
+        int stream_experts = m->cache_cap[layer] < K;
+        if (!stream_experts && S == 1 && expert_async_on() && K >= 2 && K <= 8 && m->cache_cap[layer] >= 2*K) {
             /* ASYNC BATCH ACQUISITION: locked acquire phases run up front in
              * the same per-kk order as sequential mode (identical R DEMAND
              * intent stream, hit/miss/coalesce accounting), then the unlocked
@@ -3092,7 +3093,7 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
                     else if (e_slots[kk]->is_int4) g_routed_int4_count++;
                 }
             }
-        } else {
+        } else if (!stream_experts) {
             for (int kk = 0; kk < K; kk++) {
                 expert_get(m, layer, idx[kk], &e_slots[kk], val[kk]);
                 if (S == 1) {
@@ -3101,9 +3102,58 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
                 }
             }
         }
-        if (tm_on() && S == 1) g_moe_sub[1] += tm_now() - _t_lk;
+        if (!stream_experts && tm_on() && S == 1) g_moe_sub[1] += tm_now() - _t_lk;
 
-        if (expert_parallel_on() && K <= 8) {
+        if (stream_experts) {
+            /* A derived Slot aliases store-owned bytes. When the per-layer
+             * cache is smaller than top-k, acquiring the next expert evicts
+             * and reuses the previous expert's bytes. Consume each routed
+             * expert before the next admission so the configured cache bound
+             * remains valid without changing arithmetic or copying weights. */
+            float *os = out + (int64_t)s * D;
+            for (int kk = 0; kk < K; kk++) {
+                Slot *e = NULL;
+                double _t_acq = tm_on() ? tm_now() : 0;
+                expert_get(m, layer, idx[kk], &e, val[kk]);
+                if (tm_on() && S == 1) g_moe_sub[1] += tm_now() - _t_acq;
+                if (S == 1) {
+                    if (e->is_int3) g_routed_int3_count++;
+                    else if (e->is_int4) g_routed_int4_count++;
+                }
+                double _t_g = 0, _t_u = 0, _t_d = 0;
+                if (e->is_int3 && e->w3) {
+                    _t_g = tm_on() ? tm_now() : 0;
+                    matmul_i3_qe(g, xs, e->g3, e->gs, D, I);
+                    if (tm_on() && S == 1) g_moe_sub[2] += tm_now() - _t_g;
+                    _t_u = tm_on() ? tm_now() : 0;
+                    matmul_i3_qe(u, xs, e->u3, e->us, D, I);
+                    if (tm_on() && S == 1) g_moe_sub[3] += tm_now() - _t_u;
+                    for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
+                    _t_d = tm_on() ? tm_now() : 0;
+                    matmul_i3_qe(hh, g, e->d3, e->ds, I, D);
+                    if (tm_on() && S == 1) g_moe_sub[4] += tm_now() - _t_d;
+                } else if (e->is_int4 && e->w4) {
+                    _t_g = tm_on() ? tm_now() : 0;
+                    matmul_i4_qe(g, xs, e->g4, e->gs, D, I);
+                    if (tm_on() && S == 1) g_moe_sub[5] += tm_now() - _t_g;
+                    _t_u = tm_on() ? tm_now() : 0;
+                    matmul_i4_qe(u, xs, e->u4, e->us, D, I);
+                    if (tm_on() && S == 1) g_moe_sub[6] += tm_now() - _t_u;
+                    for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
+                    _t_d = tm_on() ? tm_now() : 0;
+                    matmul_i4_qe(hh, g, e->d4, e->ds, I, D);
+                    if (tm_on() && S == 1) g_moe_sub[7] += tm_now() - _t_d;
+                } else {
+                    matmul_qe(g, xs, e->g, e->gs, D, I);
+                    matmul_qe(u, xs, e->u, e->us, D, I);
+                    for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
+                    matmul_qe(hh, g, e->d, e->ds, I, D);
+                }
+                if (S == 1) g_expert_gemv_parallel_invocations += 3;
+                float w = val[kk];
+                for (int d = 0; d < D; d++) os[d] += w * hh[d];
+            }
+        } else if (expert_parallel_on() && K <= 8) {
             /* TOP-K EXPERT-PARALLEL TOPOLOGY (Gate 4) */
             double _t_ep = tm_on() ? tm_now() : 0.0;
             float ep_g[8][512], ep_u[8][512], ep_hh[8][2048];

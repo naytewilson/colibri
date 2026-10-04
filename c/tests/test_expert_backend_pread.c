@@ -19,12 +19,15 @@
 
 #if defined(_WIN32)
 #include <direct.h>
+#include <process.h>
 #define MKDIR(p) _mkdir(p)
+#define TEST_GETPID() _getpid()
 #else
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 #define MKDIR(p) mkdir((p), 0755)
+#define TEST_GETPID() getpid()
 #endif
 
 static int g_fail = 0;
@@ -139,7 +142,7 @@ static char g_dir[256];
 
 static int write_fixtures(void) {
     snprintf(g_dir, sizeof(g_dir), "/tmp/kilo/forge_f1_pread_fixtures_%d",
-             (int)getpid());
+             (int)TEST_GETPID());
     /* MKDIR creates one level only: ensure the parent exists first, or the
      * whole fixture generation fails on a machine that never ran this test
      * (observed on fresh CI runners: "fixture generation failed"). */
