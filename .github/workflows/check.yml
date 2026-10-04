@@ -22,20 +22,12 @@ env:
 jobs:
   linux:
     name: Linux
-    runs-on: [self-hosted, Linux, X64, nayte-linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      # The fleet runner user (anvil-ci) hits a disk quota on /tmp
-      # ("error writing to /tmp/cccU35UI.s: Disk quota exceeded" in round 3);
-      # gcc honors TMPDIR for its temp files, so point it at the workspace,
-      # which demonstrably accepts writes (the checkout lands there).
-      TMPDIR: ${{ github.workspace }}/.tmp
     steps:
       - uses: actions/checkout@v4
       - name: make check
-        run: |
-          mkdir -p "$TMPDIR"
-          make -C c check
+        run: make -C c check
 
   windows:
     # The job that would have caught #68/#137 pre-merge: native MinGW-w64
@@ -55,7 +47,6 @@ jobs:
           install: >-
             make
             mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-gcc-libs
             mingw-w64-ucrt-x86_64-python
       - name: make check
         run: make -C c check
@@ -70,7 +61,7 @@ jobs:
 
   v4-tiny:
     name: Linux (generated tiny V4 target oracle)
-    runs-on: [self-hosted, Linux, X64, nayte-linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -88,17 +79,11 @@ jobs:
     # clang; libomp for the threaded path (Makefile falls back to
     # single-threaded automatically if it's ever missing).
     name: macOS (colibri + V4 platform gate)
-    runs-on: [self-hosted, macOS, ARM64, nayte-macos]
+    runs-on: macos-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: install libomp
-        # HOMEBREW_NO_AUTO_UPDATE=1: a bare `brew install` auto-upgrades every
-        # outdated dependent (numpy -> ...), and the link step then fails on
-        # files the machine owner installed outside brew
-        # (observed: "Could not symlink bin/f2py ... already exists").
-        # libomp itself pours from a bottle; the runner must not touch the
-        # owner's toolchain to get there.
-        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install libomp
+        run: brew install libomp
       - name: make check (V4 execution gated off)
         run: make -C c check

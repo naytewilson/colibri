@@ -296,7 +296,7 @@ int main(void) {
 
             /* single-miss latency on this machine, right now */
             ColiExpertKey k1 = K(L, E + 8);
-            ColiExpertView v1;
+            ColiExpertView v1 = {0};
             ColiAdmissionConfig pcfg1 = {0};
             ColiAdmission *pa1 = coli_admission_new(&store, mock_fill, &ms, &pcfg1);
             double t1 = now_ms();
@@ -306,7 +306,7 @@ int main(void) {
             coli_admission_free(pa1);
 
             ColiExpertKey keys[4] = {K(L, E), K(L, E+1), K(L, E+2), K(L, E+3)};
-            ColiExpertView views[4];
+            ColiExpertView views[4] = {{0}};
             ColiAdmissionConfig pcfg = {0};
             pcfg.max_parallel = 2;
             ColiAdmission *pa = coli_admission_new(&store, mock_fill, &ms, &pcfg);
@@ -319,7 +319,7 @@ int main(void) {
             ColiAdmissionConfig pcfg4 = {0};
             pcfg4.max_parallel = 4;
             ColiExpertKey keys2[4] = {K(L, E+4), K(L, E+5), K(L, E+6), K(L, E+7)};
-            ColiExpertView views2[4];
+            ColiExpertView views2[4] = {{0}};
             ColiAdmission *pa4 = coli_admission_new(&store, mock_fill, &ms, &pcfg4);
             t1 = now_ms();
             ok = ok && coli_admission_acquire_batch(pa4, keys2, 4, views2) == 4;
