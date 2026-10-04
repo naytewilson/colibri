@@ -25,6 +25,7 @@
 
 #if defined(_WIN32)
 #include <direct.h>
+#include <windows.h>
 #define MKDIR(p) _mkdir(p)
 #else
 #include <sys/stat.h>
@@ -33,6 +34,17 @@
 #include <unistd.h>
 #define MKDIR(p) mkdir((p), 0755)
 #endif
+
+/* The waiter deliberately polls at sub-millisecond intervals on POSIX.  The
+ * Windows UCRT build has no usleep(), so keep the timing portability in one
+ * local helper instead of spreading platform branches through the test. */
+static void test_sleep_us(unsigned usec) {
+#if defined(_WIN32)
+    Sleep((DWORD)((usec + 999u) / 1000u));
+#else
+    usleep(usec);
+#endif
+}
 
 static int g_fail = 0;
 #define CHECK(cond)                                                         \
@@ -177,7 +189,7 @@ static void *waiter_main(void *arg) {
             atomic_store(&w->done, -1);
             return NULL;
         }
-        usleep(200);
+        test_sleep_us(200);
     }
     return NULL;
 }
@@ -185,7 +197,7 @@ static void *waiter_main(void *arg) {
 /* Wait bounded for the waiter thread; returns 0 when it finished in time. */
 static int wait_bounded(pthread_t t, Waiter *w, double budget_ms) {
     double end = now_ms() + budget_ms;
-    while (atomic_load(&w->done) == 0 && now_ms() < end) usleep(1000);
+    while (atomic_load(&w->done) == 0 && now_ms() < end) test_sleep_us(1000);
     if (!w->done) {
         /* Never spin on a stalled reservation: detach and flag. The store
          * is intentionally left for process exit on this can't-happen
@@ -216,7 +228,7 @@ static void h1_abort_frees_slot(int iter) {
     CHECK(pthread_create(&t, NULL, waiter_main, &w) == 0);
 
     /* Give the waiter time to hit the all-RESERVED edge before draining. */
-    usleep(20000);
+    test_sleep_us(20000);
 
     /* Owner A aborts -> its slot becomes PBS_FREE and MUST become
      * claimable by the next retry (the F1-LIVE-1 hang is a waiter that
@@ -261,7 +273,7 @@ static void h2_publish_permits_progress(int iter) {
     w.deadline_ms = now_ms() + 5000;
     pthread_t t;
     CHECK(pthread_create(&t, NULL, waiter_main, &w) == 0);
-    usleep(20000);
+    test_sleep_us(20000);
 
     /* Owner A publishes -> RESIDENT; the waiter must progress LEGALLY by
      * evicting that RESIDENT copy, never by stealing B's RESERVED buffers. */
