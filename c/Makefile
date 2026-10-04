@@ -115,11 +115,14 @@ else ifneq ($(filter-out libgomp.dll.a,$(WIN_GOMP_DLL_A)),)
 WIN_OPENMP = -fopenmp
 WIN_STATIC = -static-libgcc
 else
-$(warning libgomp link library not found in this MinGW toolchain: building single-threaded)
+$(warning libgomp link library not found in this MinGW toolchain: building without OpenMP)
 WIN_OPENMP =
 WIN_STATIC =
 endif
-LDFLAGS = -lm $(WIN_OPENMP) $(WIN_STATIC) -lpsapi $(EXTRA_LDFLAGS)
+# The engines use pthreads even when OpenMP is unavailable, so keep the
+# winpthreads compile/link option independent of the optional libgomp flags.
+CFLAGS  += -pthread
+LDFLAGS = -lm -pthread $(WIN_OPENMP) $(WIN_STATIC) -lpsapi $(EXTRA_LDFLAGS)
 ifeq ($(LTO),1)
 CFLAGS  += -flto
 LDFLAGS += -flto

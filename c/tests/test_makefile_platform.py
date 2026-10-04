@@ -92,6 +92,7 @@ class MakefilePlatformTests(unittest.TestCase):
                 )
 
                 command = f" {result.stdout.strip()} "
+                self.assertEqual(command.count(" -pthread "), 2)
                 for flag in expected:
                     self.assertIn(flag, command)
                 for flag in absent:
