@@ -44,8 +44,43 @@ class MakefilePlatformTests(unittest.TestCase):
         )
 
         self.assertIn("-o colibri.exe", result.stdout)
-        self.assertIn("-fopenmp", result.stdout)
-        self.assertIn("-static", result.stdout)
+        self.assertIn("-lpsapi", result.stdout)
+
+    def test_windows_openmp_flags_follow_libgomp_probe(self):
+        env = os.environ.copy()
+        env["OS"] = "Windows_NT"
+        env["PATH"] = ""
+
+        cases = (
+            ("ok", "libgomp.a", ("-fopenmp", "-static-libgcc"), (" -static ",)),
+            ("ok", "/mingw/lib/libgomp.a", ("-fopenmp", " -static "), ("-static-libgcc",)),
+            ("no", "libgomp.a", (), ("-fopenmp", "-static-libgcc", " -static ")),
+        )
+
+        for linkable, archive, expected, absent in cases:
+            with self.subTest(linkable=linkable, archive=archive):
+                result = subprocess.run(
+                    [
+                        MAKE,
+                        "--no-print-directory",
+                        "-B",
+                        "-n",
+                        "colibri",
+                        f"WIN_GOMP_LINK={linkable}",
+                        f"WIN_GOMP_A={archive}",
+                    ],
+                    cwd=C_DIR,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                )
+
+                command = f" {result.stdout.strip()} "
+                for flag in expected:
+                    self.assertIn(flag, command)
+                for flag in absent:
+                    self.assertNotIn(flag, command)
 
     def test_portable_build_uses_target_architecture(self):
         cases = (
