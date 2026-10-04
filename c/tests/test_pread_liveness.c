@@ -25,14 +25,31 @@
 
 #if defined(_WIN32)
 #include <direct.h>
+#include <process.h>
+#include <windows.h>
 #define MKDIR(p) _mkdir(p)
+#define RMDIR(p) _rmdir(p)
+#define TEST_GETPID() _getpid()
 #else
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #define MKDIR(p) mkdir((p), 0755)
+#define RMDIR(p) rmdir(p)
+#define TEST_GETPID() getpid()
 #endif
+
+/* The waiter deliberately polls at sub-millisecond intervals on POSIX.  The
+ * Windows UCRT build has no usleep(), so keep the timing portability in one
+ * local helper instead of spreading platform branches through the test. */
+static void test_sleep_us(unsigned usec) {
+#if defined(_WIN32)
+    Sleep((DWORD)((usec + 999u) / 1000u));
+#else
+    usleep(usec);
+#endif
+}
 
 static int g_fail = 0;
 #define CHECK(cond)                                                         \
@@ -63,10 +80,27 @@ int coli_v4_expert_store_open_planned(ColiV4Engine *engine,
 
 static char g_dir[256];
 
+static int make_fixture_dir(void) {
+#if defined(_WIN32)
+    char temp[MAX_PATH];
+    DWORD n = GetTempPathA((DWORD)sizeof(temp), temp);
+    if (n == 0 || n >= sizeof(temp)) return -1;
+    int written = snprintf(g_dir, sizeof(g_dir), "%sforge_f1_liveness_%d",
+                           temp, (int)TEST_GETPID());
+    if (written < 0 || (size_t)written >= sizeof(g_dir)) return -1;
+    return MKDIR(g_dir);
+#else
+    int written = snprintf(g_dir, sizeof(g_dir), "/tmp/kilo/forge_f1_liveness_%d",
+                           (int)TEST_GETPID());
+    if (written < 0 || (size_t)written >= sizeof(g_dir)) return -1;
+    /* Keep the fresh-run parent creation fix: MKDIR is not recursive. */
+    MKDIR("/tmp/kilo");
+    return MKDIR(g_dir);
+#endif
+}
+
 static int write_fixtures(void) {
-    snprintf(g_dir, sizeof(g_dir), "/tmp/kilo/forge_f1_liveness_%d",
-             (int)getpid());
-    if (MKDIR(g_dir) != 0) return -1;
+    if (make_fixture_dir() != 0) return -1;
 
     /* ONE shard, FOUR INT8 expert tensors: [w_l0_e0..w_l0_e3], zero-gap. */
     const char *names[FIX_EXPERTS];
@@ -173,7 +207,7 @@ static void *waiter_main(void *arg) {
             atomic_store(&w->done, -1);
             return NULL;
         }
-        usleep(200);
+        test_sleep_us(200);
     }
     return NULL;
 }
@@ -181,7 +215,7 @@ static void *waiter_main(void *arg) {
 /* Wait bounded for the waiter thread; returns 0 when it finished in time. */
 static int wait_bounded(pthread_t t, Waiter *w, double budget_ms) {
     double end = now_ms() + budget_ms;
-    while (atomic_load(&w->done) == 0 && now_ms() < end) usleep(1000);
+    while (atomic_load(&w->done) == 0 && now_ms() < end) test_sleep_us(1000);
     if (!w->done) {
         /* Never spin on a stalled reservation: detach and flag. The store
          * is intentionally left for process exit on this can't-happen
@@ -212,7 +246,7 @@ static void h1_abort_frees_slot(int iter) {
     CHECK(pthread_create(&t, NULL, waiter_main, &w) == 0);
 
     /* Give the waiter time to hit the all-RESERVED edge before draining. */
-    usleep(20000);
+    test_sleep_us(20000);
 
     /* Owner A aborts -> its slot becomes PBS_FREE and MUST become
      * claimable by the next retry (the F1-LIVE-1 hang is a waiter that
@@ -257,7 +291,7 @@ static void h2_publish_permits_progress(int iter) {
     w.deadline_ms = now_ms() + 5000;
     pthread_t t;
     CHECK(pthread_create(&t, NULL, waiter_main, &w) == 0);
-    usleep(20000);
+    test_sleep_us(20000);
 
     /* Owner A publishes -> RESIDENT; the waiter must progress LEGALLY by
      * evicting that RESIDENT copy, never by stealing B's RESERVED buffers. */
@@ -408,7 +442,7 @@ int main(void) {
         char p[512];
         snprintf(p, sizeof(p), "%s/w.safetensors", g_dir);
         remove(p);
-        remove(g_dir);
+        RMDIR(g_dir);
     }
 
     if (g_fail) {

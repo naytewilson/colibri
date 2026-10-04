@@ -49,14 +49,29 @@ endif
 ifneq ($(IS_WIN),)
 CC = gcc
 ARCH ?= x86-64-v3
-CFLAGS = -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -O3 -march=$(ARCH) -fopenmp \
+# Same shell-neutral libgomp lookup as the parent Makefile's Windows block.
+# GCC returns the bare filename when a requested runtime library is absent.
+V4_GOMP_A := $(shell $(CC) -print-file-name=libgomp.a)
+V4_GOMP_DLL_A := $(shell $(CC) -print-file-name=libgomp.dll.a)
+ifneq ($(filter-out libgomp.a,$(V4_GOMP_A)),)
+V4_OPENMP = -fopenmp
+V4_STATIC = -static
+else ifneq ($(filter-out libgomp.dll.a,$(V4_GOMP_DLL_A)),)
+V4_OPENMP = -fopenmp
+V4_STATIC = -static-libgcc
+else
+$(warning libgomp link library not found in this MinGW toolchain: building single-threaded)
+V4_OPENMP =
+V4_STATIC =
+endif
+CFLAGS = -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -O3 -march=$(ARCH) $(V4_OPENMP) \
 	-include pthread.h -Wall -Wextra -Wno-unused-parameter \
 	-Wno-misleading-indentation -Wno-unused-function \
 	-DCOLI_V4_MAX_PIN_SLOTS_PER_LAYER=16 \
 	-DCOLI_V4_PIN_RAMP_REQUESTS=24 \
 	-DCOLI_V4_GPU_TIER \
 	-DCOLI_V4_EXPERIMENTAL_DUAL_EXPERT_LOADER
-LDFLAGS = -lm -fopenmp -static -pthread
+LDFLAGS = -lm $(V4_OPENMP) $(V4_STATIC) -pthread
 V4_BINARY := deepseek_v4.exe
 V4_WIN_EXTRA_OBJS = backend_loader_dsv4.o
 else ifeq ($(UNAME_S),Darwin)

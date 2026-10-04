@@ -23,7 +23,37 @@
 #include "../qwen36.c"
 #undef main
 
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#include <windows.h>
+#define CAP_DUP _dup
+#define CAP_DUP2 _dup2
+#define CAP_CLOSE _close
+#define CAP_READ(fd, buf, size) _read((fd), (buf), (unsigned int)(size))
+#define CAP_LSEEK _lseeki64
+#define CAP_TRUNCATE(fd, size) _chsize_s((fd), (size))
+#define CAP_UNLINK _unlink
+static char cap_path[MAX_PATH];
+static int cap_create(void) {
+    char temp[MAX_PATH];
+    DWORD n = GetTempPathA((DWORD)sizeof(temp), temp);
+    if (n == 0 || n >= sizeof(temp) ||
+        !GetTempFileNameA(temp, "q36", 0, cap_path)) return -1;
+    return _open(cap_path, _O_RDWR | _O_BINARY);
+}
+#else
 #include <unistd.h>
+#define CAP_DUP dup
+#define CAP_DUP2 dup2
+#define CAP_CLOSE close
+#define CAP_READ(fd, buf, size) read((fd), (buf), (size))
+#define CAP_LSEEK lseek
+#define CAP_TRUNCATE(fd, size) ftruncate((fd), (size))
+#define CAP_UNLINK unlink
+static char cap_path[] = "/tmp/q36_lifecycle_capXXXXXX";
+static int cap_create(void) { return mkstemp(cap_path); }
+#endif
 
 static int fails = 0;
 static void ck(int cond, const char *what) {
@@ -33,33 +63,46 @@ static void ck(int cond, const char *what) {
 }
 
 /* ---- stderr capture at the fd level (code under test writes to fd 2) --- */
-static char cap_path[] = "/tmp/q36_lifecycle_capXXXXXX";
 static int cap_fd = -1;
 static int cap_saved = -1;
 
 static void cap_begin(void) {
     fflush(stderr);
     if (cap_fd < 0) {
-        int t = mkstemp(cap_path);
-        ck(t >= 0, "capture temp file created");
-        cap_fd = t;
+        cap_fd = cap_create();
+        ck(cap_fd >= 0, "capture temp file created");
     }
-    if (lseek(cap_fd, 0, SEEK_SET) < 0) {}
-    if (ftruncate(cap_fd, 0) < 0) {}
-    cap_saved = dup(STDERR_FILENO);
-    dup2(cap_fd, STDERR_FILENO);
+    if (cap_fd < 0) return;
+    if (CAP_LSEEK(cap_fd, 0, SEEK_SET) < 0) {}
+    if (CAP_TRUNCATE(cap_fd, 0) != 0) {}
+    cap_saved = CAP_DUP(2);
+    if (cap_saved >= 0) CAP_DUP2(cap_fd, 2);
 }
 static void cap_end(char *buf, size_t bufsz) {
     fflush(stderr);
-    dup2(cap_saved, STDERR_FILENO);
-    close(cap_saved);
-    cap_saved = -1;
-    off_t n = lseek(cap_fd, 0, SEEK_END);
-    if ((size_t)n > bufsz - 1) n = bufsz - 1;
-    lseek(cap_fd, 0, SEEK_SET);
-    ssize_t got = read(cap_fd, buf, (size_t)n);
+    if (cap_saved >= 0) {
+        CAP_DUP2(cap_saved, 2);
+        CAP_CLOSE(cap_saved);
+        cap_saved = -1;
+    }
+    if (cap_fd < 0) { buf[0] = 0; return; }
+    int64_t n = (int64_t)CAP_LSEEK(cap_fd, 0, SEEK_END);
+    if (n < 0) n = 0;
+    if ((uint64_t)n > bufsz - 1) n = (int64_t)(bufsz - 1);
+    CAP_LSEEK(cap_fd, 0, SEEK_SET);
+    int64_t got = CAP_READ(cap_fd, buf, (size_t)n);
     if (got < 0) got = 0;
     buf[got] = 0;
+}
+
+static int set_test_env(const char *name, const char *value) {
+#if defined(_WIN32)
+    /* SetEnvironmentVariable changes the process block but not the C runtime
+     * getenv view used by qwen36.c; update the UCRT environment directly. */
+    return _putenv_s(name, value);
+#else
+    return setenv(name, value, 1);
+#endif
 }
 
 /* ---- stub store with known stats for the telemetry contract ---- */
@@ -80,7 +123,8 @@ int main(void) {
 
     /* ================= lifecycle: start / idempotency / join ================= */
     printf("[lifecycle]\n");
-    setenv("COLI_PILOT_W", "3", 1);
+    ck(set_test_env("COLI_PILOT_W", "3") == 0,
+       "COLI_PILOT_W test override installed in the runtime environment");
 
     static Model m;   /* pointer identity only: no jobs are ever executed */
     memset(&m, 0, sizeof(m));
@@ -188,9 +232,9 @@ int main(void) {
         ck(ok, "200x repeated shutdown calls stay non-blocking and flagged");
     }
 
+    if (cap_fd >= 0) CAP_CLOSE(cap_fd);
+    if (cap_path[0]) CAP_UNLINK(cap_path);
     if (fails) { fprintf(stderr, "test_qwen36_lifecycle: %d FAILURES\n", fails); return 1; }
     puts("test_qwen36_lifecycle: ok");
-    close(cap_fd);
-    unlink(cap_path);
     return 0;
 }

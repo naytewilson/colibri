@@ -44,8 +44,59 @@ class MakefilePlatformTests(unittest.TestCase):
         )
 
         self.assertIn("-o colibri.exe", result.stdout)
-        self.assertIn("-fopenmp", result.stdout)
-        self.assertIn("-static", result.stdout)
+        self.assertIn("-lpsapi", result.stdout)
+
+    def test_windows_openmp_flags_follow_libgomp_probe(self):
+        env = os.environ.copy()
+        env["OS"] = "Windows_NT"
+        env["PATH"] = ""
+
+        cases = (
+            (
+                "/mingw/lib/libgomp.a",
+                "libgomp.dll.a",
+                ("-fopenmp", " -static "),
+                ("-static-libgcc",),
+            ),
+            (
+                "libgomp.a",
+                "/mingw/lib/libgomp.dll.a",
+                ("-fopenmp", "-static-libgcc"),
+                (" -static ",),
+            ),
+            (
+                "libgomp.a",
+                "libgomp.dll.a",
+                (),
+                ("-fopenmp", "-static-libgcc", " -static "),
+            ),
+        )
+
+        for archive, import_lib, expected, absent in cases:
+            with self.subTest(archive=archive, import_lib=import_lib):
+                result = subprocess.run(
+                    [
+                        MAKE,
+                        "--no-print-directory",
+                        "-B",
+                        "-n",
+                        "colibri",
+                        f"WIN_GOMP_A={archive}",
+                        f"WIN_GOMP_DLL_A={import_lib}",
+                    ],
+                    cwd=C_DIR,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                )
+
+                command = f" {result.stdout.strip()} "
+                self.assertEqual(command.count(" -pthread "), 2)
+                for flag in expected:
+                    self.assertIn(flag, command)
+                for flag in absent:
+                    self.assertNotIn(flag, command)
 
     def test_portable_build_uses_target_architecture(self):
         cases = (

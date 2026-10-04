@@ -5,5 +5,5 @@
 --index-url https://download.pytorch.org/whl/cpu
 --extra-index-url https://pypi.org/simple
 torch
-transformers>=5.14   # Inkling architecture support (InklingForCausalLM)
+transformers==5.17.0  # Newest release verified against both token-exact oracles
 safetensors

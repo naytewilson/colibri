@@ -19,12 +19,18 @@
 
 #if defined(_WIN32)
 #include <direct.h>
+#include <windows.h>
+#include <process.h>
 #define MKDIR(p) _mkdir(p)
+#define RMDIR(p) _rmdir(p)
+#define TEST_GETPID() _getpid()
 #else
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 #define MKDIR(p) mkdir((p), 0755)
+#define RMDIR(p) rmdir(p)
+#define TEST_GETPID() getpid()
 #endif
 
 static int g_fail = 0;
@@ -137,10 +143,28 @@ static void build_expert_blob(int fmt, unsigned seed, unsigned char **blob,
 
 static char g_dir[256];
 
+static int make_fixture_dir(void) {
+#if defined(_WIN32)
+    char temp[MAX_PATH];
+    DWORD n = GetTempPathA((DWORD)sizeof(temp), temp);
+    if (n == 0 || n >= sizeof(temp)) return -1;
+    int written = snprintf(g_dir, sizeof(g_dir), "%sforge_f1_pread_fixtures_%d",
+                           temp, (int)TEST_GETPID());
+    if (written < 0 || (size_t)written >= sizeof(g_dir)) return -1;
+    return MKDIR(g_dir);
+#else
+    int written = snprintf(g_dir, sizeof(g_dir), "/tmp/kilo/forge_f1_pread_fixtures_%d",
+                           (int)TEST_GETPID());
+    if (written < 0 || (size_t)written >= sizeof(g_dir)) return -1;
+    /* MKDIR creates one level only: ensure the parent exists first, or the
+     * whole fixture generation fails on a machine that never ran this test. */
+    MKDIR("/tmp/kilo");
+    return MKDIR(g_dir);
+#endif
+}
+
 static int write_fixtures(void) {
-    snprintf(g_dir, sizeof(g_dir), "/tmp/kilo/forge_f1_pread_fixtures_%d",
-             (int)getpid());
-    MKDIR(g_dir);
+    if (make_fixture_dir() != 0) return -1;
 
     for (int l = 0; l < FIX_LAYERS; l++) {
         for (int e = 0; e < FIX_EXPERTS; e++) {
@@ -450,7 +474,7 @@ int main(void) {
                 snprintf(p, sizeof(p), "%s/l%d_e%d_s.safetensors", g_dir, l, e);
                 remove(p);
             }
-        remove(g_dir);
+        RMDIR(g_dir);
     }
     if (g_fail) {
         fprintf(stderr, "pread backend tests: %d FAILURES\n", g_fail);

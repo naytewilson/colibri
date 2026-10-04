@@ -96,12 +96,33 @@ else ifneq ($(IS_WIN),)
 # a v3 build simply compiles out the VNNI path - safe on any x86-64.
 CC      = gcc
 ARCH   ?= x86-64-v3
-CFLAGS  = -D_FILE_OFFSET_BITS=64 -O3 -march=$(ARCH) -fopenmp -Wall -Wextra -Wno-unused-parameter -Wno-misleading-indentation -Wno-unused-function $(EXTRA_CFLAGS)
+CFLAGS  = -D_FILE_OFFSET_BITS=64 -O3 -march=$(ARCH) $(WIN_OPENMP) -Wall -Wextra -Wno-unused-parameter -Wno-misleading-indentation -Wno-unused-function $(EXTRA_CFLAGS)
 # -lpsapi: compat.h calls GetProcessMemoryInfo (rss_gb). It's linked via
 # #pragma comment(lib,"psapi.lib") for MSVC, but MinGW gcc ignores that pragma
 # (warns), so link psapi explicitly or the build fails undefined-reference on
 # modern GCC (e.g. 16.x under UCRT). Harmless where the pragma also resolves it.
-LDFLAGS = -lm -fopenmp -static -lpsapi $(EXTRA_LDFLAGS)
+#
+# OpenMP on Windows needs either the static libgomp archive or MinGW's
+# dynamic import library. Use GCC's -print-file-name lookup instead of a
+# compile/link shell probe: this Makefile also supports native Windows cmd.exe,
+# where POSIX pipelines, printf, and /dev/null are unavailable.
+WIN_GOMP_A := $(shell $(CC) -print-file-name=libgomp.a)
+WIN_GOMP_DLL_A := $(shell $(CC) -print-file-name=libgomp.dll.a)
+ifneq ($(filter-out libgomp.a,$(WIN_GOMP_A)),)
+WIN_OPENMP = -fopenmp
+WIN_STATIC = -static
+else ifneq ($(filter-out libgomp.dll.a,$(WIN_GOMP_DLL_A)),)
+WIN_OPENMP = -fopenmp
+WIN_STATIC = -static-libgcc
+else
+$(warning libgomp link library not found in this MinGW toolchain: building without OpenMP)
+WIN_OPENMP =
+WIN_STATIC =
+endif
+# The engines use pthreads even when OpenMP is unavailable, so keep the
+# winpthreads compile/link option independent of the optional libgomp flags.
+CFLAGS  += -pthread
+LDFLAGS = -lm -pthread $(WIN_OPENMP) $(WIN_STATIC) -lpsapi $(EXTRA_LDFLAGS)
 ifeq ($(LTO),1)
 CFLAGS  += -flto
 LDFLAGS += -flto
@@ -439,6 +460,18 @@ ifeq ($(COLI_V4_SUPPORTED),1)
 TEST_BINS += tests/test_deepseek_v4$(EXE) tests/test_v4_ownership$(EXE)
 endif
 
+# tests/test_qwen36_i4_kernel.c is x86-intrinsics-only (<immintrin.h>): it
+# cannot compile on ARM. The ARM integer-kernel gate is test_int_kernel_exact.c
+# with the NEON branches live (oracle-arm job in .github/workflows/ci.yml).
+ifeq (,$(X86_64))
+TEST_EXCLUDE += test_qwen36_i4_kernel
+endif
+# tests/test_expert_telemetry.c captures via open_memstream, which MinGW UCRT
+# does not provide. The byte-identity pin stays gated on Linux/macOS.
+ifneq (,$(IS_WIN))
+TEST_EXCLUDE += test_expert_telemetry
+endif
+
 # Windows CUDA/HIP DLL path: host links the loader, NOT cudart or amdhip64.
 # (CUDA_DLL/HIP_DLL mutual exclusion is enforced at the HIP_DLL declaration.)
 ifneq ($(IS_WIN),)
@@ -626,6 +659,27 @@ endif
 # phony targets — 'glm' kept for backward compatibility
 colibri: colibri$(EXE)
 glm: colibri$(EXE)
+
+# Bare-name aliases so `make olmoe` / `make qwen36` / `make inkling` /
+# `make kimi_k3` resolve to the explicit multi-object rules on platforms where
+# $(EXE) is non-empty (Windows): CI's "Build every engine" loop uses the bare
+# names, and without these make falls back to the built-in single-.c rule,
+# which fails to link the expert backend objects (undefined reference to
+# coli_expert_backend_pread_* / coli_admission_*). Mirrors the colibri alias above.
+olmoe: olmoe$(EXE)
+qwen36: qwen36$(EXE)
+inkling: inkling$(EXE)
+kimi_k3: kimi_k3$(EXE)
+# On EXE platforms the bare name must not fall through to the built-in
+# single-.c implicit rule after the alias builds the .exe -- that rule would
+# link a second, extensionless binary without the backend objects and fail.
+# .PHONY suppresses implicit-rule search for the bare name.
+# (On EXE-empty platforms the alias is a plain self-dependency, dropped with
+# the same circular warning the colibri alias already emits, and normal
+# freshness checks apply.)
+ifneq ($(EXE),)
+.PHONY: olmoe qwen36 inkling kimi_k3
+endif
 
 # Config stamp: make only tracks file timestamps, not flag changes. Without this,
 # `make colibri.exe CUDA_DLL=1` after a prior CPU-only build reports "up to date"
