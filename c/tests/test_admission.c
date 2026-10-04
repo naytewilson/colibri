@@ -3,7 +3,7 @@
  * Mock store with artificial load latency + failure injection exercises:
  * hit path, miss->load->publish, coalescing window (concurrent publisher),
  * fail-fast BUSY, batch dedupe + orchestration + bounded parallelism
- * (timing-bounded), prefetch ordering determinism, default-OFF config.
+ * (overlap-gated), prefetch ordering determinism, default-OFF config.
  */
 
 #include "../admission.h"
@@ -205,6 +205,55 @@ static double now_ms(void) {
     return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
 }
 
+typedef struct {
+    MockState *store;
+    pthread_mutex_t mx;
+    pthread_cond_t cv;
+    int target;
+    int entered;
+    int active;
+    int max_active;
+    int released;
+    int timed_out;
+} ParallelGate;
+
+/* Hold loader calls until the expected number overlap. The bounded timeout
+ * turns a serialization regression into a test failure instead of a hang;
+ * otherwise the check observes concurrency directly and does not depend on
+ * scheduler speed or wall-clock ratios. */
+static int mock_parallel_fill(void *userdata, const ColiExpertCoreKey *key,
+                              ColiExpertReservation *res) {
+    (void)key;
+    ParallelGate *gate = (ParallelGate *)userdata;
+    pthread_mutex_lock(&gate->mx);
+    gate->entered++;
+    gate->active++;
+    if (gate->active > gate->max_active) gate->max_active = gate->active;
+    if (gate->active >= gate->target) {
+        gate->released = 1;
+        pthread_cond_broadcast(&gate->cv);
+    }
+    if (!gate->released) {
+        struct timespec deadline;
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec += 2;
+        while (!gate->released) {
+            if (pthread_cond_timedwait(&gate->cv, &gate->mx, &deadline) != 0) {
+                gate->timed_out = 1;
+                gate->released = 1;
+                pthread_cond_broadcast(&gate->cv);
+            }
+        }
+    }
+    gate->active--;
+    pthread_mutex_unlock(&gate->mx);
+
+    if (gate->store->fail_loads) return -1;
+    if (res->segments && res->segment_count > 0 && res->segments[0].data)
+        memset(res->segments[0].data, 0x7e, res->segments[0].bytes);
+    return 0;
+}
+
 static const ColiExpertStoreOps g_mock_ops = {
     mock_lookup, mock_release, NULL, mock_stats, mock_destroy,
     mock_reserve, mock_publish, mock_abort, NULL, NULL, NULL,
@@ -272,73 +321,43 @@ int main(void) {
         for (int i = 0; i < 6; i++) coli_expert_release(&store, &views[i]);
     }
 
-    /* bounded parallelism: 4 unique misses x 50ms loads.
-     * Timing-sensitive: on a shared CI runner, scheduling jitter can push a
-     * wave past an absolute bound even when the parallelism is correct. So
-     * the bounds are RELATIVE to a single-miss latency measured on this
-     * machine in the same attempt: max_parallel=2 must take ~2 waves
-     * (1.5x..3.2x of one miss) and max_parallel=4 must take ~1 wave
-     * (< 1.8x of one miss). A real parallelism regression still fails every
-     * attempt -- serialized loads take ~4x (fails the upper bound), a cap
-     * stuck at 2 takes ~2x on the second batch (fails the <1.8x bound) --
-     * and the physical-load counter proves every attempt measured misses,
-     * not cache hits. Attempts use fresh keys; the key sets avoid keys
-     * earlier/later blocks rely on (K(0,0), K(1,1), K(2,0..2), K(3,3),
-     * K(1,5)). */
-    ms.load_sleep_ms = 50;
+    /* bounded parallelism: use fresh misses and block inside the mock loader
+     * until max_parallel calls overlap. This verifies max_parallel=2 and 4
+     * directly without a timing threshold that varies with CI scheduling. */
     {
-        static const int base[3][2] = {{0, 4}, {1, 6}, {2, 4}}; /* {layer, expert-lo} */
-        int timing_ok = 0;
-        for (int attempt = 0; attempt < 3 && !timing_ok; attempt++) {
-            int L = base[attempt][0], E = base[attempt][1];
+        static const int base[2][2] = {{0, 4}, {1, 6}}; /* {layer, expert-lo} */
+        static const int limits[2] = {2, 4};
+        for (int test = 0; test < 2; test++) {
+            int L = base[test][0], E = base[test][1], limit = limits[test];
+            ParallelGate gate;
+            memset(&gate, 0, sizeof(gate));
+            gate.store = &ms;
+            gate.target = limit;
+            pthread_mutex_init(&gate.mx, NULL);
+            pthread_cond_init(&gate.cv, NULL);
+
             ColiExpertStoreStats ss0, ss1;
             mock_stats(&store, &ss0);
-
-            /* single-miss latency on this machine, right now */
-            ColiExpertKey k1 = K(L, E + 8);
-            ColiExpertView v1 = {0};
-            ColiAdmissionConfig pcfg1 = {0};
-            ColiAdmission *pa1 = coli_admission_new(&store, mock_fill, &ms, &pcfg1);
-            double t1 = now_ms();
-            int ok = coli_admission_acquire_batch(pa1, &k1, 1, &v1) == 1;
-            double w1 = now_ms() - t1;
-            coli_expert_release(&store, &v1);
-            coli_admission_free(pa1);
-
             ColiExpertKey keys[4] = {K(L, E), K(L, E+1), K(L, E+2), K(L, E+3)};
             ColiExpertView views[4] = {{0}};
             ColiAdmissionConfig pcfg = {0};
-            pcfg.max_parallel = 2;
-            ColiAdmission *pa = coli_admission_new(&store, mock_fill, &ms, &pcfg);
-            t1 = now_ms();
-            ok = ok && coli_admission_acquire_batch(pa, keys, 4, views) == 4;
-            double wall2 = now_ms() - t1;
+            pcfg.max_parallel = limit;
+            ColiAdmission *pa = coli_admission_new(&store, mock_parallel_fill,
+                                                   &gate, &pcfg);
+            int ok = coli_admission_acquire_batch(pa, keys, 4, views);
             for (int i = 0; i < 4; i++) coli_expert_release(&store, &views[i]);
             coli_admission_free(pa);
-
-            ColiAdmissionConfig pcfg4 = {0};
-            pcfg4.max_parallel = 4;
-            ColiExpertKey keys2[4] = {K(L, E+4), K(L, E+5), K(L, E+6), K(L, E+7)};
-            ColiExpertView views2[4] = {{0}};
-            ColiAdmission *pa4 = coli_admission_new(&store, mock_fill, &ms, &pcfg4);
-            t1 = now_ms();
-            ok = ok && coli_admission_acquire_batch(pa4, keys2, 4, views2) == 4;
-            double wall4 = now_ms() - t1;
-            for (int i = 0; i < 4; i++) coli_expert_release(&store, &views2[i]);
-            coli_admission_free(pa4);
-
             mock_stats(&store, &ss1);
-            uint64_t loads = ss1.physical_loads - ss0.physical_loads;
-            timing_ok = ok && w1 > 0.0 && loads == 9 /* 1 + 4 + 4, all misses */
-                             && wall2 > 1.5 * w1 && wall2 < 3.2 * w1 /* ~2 waves */
-                             && wall4 < 1.8 * w1;                    /* ~1 wave */
-            if (!timing_ok)
-                fprintf(stderr, "admission timing attempt %d: w1=%.1f loads=%llu wall2=%.1f wall4=%.1f\n",
-                        attempt, w1, (unsigned long long)loads, wall2, wall4);
+
+            CHECK(ok == 4);
+            CHECK(!gate.timed_out);
+            CHECK(gate.entered == 4);
+            CHECK(gate.max_active == limit);
+            CHECK(ss1.physical_loads - ss0.physical_loads == 4);
+            pthread_cond_destroy(&gate.cv);
+            pthread_mutex_destroy(&gate.mx);
         }
-        CHECK(timing_ok);
     }
-    ms.load_sleep_ms = 0;
 
     /* prefetch ordering: deterministic sort + dedupe */
     {
